@@ -36,15 +36,20 @@ source structure (chapter 23.1 build rule 2).
 - [x] **1F — walking scenario.** AgentRuntime (generation-guarded
   activations; async provider dispatch in its own process; stale completions
   rejected and never settled) + SessionRuntime (owns its agent; forwards
-  turn events) under a factory supervisor (factory → session → agent).
+  turn events) under a keyed supervisor (supervisor → session → agent).
   Sessions re-register after registry restart without losing their live
   runtime. Provider workers are cancelled on owner death via an isolated
   guardian, while adapter crashes remain contained.
-  Operator surface: start_session / submit / turn events.
+  Operator surface: start_session / open_session / submit / turn events.
   **The 23.1F gate is met and tested:** user turn → durable user record →
   plan → provider response → durable assistant record + attempt receipt →
   restart → identical canonical history; stale completion settles nothing;
   second turn appends with branch-local sequences.
+  Explicit reopen by durable session ID selects the persisted branch and
+  current host config, preserves history and receipts, and does not replay
+  provider work. Concurrent/repeated opens share one live owner even during
+  registry loss. A restarted host can reopen that same session and append
+  another turn without creating a new session or branch.
 
 ## Layout
 
@@ -62,9 +67,9 @@ src/successor/
 ## Development
 
 ```bash
-gleam test    # 52 tests: 1A gate, 1B durable contracts, 1C provenance/compat,
+gleam test    # 62 tests: 1A gate, 1B durable contracts, 1C provenance/compat,
               # provider/context units, 1F walking/stale gates, review regressions,
-              # and real supervised lifecycle/recovery tests
+              # real supervised lifecycle/recovery tests, and durable-session reopen tests
 gleam run     # (no main yet — the host binary arrives with the operator wire surface)
 ```
 

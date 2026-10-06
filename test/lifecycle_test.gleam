@@ -1,6 +1,5 @@
 import gleam/erlang/atom.{type Atom}
 import gleam/erlang/process
-import gleam/otp/factory_supervisor as factory
 import successor/agent
 import successor/app
 import successor/config
@@ -8,6 +7,7 @@ import successor/ids
 import successor/provider
 import successor/registry
 import successor/session
+import successor/session_supervisor as factory
 import successor/store
 
 pub fn registry_restart_recovers_live_session_mapping_test() {
@@ -199,7 +199,7 @@ fn supervised_session(host: app.Started, adapter: provider.Adapter) {
   let reply = process.new_subject()
   process.send(host.store, store.CreateSession("custom", reply))
   let assert Ok(Ok(record)) = process.receive(reply, 5000)
-  let assert Ok(started) =
+  let assert Ok(_) =
     factory.start_child(
       host.sessions,
       session.Spec(
@@ -212,7 +212,10 @@ fn supervised_session(host: app.Started, adapter: provider.Adapter) {
         registry: host.registry,
       ),
     )
-  #(session.agent_subject(started.data), started.data)
+  #(
+    session.agent_subject(wait_session(host, record.id, 100)),
+    wait_session(host, record.id, 100),
+  )
 }
 
 fn await_down(monitor: process.Monitor) {

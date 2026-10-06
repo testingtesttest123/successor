@@ -6,7 +6,7 @@
 ////   root (one_for_one)
 ////   ├── DeploymentStore worker   (single durable writer)
 ////   ├── Operator worker          (single operator authority)
-////   ├── Session supervisor       (empty until 1F)
+////   ├── Session supervisor       (keyed by durable session ID)
 ////   └── Provider supervisor      (empty until 1D)
 ////
 //// Zero configured providers is a valid, cleanly startable state.
@@ -17,8 +17,8 @@
 //// caller with it, and `stop` cannot leak the tree either.
 
 import gleam/erlang/process.{type Pid, type Subject, ExitMessage}
+import gleam/list
 import gleam/otp/actor
-import gleam/otp/factory_supervisor as factory
 import gleam/otp/static_supervisor as supervisor
 import gleam/otp/supervision
 import successor/agent
@@ -31,6 +31,7 @@ import successor/provider
 import successor/providers/mock
 import successor/registry
 import successor/session
+import successor/session_supervisor
 import successor/store
 
 pub type Started {
@@ -40,7 +41,7 @@ pub type Started {
     operator: Subject(operator.Msg),
     /// Turn events from every session (host observer).
     events: Subject(agent.TurnEvent),
-    sessions: factory.Supervisor(session.Spec, Subject(session.Msg)),
+    sessions: session_supervisor.Supervisor,
     registry: Subject(registry.Msg(session.Msg)),
     config: Config,
     deployment: DeploymentId,
@@ -80,11 +81,7 @@ pub fn start(
         })
 
       let sessions_child =
-        supervision.worker(fn() {
-          factory_supervisor_start(sessions_name, fn(spec: session.Spec) {
-            session.start(spec: spec)
-          })
-        })
+        supervision.supervisor(fn() { session_supervisor.start(sessions_name) })
 
       let registry_child =
         supervision.worker(fn() { registry_start(registry_name) })
@@ -117,7 +114,7 @@ pub fn start(
   }
 }
 
-/// Create a session and start its runtime under the session factory.
+/// Create a session and start its runtime under the session supervisor.
 /// Returns the durable SessionId: the identity callers hold, never a
 /// pid-bound handle. Resolve to a live handle via `session_of`.
 pub fn start_session(
@@ -144,7 +141,7 @@ pub fn start_session(
           events: host.events,
           registry: host.registry,
         )
-      case factory.start_child(host.sessions, spec) {
+      case session_supervisor.start_child(host.sessions, spec) {
         Ok(_started) -> Ok(s.id)
         Error(_) -> Error("session runtime failed to start")
       }
@@ -183,9 +180,7 @@ fn start_under_keeper(
   store_name: process.Name(store.Msg),
   operator_name: process.Name(operator.Msg),
   events: Subject(agent.TurnEvent),
-  sessions_name: process.Name(
-    factory.Message(session.Spec, Subject(session.Msg)),
-  ),
+  sessions_name: process.Name(session_supervisor.Msg),
   registry_name: process.Name(registry.Msg(session.Msg)),
   adapter: provider.Adapter,
   model: String,
@@ -219,7 +214,7 @@ fn start_under_keeper(
           store: process.named_subject(store_name),
           operator: process.named_subject(operator_name),
           events: events,
-          sessions: factory.get_by_name(sessions_name),
+          sessions: session_supervisor.get_by_name(sessions_name),
           registry: process.named_subject(registry_name),
           config: config,
           deployment: store.deployment(process.named_subject(store_name)),
@@ -288,9 +283,75 @@ fn registry_start(
   }
 }
 
-fn factory_supervisor_start(
-  name: process.Name(factory.Message(session.Spec, Subject(session.Msg))),
-  template: fn(session.Spec) -> actor.StartResult(Subject(session.Msg)),
-) -> actor.StartResult(factory.Supervisor(session.Spec, Subject(session.Msg))) {
-  factory.start(factory.worker_child(template) |> factory.named(name))
+/// Reopen an exact durable session without creating catalog/branch entries
+/// or replaying work. The persisted branch selects history; the current
+/// host configuration selects the provider. Lookup the live handle through
+/// `session_of`, including after later runtime/registry restarts.
+pub fn open_session(
+  host host: Started,
+  session id: ids.SessionId,
+) -> Result(ids.SessionId, OpenSessionError) {
+  case registry.connect(host.store) {
+    Error(_) -> Error(StoreUnavailable)
+    Ok(endpoint) -> {
+      let reply = process.new_subject()
+      process.send(endpoint, store.GetSession(id, reply))
+      case process.receive(reply, 10_000) {
+        Error(_) -> Error(StoreUnavailable)
+        Ok(Error(error)) -> Error(DurableStore(error))
+        Ok(Ok(saved)) -> open_saved_session(host, saved)
+      }
+    }
+  }
+}
+
+pub type OpenSessionError {
+  DurableStore(db.StoreError)
+  StoreUnavailable
+  RuntimeRestarting
+  RuntimeUnavailable
+  RuntimeFailed(String)
+}
+
+fn open_saved_session(host: Started, saved: db.Session) {
+  // Validate the selected branch belongs to this session. A corrupt pointer
+  // must never silently reset to main or create a new branch.
+  case registry.connect(host.store) {
+    Error(_) -> Error(StoreUnavailable)
+    Ok(endpoint) -> {
+      let reply = process.new_subject()
+      process.send(endpoint, store.ListBranches(saved.id, reply))
+      case process.receive(reply, 10_000) {
+        Error(_) -> Error(StoreUnavailable)
+        Ok(Error(error)) -> Error(DurableStore(error))
+        Ok(Ok(branches)) ->
+          case
+            list.any(branches, fn(branch) { branch.id == saved.current_branch })
+          {
+            False ->
+              Error(DurableStore(db.Corrupt("selected branch is missing")))
+            True -> {
+              let spec =
+                session.Spec(
+                  session: saved.id,
+                  branch: saved.current_branch,
+                  store: host.store,
+                  adapter: host_adapter(host),
+                  model: "successor-model",
+                  events: host.events,
+                  registry: host.registry,
+                )
+              case session_supervisor.start_child(host.sessions, spec) {
+                Ok(_) -> Ok(saved.id)
+                Error(session_supervisor.Restarting) -> Error(RuntimeRestarting)
+                Error(session_supervisor.Unavailable) ->
+                  Error(RuntimeUnavailable)
+                Error(session_supervisor.StartFailed(reason)) ->
+                  Error(RuntimeFailed(reason))
+              }
+            }
+          }
+      }
+    }
+  }
 }

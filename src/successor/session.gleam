@@ -1,8 +1,8 @@
 //// SessionRuntime (chapter 23.1A/1F): the durable session's live owner.
 ////
-//// One session runtime per open session (spawned under the session factory
+//// One session runtime per open session (spawned under the keyed session
 //// supervisor). It owns its AgentRuntime child and forwards turn events to
-//// the host observer. Session state lives in the actor; the factory
+//// the host observer. Session state lives in the actor; the session
 //// supervisor restarts it (and it re-anchors to the same durable session).
 
 import gleam/erlang/process.{type Monitor, type Subject}
@@ -45,8 +45,8 @@ pub type Spec {
   )
 }
 
-/// Start under the session factory supervisor. The agent child is spawned in
-/// the initialiser, so ownership is: factory -> session -> agent.
+/// Start under the keyed session supervisor. The agent child is spawned in
+/// the initialiser, so ownership is: supervisor -> session -> agent.
 pub fn start(spec spec: Spec) -> actor.StartResult(Subject(Msg)) {
   let builder =
     actor.new_with_initialiser(10_000, fn(subject) {

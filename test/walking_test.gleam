@@ -55,7 +55,8 @@ pub fn walking_turn_persists_and_survives_restart_test() {
   // is byte-for-byte the same (ids/sequences/kinds/payloads — timestamps
   // are not contractual, chapter 23.1F).
   let assert Ok(host2) = app.start(config.default(data_dir: dir), events)
-  let assert Ok(_) = app.start_session(host2, name: "walking")
+  let assert Ok(reopened) = app.open_session(host2, session: sid)
+  assert reopened == sid
   let assert Ok(records2) =
     session.records(
       host2.store,
@@ -63,6 +64,18 @@ pub fn walking_turn_persists_and_survives_restart_test() {
       branch: assistant.branch,
     )
   assert canonical_before == canonical(records2)
+  assert records2 == records
+  let assert Ok(resumed) = app.session_of(host2, sid)
+  let assert Ok(_) = session.submit(resumed, text: "after restart")
+  let assert agent.TurnCompleted(completed_id, _, next) =
+    await_completed(host2.events, 15_000)
+  assert completed_id == sid
+  assert next.branch == assistant.branch
+  let assert Ok([saved_user, saved_assistant, next_user, next_assistant]) =
+    session.records(host2.store, session: sid, branch: assistant.branch)
+  assert saved_user == user
+  assert saved_assistant == assistant_record
+  assert [next_user.sequence, next_assistant.sequence] == [3, 4]
   app.stop(host2)
 }
 
