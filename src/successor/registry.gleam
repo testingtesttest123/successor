@@ -4,7 +4,9 @@
 //// caller held before the restart is dead. The registry gives callers a
 //// handle that resolves through durable IDENTITY instead: lookups by key
 //// always reach the current incarnation, because each incarnation registers
-//// itself on startup. Generic over the handle type — no cycles.
+//// itself on startup and re-registers after registry death. Recovery is
+//// eventual during a restart; lookup returns Error while unavailable.
+//// Generic over the handle type — no cycles.
 
 import gleam/dict
 import gleam/erlang/process.{type Name, type Subject}
@@ -48,10 +50,20 @@ pub fn lookup(
   registry: Subject(Msg(handle)),
   key key: String,
 ) -> Result(Subject(handle), Nil) {
-  let reply = process.new_subject()
-  process.send(registry, Lookup(key, reply))
-  case process.receive(reply, 5000) {
-    Ok(result) -> result
+  case connect(registry) {
     Error(_) -> Error(Nil)
+    Ok(endpoint) -> {
+      let reply = process.new_subject()
+      process.send(endpoint, Lookup(key, reply))
+      case process.receive(reply, 5000) {
+        Ok(result) -> result
+        Error(_) -> Error(Nil)
+      }
+    }
   }
 }
+
+/// Pin the named address to one incarnation. Sending through this subject
+/// remains safe if the name disappears or changes before the send.
+@external(erlang, "successor_ffi", "subject_snapshot")
+pub fn connect(subject: Subject(a)) -> Result(Subject(a), Nil)

@@ -37,6 +37,9 @@ source structure (chapter 23.1 build rule 2).
   activations; async provider dispatch in its own process; stale completions
   rejected and never settled) + SessionRuntime (owns its agent; forwards
   turn events) under a factory supervisor (factory → session → agent).
+  Sessions re-register after registry restart without losing their live
+  runtime. Provider workers are cancelled on owner death via an isolated
+  guardian, while adapter crashes remain contained.
   Operator surface: start_session / submit / turn events.
   **The 23.1F gate is met and tested:** user turn → durable user record →
   plan → provider response → durable assistant record + attempt receipt →
@@ -59,8 +62,9 @@ src/successor/
 ## Development
 
 ```bash
-gleam test    # 37 tests: 1A gate, 1B durable contracts, 1C provenance/compat,
-              # provider/context units, and the 1F walking + stale gates
+gleam test    # 52 tests: 1A gate, 1B durable contracts, 1C provenance/compat,
+              # provider/context units, 1F walking/stale gates, review regressions,
+              # and real supervised lifecycle/recovery tests
 gleam run     # (no main yet — the host binary arrives with the operator wire surface)
 ```
 

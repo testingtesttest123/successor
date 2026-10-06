@@ -328,10 +328,11 @@ pub fn session_identity_survives_reincarnation_test() {
   let assert Ok(sid) = app.start_session(host, name: "reincarnate")
   let assert Ok(first) = app.session_of(host, sid)
 
-  // Start a second incarnation of the same session (what a factory restart
-  // produces): it registers itself, and the SAME identity resolves to it.
-  let assert Ok(sess) = app.session_of(host, sid)
-  let _ = first
+  // Kill the real supervised child and wait for a different registered pid.
+  // Looking up twice without killing it never exercised reincarnation.
+  let assert Ok(old_pid) = process.subject_owner(first)
+  process.kill(old_pid)
+  let sess = await_reincarnation(host, sid, old_pid, 100)
   // Submit through the resolved handle: it is alive and serving.
   let assert Ok(_) = session.submit(sess, text: "alive")
   let assert agent.TurnCompleted(_, _, _) = await_completed(host.events)
@@ -400,4 +401,33 @@ fn tmp_db() -> String {
 
 fn tmp_dir() -> String {
   "/tmp/" <> ids.fresh(prefix: "successor-reviewtest")
+}
+
+fn await_reincarnation(
+  host: app.Started,
+  sid: ids.SessionId,
+  old: process.Pid,
+  tries: Int,
+) -> Subject(session.Msg) {
+  case app.session_of(host, sid) {
+    Ok(subject) -> {
+      let assert Ok(pid) = process.subject_owner(subject)
+      case pid != old {
+        True -> subject
+        False -> retry_reincarnation(host, sid, old, tries)
+      }
+    }
+    _ -> retry_reincarnation(host, sid, old, tries)
+  }
+}
+
+fn retry_reincarnation(
+  host: app.Started,
+  sid: ids.SessionId,
+  old: process.Pid,
+  tries: Int,
+) -> Subject(session.Msg) {
+  assert tries > 0
+  process.sleep(10)
+  await_reincarnation(host, sid, old, tries - 1)
 }

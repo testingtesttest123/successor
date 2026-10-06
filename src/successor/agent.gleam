@@ -448,9 +448,9 @@ fn settle(
 
 // --- helpers --------------------------------------------------------------
 
-/// The dispatch runs UNLINKED: its death is observed via monitor, and it can
-/// never take the agent down with it.
-@external(erlang, "successor_ffi", "spawn_unlinked")
+/// The dispatch is linked to a guardian, not the agent. The guardian kills
+/// it when its owner dies; adapter crashes cannot take the agent down.
+@external(erlang, "successor_ffi", "spawn_owned")
 fn spawn_dispatch(running: fn() -> anything) -> Pid
 
 fn ask_store(
