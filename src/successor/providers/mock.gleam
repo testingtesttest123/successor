@@ -36,7 +36,10 @@ pub fn adapter(settings settings: MockSettings) -> provider.Adapter {
 pub fn from_config(cfg: config.ProviderConfig) -> provider.Adapter {
   case cfg {
     MockProvider(_id, echo_on, response) ->
-      adapter(settings: MockSettings(echo_mode: echo_on, default_response: response))
+      adapter(settings: MockSettings(
+        echo_mode: echo_on,
+        default_response: response,
+      ))
   }
 }
 
@@ -51,11 +54,17 @@ fn complete(
   // Deterministic usage: ~4 chars per token, in the spirit of the reference
   // mock's estimate and stable as a fixture.
   let output_tokens = string.length(text) / 4 + 1
-  let input_tokens = list.fold(request.messages, 0, fn(acc, m) { acc + message_chars(m) }) / 4 + 1
+  let input_tokens =
+    list.fold(request.messages, 0, fn(acc, m) { acc + message_chars(m) })
+    / 4
+    + 1
   Ok(provider.Response(
     stop_reason: provider.EndTurn,
     blocks: [TextBlock(text)],
-    usage: provider.Usage(input_tokens: input_tokens, output_tokens: output_tokens),
+    usage: provider.Usage(
+      input_tokens: input_tokens,
+      output_tokens: output_tokens,
+    ),
     // The mock holds no provider-private state: every continuation is Fresh.
     continuation: provider.Fresh,
   ))
@@ -101,4 +110,3 @@ pub fn response_text(r: Response) -> String {
     _ -> ""
   }
 }
-

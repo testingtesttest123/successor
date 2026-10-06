@@ -17,11 +17,14 @@ import successor/session
 // activation/generation never settles into history.
 
 pub fn walking_turn_persists_and_survives_restart_test() {
+  let events = process.new_subject()
   let dir = tmp_dir()
-  let assert Ok(host) = app.start(config.default(data_dir: dir))
+  let assert Ok(host) = app.start(config.default(data_dir: dir), events)
 
-  // Create + open a session through the operator surface.
-  let assert Ok(sess) = app.start_session(host, name: "walking")
+  // Create + open a session through the operator surface; hold the durable
+  // identity, resolve the live handle through the registry.
+  let assert Ok(sid) = app.start_session(host, name: "walking")
+  let assert Ok(sess) = app.session_of(host, sid)
 
   // Submit one user turn.
   let assert Ok(_activation) = session.submit(sess, text: "hello successor")
@@ -32,7 +35,11 @@ pub fn walking_turn_persists_and_survives_restart_test() {
 
   // Canonical history: exactly [user, assistant], echo content, sequences 1,2.
   let assert Ok(records) =
-    session.records(host.store, session: assistant.session, branch: assistant.branch)
+    session.records(
+      host.store,
+      session: assistant.session,
+      branch: assistant.branch,
+    )
   let assert [user, assistant_record] = records
   assert user.kind == "user"
   assert assistant_record.kind == "assistant"
@@ -47,23 +54,30 @@ pub fn walking_turn_persists_and_survives_restart_test() {
   // Restart on the same data dir: the original session's canonical history
   // is byte-for-byte the same (ids/sequences/kinds/payloads — timestamps
   // are not contractual, chapter 23.1F).
-  let assert Ok(host2) = app.start(config.default(data_dir: dir))
+  let assert Ok(host2) = app.start(config.default(data_dir: dir), events)
   let assert Ok(_) = app.start_session(host2, name: "walking")
   let assert Ok(records2) =
-    session.records(host2.store, session: assistant.session, branch: assistant.branch)
+    session.records(
+      host2.store,
+      session: assistant.session,
+      branch: assistant.branch,
+    )
   assert canonical_before == canonical(records2)
   app.stop(host2)
 }
 
 pub fn stale_completion_never_settles_test() {
+  let events = process.new_subject()
   let dir = tmp_dir()
-  let assert Ok(host) = app.start(config.default(data_dir: dir))
-  let assert Ok(sess) = app.start_session(host, name: "stale")
+  let assert Ok(host) = app.start(config.default(data_dir: dir), events)
+  let assert Ok(sid) = app.start_session(host, name: "stale")
+  let assert Ok(sess) = app.session_of(host, sid)
   let agent_subject = session.agent_subject(sess)
 
   // Turn one: completes normally.
   let assert Ok(_a1) = session.submit(sess, text: "first")
-  let assert agent.TurnCompleted(_, _, r1) = await_completed(host.events, 15_000)
+  let assert agent.TurnCompleted(_, _, r1) =
+    await_completed(host.events, 15_000)
 
   let assert Ok(records_before) =
     session.records(host.store, session: r1.session, branch: r1.branch)
@@ -88,14 +102,18 @@ pub fn stale_completion_never_settles_test() {
 }
 
 pub fn second_turn_appends_test() {
+  let events = process.new_subject()
   let dir = tmp_dir()
-  let assert Ok(host) = app.start(config.default(data_dir: dir))
-  let assert Ok(sess) = app.start_session(host, name: "two-turns")
+  let assert Ok(host) = app.start(config.default(data_dir: dir), events)
+  let assert Ok(sid) = app.start_session(host, name: "two-turns")
+  let assert Ok(sess) = app.session_of(host, sid)
 
   let assert Ok(_) = session.submit(sess, text: "one")
-  let assert agent.TurnCompleted(_, _, r1) = await_completed(host.events, 15_000)
+  let assert agent.TurnCompleted(_, _, r1) =
+    await_completed(host.events, 15_000)
   let assert Ok(_) = session.submit(sess, text: "two")
-  let assert agent.TurnCompleted(_, _, r2) = await_completed(host.events, 15_000)
+  let assert agent.TurnCompleted(_, _, _r2) =
+    await_completed(host.events, 15_000)
 
   let assert Ok(records) =
     session.records(host.store, session: r1.session, branch: r1.branch)
@@ -108,7 +126,10 @@ pub fn second_turn_appends_test() {
 // --- helpers --------------------------------------------------------------
 
 /// Await a TurnCompleted, failing loudly on TurnFailed.
-fn await_completed(events: process.Subject(agent.TurnEvent), timeout: Int) -> agent.TurnEvent {
+fn await_completed(
+  events: process.Subject(agent.TurnEvent),
+  timeout: Int,
+) -> agent.TurnEvent {
   case process.receive(events, timeout) {
     Ok(agent.TurnCompleted(_, _, _) as done) -> done
     Ok(agent.TurnStarted(_, _)) -> await_completed(events, timeout)

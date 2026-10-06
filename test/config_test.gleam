@@ -4,7 +4,8 @@ import successor/config
 // errors, never silently projected away.
 
 pub fn default_config_is_valid_test() {
-  let assert Ok(_) = config.validate(config.default(data_dir: "/tmp/some-store"))
+  let assert Ok(_) =
+    config.validate(config.default(data_dir: "/tmp/some-store"))
 }
 
 pub fn empty_data_dir_is_rejected_test() {

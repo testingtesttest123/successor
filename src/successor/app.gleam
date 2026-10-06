@@ -18,17 +18,18 @@
 
 import gleam/erlang/process.{type Pid, type Subject, ExitMessage}
 import gleam/otp/actor
+import gleam/otp/factory_supervisor as factory
 import gleam/otp/static_supervisor as supervisor
 import gleam/otp/supervision
-import gleam/otp/factory_supervisor as factory
 import successor/agent
 import successor/config.{type Config}
-import successor/provider
 import successor/db
 import successor/ids.{type DeploymentId}
 import successor/logging
 import successor/operator
+import successor/provider
 import successor/providers/mock
+import successor/registry
 import successor/session
 import successor/store
 
@@ -40,20 +41,24 @@ pub type Started {
     /// Turn events from every session (host observer).
     events: Subject(agent.TurnEvent),
     sessions: factory.Supervisor(session.Spec, Subject(session.Msg)),
+    registry: Subject(registry.Msg(session.Msg)),
     config: Config,
     deployment: DeploymentId,
   )
 }
 
-pub fn start(config config: Config) -> Result(Started, String) {
+pub fn start(
+  config config: Config,
+  events events: Subject(agent.TurnEvent),
+) -> Result(Started, String) {
   case config.validate(config) {
     Error(e) -> Error(e)
     Ok(_) -> {
       let store_name = process.new_name(prefix: "successor_store")
       let operator_name = process.new_name(prefix: "successor_operator")
-      let events = process.new_subject()
-      let sessions_name =
-        process.new_name(prefix: "successor_sessions")
+      let sessions_name = process.new_name(prefix: "successor_sessions")
+      let registry_name: process.Name(registry.Msg(session.Msg)) =
+        process.new_name(prefix: "successor_registry")
       let adapter = provider_from(config)
       let model = "successor-model"
 
@@ -76,32 +81,49 @@ pub fn start(config config: Config) -> Result(Started, String) {
 
       let sessions_child =
         supervision.worker(fn() {
-          factory_supervisor_start(
-            sessions_name,
-            fn(spec: session.Spec) { session.start(spec: spec) },
-          )
+          factory_supervisor_start(sessions_name, fn(spec: session.Spec) {
+            session.start(spec: spec)
+          })
         })
+
+      let registry_child =
+        supervision.worker(fn() { registry_start(registry_name) })
 
       let tree =
         supervisor.new(supervisor.OneForOne)
         |> supervisor.add(store_child)
         |> supervisor.add(operator_child)
         |> supervisor.add(sessions_child)
+        |> supervisor.add(registry_child)
         // Provider supervisor slot (adapter children arrive with Phase 2).
-        |> supervisor.add(supervision.supervisor(fn() {
-          supervisor.new(supervisor.OneForOne) |> supervisor.start
-        }))
+        |> supervisor.add(
+          supervision.supervisor(fn() {
+            supervisor.new(supervisor.OneForOne) |> supervisor.start
+          }),
+        )
 
-      start_under_keeper(tree, store_name, operator_name, events, sessions_name, adapter, model, config)
+      start_under_keeper(
+        tree,
+        store_name,
+        operator_name,
+        events,
+        sessions_name,
+        registry_name,
+        adapter,
+        model,
+        config,
+      )
     }
   }
 }
 
 /// Create a session and start its runtime under the session factory.
+/// Returns the durable SessionId: the identity callers hold, never a
+/// pid-bound handle. Resolve to a live handle via `session_of`.
 pub fn start_session(
   host host: Started,
   name name: String,
-) -> Result(Subject(session.Msg), String) {
+) -> Result(ids.SessionId, String) {
   let reply = process.new_subject()
   process.send(host.store, store.CreateSession(name, reply))
   let created = case process.receive(reply, 10_000) {
@@ -120,13 +142,23 @@ pub fn start_session(
           adapter: host_adapter(host),
           model: "successor-model",
           events: host.events,
+          registry: host.registry,
         )
       case factory.start_child(host.sessions, spec) {
-        Ok(started) -> Ok(started.data)
+        Ok(_started) -> Ok(s.id)
         Error(_) -> Error("session runtime failed to start")
       }
     }
   }
+}
+
+/// Resolve a session id to its CURRENT runtime handle. Survives restarts of
+/// the session runtime: each incarnation registers itself on startup.
+pub fn session_of(
+  host host: Started,
+  session session: ids.SessionId,
+) -> Result(Subject(session.Msg), Nil) {
+  registry.lookup(host.registry, key: session.value)
 }
 
 fn host_adapter(host: Started) -> provider.Adapter {
@@ -151,7 +183,10 @@ fn start_under_keeper(
   store_name: process.Name(store.Msg),
   operator_name: process.Name(operator.Msg),
   events: Subject(agent.TurnEvent),
-  sessions_name: process.Name(factory.Message(session.Spec, Subject(session.Msg))),
+  sessions_name: process.Name(
+    factory.Message(session.Spec, Subject(session.Msg)),
+  ),
+  registry_name: process.Name(registry.Msg(session.Msg)),
   adapter: provider.Adapter,
   model: String,
   config: Config,
@@ -159,7 +194,7 @@ fn start_under_keeper(
   let ack = process.new_subject()
 
   let _keeper =
-    process.spawn(fn() {
+    spawn_unlinked(fn() {
       // Trap BEFORE starting the tree: the supervisor's exit arrives as a
       // message instead of killing this process.
       process.trap_exits(True)
@@ -185,6 +220,7 @@ fn start_under_keeper(
           operator: process.named_subject(operator_name),
           events: events,
           sessions: factory.get_by_name(sessions_name),
+          registry: process.named_subject(registry_name),
           config: config,
           deployment: store.deployment(process.named_subject(store_name)),
         )
@@ -227,6 +263,9 @@ pub fn stop(host host: Started) -> Nil {
 @external(erlang, "successor_ffi", "stop_gen_server")
 fn stop_gen_server(pid: Pid) -> Nil
 
+@external(erlang, "successor_ffi", "spawn_unlinked")
+fn spawn_unlinked(running: fn() -> anything) -> Pid
+
 fn operator_provider_count(host: Started) -> Int {
   let operator.HealthReport(_, providers, _) = operator.health(host.operator)
   providers
@@ -240,11 +279,18 @@ fn describe_reason(reason: process.ExitReason) -> String {
   }
 }
 
+fn registry_start(
+  name: process.Name(registry.Msg(session.Msg)),
+) -> actor.StartResult(Subject(registry.Msg(session.Msg))) {
+  case registry.start(name: name) {
+    Ok(started) -> Ok(started)
+    Error(e) -> Error(e)
+  }
+}
+
 fn factory_supervisor_start(
   name: process.Name(factory.Message(session.Spec, Subject(session.Msg))),
   template: fn(session.Spec) -> actor.StartResult(Subject(session.Msg)),
 ) -> actor.StartResult(factory.Supervisor(session.Spec, Subject(session.Msg))) {
-  factory.start(
-    factory.worker_child(template) |> factory.named(name),
-  )
+  factory.start(factory.worker_child(template) |> factory.named(name))
 }

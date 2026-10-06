@@ -6,10 +6,10 @@
 //// byte-faithful. No compression at this phase (chapter 22.6 context group).
 
 import gleam/bit_array
+import gleam/crypto
 import gleam/dynamic/decode as ddecode
 import gleam/int
 import gleam/json
-import gleam/crypto
 import gleam/list
 import gleam/string
 import successor/db.{type Record}
@@ -40,7 +40,10 @@ pub type ContextPlan {
 }
 
 /// Compile a plan for the given records under the policy.
-pub fn plan(policy policy: Policy, records records: List(Record)) -> ContextPlan {
+pub fn plan(
+  policy policy: Policy,
+  records records: List(Record),
+) -> ContextPlan {
   case policy {
     Passthrough -> passthrough(records)
   }

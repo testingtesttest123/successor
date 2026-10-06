@@ -67,7 +67,8 @@ fn check_provider_ids(
     [] -> Ok(Nil)
     [MockProvider(id, ..), ..rest] ->
       case id == "" || list_contains(seen, id) {
-        True -> Error("config: provider ids must be non-empty and unique: " <> id)
+        True ->
+          Error("config: provider ids must be non-empty and unique: " <> id)
         False -> check_provider_ids(rest, [id, ..seen])
       }
   }

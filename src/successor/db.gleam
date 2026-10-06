@@ -70,7 +70,8 @@ pub type Record {
   )
 }
 
-const ddl = "
+const ddl =
+  "
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -141,28 +142,119 @@ CREATE TABLE IF NOT EXISTS blobs (
 
 /// Open (creating if needed) the store at `path` and prepare the schema.
 /// Reopening an existing store must yield the identical durable view.
+/// An INCOMPATIBLE database is never modified: the schema version is probed
+/// read-only BEFORE any DDL runs, so a store written by a different schema
+/// version is refused byte-for-byte untouched.
 pub fn open(path path: String) -> Result(sqlight.Connection, StoreError) {
   ensure_parent_dir(path)
   use conn <- result.try(
     sqlight.open(path) |> result.map_error(fn(e) { OpenFailed(describe(e)) }),
   )
+  case probe_schema_state(conn) {
+    Error(e) -> {
+      let _ = sqlight.close(conn)
+      Error(e)
+    }
+    Ok(StoreIsCompatible) ->
+      case ensure_deployment(conn) {
+        Ok(deployment) -> {
+          logging.info(name: "store.open", fields: [
+            logging.field("path", path),
+            logging.field("deployment", deploy_to_string(deployment)),
+          ])
+          Ok(conn)
+        }
+        Error(e) -> {
+          let _ = sqlight.close(conn)
+          Error(e)
+        }
+      }
+    Ok(StoreIsFresh) -> initialize(conn, path)
+    Ok(StoreIsIncompatible(found)) -> {
+      let _ = sqlight.close(conn)
+      Error(Corrupt(
+        "schema version "
+        <> found
+        <> ", expected "
+        <> int.to_string(schema_version)
+        <> " — database left unmodified",
+      ))
+    }
+    Ok(StoreIsBroken(detail)) -> {
+      let _ = sqlight.close(conn)
+      Error(Corrupt(detail))
+    }
+  }
+}
+
+type SchemaState {
+  StoreIsFresh
+  StoreIsCompatible
+  StoreIsIncompatible(found: String)
+  StoreIsBroken(detail: String)
+}
+
+/// Read-only probe: does a `meta` table exist, and if so which version?
+/// No writes happen here — that is the whole point.
+fn probe_schema_state(
+  conn: sqlight.Connection,
+) -> Result(SchemaState, StoreError) {
+  let meta_table =
+    sqlight.query(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'meta'",
+      on: conn,
+      with: [],
+      expecting: decode.at([0], decode.string),
+    )
+  case meta_table {
+    Error(e) -> Error(OpenFailed(describe(e)))
+    Ok([]) -> Ok(StoreIsFresh)
+    Ok(_) ->
+      case
+        sqlight.query(
+          "SELECT value FROM meta WHERE key = 'schema_version'",
+          on: conn,
+          with: [],
+          expecting: decode.at([0], decode.string),
+        )
+      {
+        Ok([v]) ->
+          case v == int.to_string(schema_version) {
+            True -> Ok(StoreIsCompatible)
+            False -> Ok(StoreIsIncompatible(v))
+          }
+        Ok([]) ->
+          Ok(StoreIsBroken("meta table exists without a schema_version row"))
+        Ok(_) -> Ok(StoreIsBroken("duplicate schema_version rows"))
+        Error(e) -> Error(Corrupt(describe(e)))
+      }
+  }
+}
+
+/// DDL + version stamp + deployment, only ever on a store we determined is
+/// fresh (or empty).
+fn initialize(
+  conn: sqlight.Connection,
+  path: String,
+) -> Result(sqlight.Connection, StoreError) {
   case sqlight.exec(ddl, on: conn) {
     Error(e) -> {
       let _ = sqlight.close(conn)
       Error(OpenFailed(describe(e)))
     }
     Ok(_) ->
-      case check_and_set_schema_version(conn) {
+      case stamp_schema_version(conn) {
+        Error(e) -> {
+          let _ = sqlight.close(conn)
+          Error(e)
+        }
         Ok(_) ->
           case ensure_deployment(conn) {
             Ok(deployment) -> {
-              logging.info(
-                name: "store.open",
-                fields: [
-                  logging.field("path", path),
-                  logging.field("deployment", deploy_to_string(deployment)),
-                ],
-              )
+              logging.info(name: "store.open", fields: [
+                logging.field("path", path),
+                logging.field("deployment", deploy_to_string(deployment)),
+              ])
               Ok(conn)
             }
             Error(e) -> {
@@ -170,10 +262,6 @@ pub fn open(path path: String) -> Result(sqlight.Connection, StoreError) {
               Error(e)
             }
           }
-        Error(e) -> {
-          let _ = sqlight.close(conn)
-          Error(e)
-        }
       }
   }
 }
@@ -183,41 +271,14 @@ pub fn close(conn: sqlight.Connection) -> Nil {
   Nil
 }
 
-fn check_and_set_schema_version(
-  conn: sqlight.Connection,
-) -> Result(Nil, StoreError) {
-  let found =
-    sqlight.query(
-      "SELECT value FROM meta WHERE key = 'schema_version'",
-      on: conn,
-      with: [],
-      expecting: decode.at([0], decode.string),
-    )
-  case found {
-    Ok([v]) ->
-      case v == int.to_string(schema_version) {
-        True -> Ok(Nil)
-        False ->
-          Error(Corrupt(
-            "schema version " <> v <> ", expected "
-            <> int.to_string(schema_version),
-          ))
-      }
-    Ok([]) ->
-      case
-        sqlight.exec(
-          "INSERT INTO meta (key, value) VALUES ('schema_version', '"
-          <> int.to_string(schema_version)
-          <> "')",
-          on: conn,
-        )
-      {
-        Ok(_) -> Ok(Nil)
-        Error(e) -> Error(Corrupt(describe(e)))
-      }
-    Ok(_) -> Error(Corrupt("duplicate schema_version rows"))
-    Error(e) -> Error(Corrupt(describe(e)))
-  }
+fn stamp_schema_version(conn: sqlight.Connection) -> Result(Nil, StoreError) {
+  sqlight.exec(
+    "INSERT INTO meta (key, value) VALUES ('schema_version', '"
+      <> int.to_string(schema_version)
+      <> "')",
+    on: conn,
+  )
+  |> result.map_error(fn(e) { Corrupt(describe(e)) })
 }
 
 /// Exactly one deployment per host (chapter 20.8). Created on first boot and
@@ -317,15 +378,44 @@ pub fn create_session(
   }
 }
 
-/// Create a branch. `at` is the branch point in the PARENT's numbering; the
-/// new branch's head equals the branch point (inherited view) or 0 for an
-/// empty root. The parent must exist and the point must not exceed its head.
+/// Create a FRESH branch: it owns nothing and its owned-record sequence
+/// space starts at 1.
 pub fn create_branch(
   conn: sqlight.Connection,
   session session: SessionId,
   name name: String,
+) -> Result(Branch, StoreError) {
+  case name {
+    "" -> Error(Invalid("branch name must not be empty"))
+    _ -> {
+      let id = ids.new_branch_id()
+      insert_branch(
+        conn,
+        Branch(
+          id: id,
+          session: session,
+          name: name,
+          parent: None,
+          branch_point: None,
+          head_sequence: 0,
+        ),
+      )
+    }
+  }
+}
+
+/// Fork a branch at a point in the PARENT's numbering. Semantics are
+/// EXPLICIT and consistent: the fork's owned records CONTINUE the parent's
+/// sequence space (first owned sequence = branch_point + 1), matching the
+/// inherited-view contract; the inherited history itself stays owned by the
+/// parent branch and is addressed through it. The point must not exceed the
+/// parent's head (branch-head referential integrity).
+pub fn fork_branch(
+  conn: sqlight.Connection,
+  session session: SessionId,
+  name name: String,
   parent parent: BranchId,
-  at at: Option(Int),
+  at at: Int,
 ) -> Result(Branch, StoreError) {
   case name {
     "" -> Error(Invalid("branch name must not be empty"))
@@ -333,9 +423,15 @@ pub fn create_branch(
       case get_branch(conn, session, parent) {
         Error(e) -> Error(e)
         Ok(parent_branch) ->
-          case validate_branch_point(parent_branch, at) {
-            Error(e) -> Error(e)
-            Ok(head) -> {
+          case at >= 0 && at <= parent_branch.head_sequence {
+            False ->
+              Error(Invalid(
+                "branch point "
+                <> int.to_string(at)
+                <> " exceeds parent head "
+                <> int.to_string(parent_branch.head_sequence),
+              ))
+            True -> {
               let id = ids.new_branch_id()
               insert_branch(
                 conn,
@@ -344,8 +440,8 @@ pub fn create_branch(
                   session: session,
                   name: name,
                   parent: Some(parent),
-                  branch_point: at,
-                  head_sequence: head,
+                  branch_point: Some(at),
+                  head_sequence: at,
                 ),
               )
             }
@@ -356,25 +452,6 @@ pub fn create_branch(
 
 /// A branch point beyond the parent's head would reference a record that does
 /// not exist: branch-head referential integrity (chapter 23.1B).
-fn validate_branch_point(
-  parent: Branch,
-  at: Option(Int),
-) -> Result(Int, StoreError) {
-  case at {
-    None -> Ok(0)
-    Some(point) ->
-      case point >= 0 && point <= parent.head_sequence {
-        True -> Ok(point)
-        False ->
-          Error(Invalid(
-            "branch point " <> int.to_string(point)
-            <> " exceeds parent head "
-            <> int.to_string(parent.head_sequence),
-          ))
-      }
-  }
-}
-
 /// Append a record to a branch and move that branch's head in the same
 /// transaction. The sequence is branch-local and assigned here, so a crash
 /// between the append and the head update is impossible by construction.
@@ -506,7 +583,9 @@ pub fn find_session_by_name(
   }
 }
 
-pub fn list_sessions(conn: sqlight.Connection) -> Result(List(Session), StoreError) {
+pub fn list_sessions(
+  conn: sqlight.Connection,
+) -> Result(List(Session), StoreError) {
   case
     sqlight.query(
       "SELECT id, name, created_at_ms, current_branch_id FROM sessions ORDER BY created_at_ms",
@@ -731,7 +810,10 @@ fn insert_branch_tx(
         sqlight.text(branch_to_string(branch.id)),
         sqlight.text(session_to_string(branch.session)),
         sqlight.text(branch.name),
-        sqlight.nullable(sqlight.text, option.map(branch.parent, branch_to_string)),
+        sqlight.nullable(
+          sqlight.text,
+          option.map(branch.parent, branch_to_string),
+        ),
         sqlight.nullable(sqlight.int, branch.branch_point),
         sqlight.int(branch.head_sequence),
         sqlight.int(logging.now_ms()),
@@ -784,16 +866,14 @@ fn session_decoder() -> decode.Decoder(Session) {
 
 fn branch_decoder() -> decode.Decoder(Branch) {
   let nullable_string_at = fn(i: Int) {
-    decode.one_of(
-      decode.map(decode.at([i], decode.string), Some),
-      or: [decode.success(None)],
-    )
+    decode.one_of(decode.map(decode.at([i], decode.string), Some), or: [
+      decode.success(None),
+    ])
   }
   let nullable_int_at = fn(i: Int) {
-    decode.one_of(
-      decode.map(decode.at([i], decode.int), Some),
-      or: [decode.success(None)],
-    )
+    decode.one_of(decode.map(decode.at([i], decode.int), Some), or: [
+      decode.success(None),
+    ])
   }
   {
     use id <- decode.then(decode.at([0], decode.string))

@@ -6,25 +6,20 @@
 //// reply subjects; the actor never shares the connection.
 
 import gleam/erlang/process.{type Name, type Subject}
-import gleam/option.{type Option}
+import gleam/option.{type Option, None, Some}
 
 import gleam/otp/actor
-import successor/db.{
-  type Branch, type Record, type Session, type StoreError,
-}
+import sqlight
+import successor/db.{type Branch, type Record, type Session, type StoreError}
 import successor/ids.{type BranchId, type SessionId}
 import successor/logging
-import sqlight
 
 pub type Msg {
   Shutdown(reply: Subject(Nil))
   Deployment(reply: Subject(ids.DeploymentId))
   CreateSession(name: String, reply: Subject(Result(Session, StoreError)))
   GetSession(id: SessionId, reply: Subject(Result(Session, StoreError)))
-  FindSessionByName(
-    name: String,
-    reply: Subject(Result(Session, StoreError)),
-  )
+  FindSessionByName(name: String, reply: Subject(Result(Session, StoreError)))
   ListSessions(reply: Subject(Result(List(Session), StoreError)))
   CreateBranch(
     session: SessionId,
@@ -155,10 +150,20 @@ fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
       actor.continue(state)
     }
     CreateBranch(session, name, parent, at, reply) -> {
-      process.send(
-        reply,
-        db.create_branch(state.conn, session: session, name: name, parent: parent, at: at),
-      )
+      // None = fresh branch (own sequence space from 1); Some(n) = fork at a
+      // point in the parent's numbering (owned records continue n+1, ...).
+      let outcome = case at {
+        None -> db.create_branch(state.conn, session: session, name: name)
+        Some(point) ->
+          db.fork_branch(
+            state.conn,
+            session: session,
+            name: name,
+            parent: parent,
+            at: point,
+          )
+      }
+      process.send(reply, outcome)
       actor.continue(state)
     }
     ListBranches(session, reply) -> {
@@ -168,7 +173,13 @@ fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
     AppendRecord(session, branch, kind, payload, reply) -> {
       process.send(
         reply,
-        db.append_record(state.conn, session: session, branch: branch, kind: kind, payload: payload),
+        db.append_record(
+          state.conn,
+          session: session,
+          branch: branch,
+          kind: kind,
+          payload: payload,
+        ),
       )
       actor.continue(state)
     }

@@ -6,8 +6,8 @@
 //// claiming the same domain. Provider-specific reasoning representation is
 //// sensitive data and stays inside the capsule.
 
-import gleam/option.{type Option}
 import gleam/erlang/process.{type Subject}
+import gleam/option.{type Option}
 import successor/ids.{type ProviderAttemptId}
 
 // --- canonical content ----------------------------------------------------

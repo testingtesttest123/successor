@@ -12,14 +12,12 @@ import successor/db
 import successor/ids.{type BranchId, type SessionId}
 import successor/logging
 import successor/provider.{type Adapter}
+import successor/registry
 import successor/store
 
 pub type Msg {
   /// A session-actor request.
-  SubmitUserText(
-    text: String,
-    reply: Subject(Result(ids.ActivationId, String)),
-  )
+  SubmitUserText(text: String, reply: Subject(Result(ids.ActivationId, String)))
   /// The agent child's turn events, selected into this mailbox.
   FromAgent(agent.TurnEvent)
   /// Operator capability: which agent owns this session (future cancel /
@@ -36,6 +34,9 @@ pub type Spec {
     model: String,
     /// Host-level turn observer.
     events: Subject(agent.TurnEvent),
+    /// Every incarnation registers itself on startup, so identity-based
+    /// lookups survive factory restarts.
+    registry: Subject(registry.Msg(Msg)),
   )
 }
 
@@ -46,6 +47,11 @@ pub fn start(spec spec: Spec) -> actor.StartResult(Subject(Msg)) {
     actor.new_with_initialiser(10_000, fn(subject) {
       // The session selects its agent child's events into its own mailbox.
       let agent_events = process.new_subject()
+      // Register BEFORE serving: lookups never see an unregistered incarnation.
+      process.send(
+        spec.registry,
+        registry.Register(key: spec.session.value, subject: subject),
+      )
       case
         agent.start(spec: agent.Spec(
           session: spec.session,
@@ -146,7 +152,10 @@ pub fn records(
   branch branch: BranchId,
 ) -> Result(List(db.Record), String) {
   let reply = process.new_subject()
-  process.send(store, store.ListRecords(session: session, branch: branch, reply: reply))
+  process.send(
+    store,
+    store.ListRecords(session: session, branch: branch, reply: reply),
+  )
   case process.receive(reply, 10_000) {
     Ok(Ok(records)) -> Ok(records)
     Ok(Error(_)) -> Error("store error")

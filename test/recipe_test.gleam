@@ -51,7 +51,8 @@ pub fn reference_recipe_mock_settings_test() {
     "{ \"agent\": { \"name\": \"a\", \"provider\": \"mock\","
     <> " \"mock\": { \"echoMode\": false, \"defaultResponse\": \"canned\" } } }"
   let assert Ok(outcome) = recipe.read_reference_recipe(text: recipe_text)
-  let assert [config.MockProvider(_, False, "canned")] = outcome.config.providers
+  let assert [config.MockProvider(_, False, "canned")] =
+    outcome.config.providers
 }
 
 pub fn reference_recipe_rejects_unsupported_provider_test() {
@@ -87,5 +88,7 @@ fn has_provenance(
   field field: String,
   source source: recipe.Source,
 ) -> Bool {
-  list.any(provenance, fn(p: recipe.Provenance) { p.field == field && p.source == source })
+  list.any(provenance, fn(p: recipe.Provenance) {
+    p.field == field && p.source == source
+  })
 }

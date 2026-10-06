@@ -11,7 +11,10 @@ import gleam/dict
 import gleam/dynamic/decode
 import gleam/json
 import gleam/list
-import successor/config.{type Config, type ProviderConfig, MockProvider, OperatorBinding}
+import gleam/string
+import successor/config.{
+  type Config, type ProviderConfig, MockProvider, OperatorBinding,
+}
 
 pub type Source {
   Defaults
@@ -24,13 +27,36 @@ pub type Provenance {
 }
 
 pub type LoadOutcome {
-  LoadOutcome(config: Config, provenance: List(Provenance), warnings: List(String))
+  LoadOutcome(
+    config: Config,
+    provenance: List(Provenance),
+    warnings: List(String),
+  )
 }
 
 pub type LoadError {
   MalformedJson(String)
   UnknownField(String)
   InvalidValue(String)
+}
+
+/// Wrap a decoder so that object KEYS outside `known` make the whole decode
+/// fail with the first offending name. Strictness is the normal schema's
+/// contract: unknown fields are errors, never silently projected away
+/// (chapter 20.3 class C).
+fn reject_unknown(
+  known: List(String),
+  inner: decode.Decoder(t),
+) -> decode.Decoder(t) {
+  use keys <- decode.then(decode.dict(decode.string, decode.dynamic))
+  use value <- decode.then(inner)
+  let offenders =
+    dict.keys(keys)
+    |> list.filter(fn(k) { !list.contains(known, k) })
+  case offenders {
+    [] -> decode.success(value)
+    [first, ..] -> decode.failure(value, "known-field:" <> first)
+  }
 }
 
 // --- canonical schema (strict) ---------------------------------------------
@@ -41,14 +67,50 @@ pub type LoadError {
 ///   "providers": [ { "id": "mock", "kind": "mock",
 ///                    "echoMode": true, "defaultResponse": "..." } ]
 /// }
+pub const known_top_level = ["dataDir", "operator", "providers"]
+
+pub const known_operator = ["host", "port"]
+
+pub const known_provider = ["id", "kind", "echoMode", "defaultResponse"]
+
+// Compatibility-reader allowlists (reference recipe subset).
+pub const known_recipe_top_level = ["name", "agent", "modules"]
+
+pub const known_recipe_agent = ["name", "provider", "systemPrompt", "mock"]
+
+pub const known_recipe_mock = ["echoMode", "defaultResponse"]
+
 pub fn from_json(text text: String) -> Result(LoadOutcome, LoadError) {
-  case json.parse(from: text, using: strict_decoder()) {
-    Error(_) -> Error(MalformedJson("could not parse canonical config"))
+  case
+    json.parse(
+      from: text,
+      using: reject_unknown(known_top_level, strict_decoder()),
+    )
+  {
+    Error(json.UnableToDecode(errors)) -> Error(decode_error_kind(errors))
+    Error(_) -> Error(MalformedJson("could not parse config"))
     Ok(#(cfg, provenance)) ->
       case config.validate(cfg) {
         Error(e) -> Error(InvalidValue(e))
-        Ok(_) -> Ok(LoadOutcome(config: cfg, provenance: provenance, warnings: []))
+        Ok(_) ->
+          Ok(LoadOutcome(config: cfg, provenance: provenance, warnings: []))
       }
+  }
+}
+
+/// Map decode failures to their load-error class: unknown-field markers from
+/// `reject_unknown` become UnknownField, everything else is malformed input.
+fn decode_error_kind(errors: List(decode.DecodeError)) -> LoadError {
+  case
+    list.filter_map(errors, fn(e: decode.DecodeError) {
+      case string.starts_with(e.expected, "known-field:") {
+        True -> Ok(string.drop_start(e.expected, 12))
+        False -> Error(Nil)
+      }
+    })
+  {
+    [field, ..] -> UnknownField(field)
+    [] -> MalformedJson("could not parse config")
   }
 }
 
@@ -61,11 +123,7 @@ fn strict_decoder() -> decode.Decoder(#(Config, List(Provenance))) {
   )
   use providers <- decode.optional_field("providers", [], provider_decoder())
   let cfg =
-    config.Config(
-      data_dir: data_dir,
-      operator: operator,
-      providers: providers,
-    )
+    config.Config(data_dir: data_dir, operator: operator, providers: providers)
   let provenance = [
     Provenance("dataDir", source_of(data_dir, "")),
     Provenance("operator", source_of_operator(operator)),
@@ -75,9 +133,11 @@ fn strict_decoder() -> decode.Decoder(#(Config, List(Provenance))) {
 }
 
 fn operator_decoder() -> decode.Decoder(config.OperatorBinding) {
-  use host <- decode.optional_field("host", "127.0.0.1", decode.string)
-  use port <- decode.optional_field("port", 0, decode.int)
-  decode.success(OperatorBinding(host: host, port: port))
+  reject_unknown(known_operator, {
+    use host <- decode.optional_field("host", "127.0.0.1", decode.string)
+    use port <- decode.optional_field("port", 0, decode.int)
+    decode.success(OperatorBinding(host: host, port: port))
+  })
 }
 
 fn provider_decoder() -> decode.Decoder(List(ProviderConfig)) {
@@ -85,20 +145,30 @@ fn provider_decoder() -> decode.Decoder(List(ProviderConfig)) {
 }
 
 fn provider_item_decoder() -> decode.Decoder(ProviderConfig) {
-  use id <- decode.field("id", decode.string)
-  use kind <- decode.field("kind", decode.string)
-  case kind {
-    "mock" -> {
-      use echo_on <- decode.optional_field("echoMode", True, decode.bool)
-      use response <- decode.optional_field(
-        "defaultResponse",
-        "This is a mock response from the test adapter.",
-        decode.string,
-      )
-      decode.success(MockProvider(id: id, echo_mode: echo_on, default_response: response))
+  reject_unknown(known_provider, {
+    use id <- decode.field("id", decode.string)
+    use kind <- decode.field("kind", decode.string)
+    case kind {
+      "mock" -> {
+        use echo_on <- decode.optional_field("echoMode", True, decode.bool)
+        use response <- decode.optional_field(
+          "defaultResponse",
+          "This is a mock response from the test adapter.",
+          decode.string,
+        )
+        decode.success(MockProvider(
+          id: id,
+          echo_mode: echo_on,
+          default_response: response,
+        ))
+      }
+      _ ->
+        decode.failure(
+          MockProvider(id: id, echo_mode: True, default_response: ""),
+          "mock provider",
+        )
     }
-    _ -> decode.failure(MockProvider(id: id, echo_mode: True, default_response: ""), "mock provider")
-  }
+  })
 }
 
 fn source_of(value: String, empty: String) -> Source {
@@ -131,8 +201,16 @@ fn source_of_providers(providers: List(ProviderConfig)) -> Source {
 /// module key is reported as a warning (accepted-but-not-modeled). Unknown
 /// AGENT-level fields are ERRORS — the compat path accepts legacy SHAPE, it
 /// does not reproduce permissive legacy VALIDATION.
-pub fn read_reference_recipe(text text: String) -> Result(LoadOutcome, LoadError) {
-  case json.parse(from: text, using: recipe_decoder()) {
+pub fn read_reference_recipe(
+  text text: String,
+) -> Result(LoadOutcome, LoadError) {
+  case
+    json.parse(
+      from: text,
+      using: reject_unknown(known_recipe_top_level, recipe_decoder()),
+    )
+  {
+    Error(json.UnableToDecode(errors)) -> Error(decode_error_kind(errors))
     Error(_) -> Error(MalformedJson("could not parse reference recipe"))
     Ok(#(cfg, warnings)) ->
       case config.validate(cfg) {
@@ -146,7 +224,11 @@ pub fn read_reference_recipe(text text: String) -> Result(LoadOutcome, LoadError
               _ -> Recipe
             }),
           ]
-          Ok(LoadOutcome(config: cfg, provenance: provenance, warnings: warnings))
+          Ok(LoadOutcome(
+            config: cfg,
+            provenance: provenance,
+            warnings: warnings,
+          ))
         }
       }
   }
@@ -159,11 +241,16 @@ fn recipe_decoder() -> decode.Decoder(#(Config, List(String))) {
   let #(providers, agent_warnings) = agent
   let data_dir = "data"
   let module_warnings =
-    list.map(modules, fn(m: String) { "recipe module accepted, not modeled: " <> m })
+    list.map(modules, fn(m: String) {
+      "recipe module accepted, not modeled: " <> m
+    })
   let agent_and_modules = list.append(agent_warnings, module_warnings)
   let warnings = case name {
     "" -> agent_and_modules
-    _ -> ["recipe.name accepted (display metadata): " <> name, ..agent_and_modules]
+    _ -> [
+      "recipe.name accepted (display metadata): " <> name,
+      ..agent_and_modules
+    ]
   }
   decode.success(#(
     config.Config(
@@ -176,27 +263,37 @@ fn recipe_decoder() -> decode.Decoder(#(Config, List(String))) {
 }
 
 fn agent_decoder() -> decode.Decoder(#(List(ProviderConfig), List(String))) {
-  use name <- decode.field("name", decode.string)
-  use provider_kind <- decode.field("provider", decode.string)
-  use system <- decode.optional_field("systemPrompt", "", decode.string)
-  use mock_block <- decode.optional_field(
-    "mock",
-    #(True, "This is a mock response from the test adapter."),
-    mock_decoder(),
-  )
-  let #(echo_on, response) = mock_block
-  case provider_kind {
-    "mock" ->
-      decode.success(#(
-        [MockProvider(id: name, echo_mode: echo_on, default_response: response)],
-        [system_prompt_warning(system)],
-      ))
-    other ->
-      decode.failure(
-        #([], ["unsupported recipe provider: " <> other]),
-        "reference recipe provider",
-      )
-  }
+  reject_unknown(known_recipe_agent, {
+    use name <- decode.field("name", decode.string)
+    use provider_kind <- decode.field("provider", decode.string)
+    use system <- decode.optional_field("systemPrompt", "", decode.string)
+    use mock_block <- decode.optional_field(
+      "mock",
+      #(True, "This is a mock response from the test adapter."),
+      mock_decoder(),
+    )
+    let #(echo_on, response) = mock_block
+    case provider_kind {
+      "mock" ->
+        decode.success(
+          #(
+            [
+              MockProvider(
+                id: name,
+                echo_mode: echo_on,
+                default_response: response,
+              ),
+            ],
+            [system_prompt_warning(system)],
+          ),
+        )
+      other ->
+        decode.failure(
+          #([], ["unsupported recipe provider: " <> other]),
+          "reference recipe provider",
+        )
+    }
+  })
 }
 
 fn system_prompt_warning(system: String) -> String {
@@ -207,13 +304,15 @@ fn system_prompt_warning(system: String) -> String {
 }
 
 fn mock_decoder() -> decode.Decoder(#(Bool, String)) {
-  use echo_on <- decode.optional_field("echoMode", True, decode.bool)
-  use response <- decode.optional_field(
-    "defaultResponse",
-    "This is a mock response from the test adapter.",
-    decode.string,
-  )
-  decode.success(#(echo_on, response))
+  reject_unknown(known_recipe_mock, {
+    use echo_on <- decode.optional_field("echoMode", True, decode.bool)
+    use response <- decode.optional_field(
+      "defaultResponse",
+      "This is a mock response from the test adapter.",
+      decode.string,
+    )
+    decode.success(#(echo_on, response))
+  })
 }
 
 fn module_decoder() -> decode.Decoder(List(String)) {

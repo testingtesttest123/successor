@@ -31,7 +31,8 @@ pub fn event(name name: String, fields fields: List(Field)) -> Nil {
     fields
     |> list.map(fn(f: Field) { f.key <> "=" <> quote(f.value) })
     |> string.join(" ")
-  let prefix = "[successor] ts=" <> int.to_string(now_ms()) <> " event=" <> quote(name)
+  let prefix =
+    "[successor] ts=" <> int.to_string(now_ms()) <> " event=" <> quote(name)
   case rendered {
     "" -> io_println_error(prefix)
     _ -> io_println_error(prefix <> " " <> rendered)
@@ -54,7 +55,9 @@ pub fn error(name name: String, fields fields: List(Field)) -> Nil {
 }
 
 fn quote(value: String) -> String {
-  case string.contains(value, " ") || string.contains(value, "=") || value == "" {
+  case
+    string.contains(value, " ") || string.contains(value, "=") || value == ""
+  {
     True -> "\"" <> value <> "\""
     False -> value
   }

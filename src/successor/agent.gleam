@@ -1,20 +1,24 @@
 //// AgentRuntime (chapter 23.1A/1F): executes one turn at a time.
 ////
-//// A turn: durable user record -> ContextPlan -> durable provider-attempt
-//// intent -> async provider call -> completion carrying full identity
-//// (attempt + activation + generation) -> durable assistant record +
-//// attempt completion. Completions that do not match the CURRENT
-//// activation/generation are rejected and never settle into history
-//// (chapter 23.1F gate). All state lives in this actor — no global mutable
-//// maps reconstruct it (chapter 23.1F gate).
+//// A turn: durable user record -> history read -> ContextPlan -> durable
+//// provider-attempt INTENT (the call may not proceed if the intent cannot
+//// be saved) -> provider call in an unlinked monitored process -> completion
+//// carrying full identity (attempt + activation + generation) -> durable
+//// assistant record -> durable terminal receipt (only a turn whose receipt
+//// was saved reports TurnCompleted). Completions that do not match the
+//// CURRENT activation/generation are rejected and never settle into history
+//// (chapter 23.1F gate). Every failure path reports honestly — a failed
+//// history read must never silently become empty model context, and a turn
+//// whose receipt was not durably recorded is reported as failed/uncertain,
+//// never completed.
 ////
 //// Durability ownership: every durable write goes through the
-//// DeploymentStore actor. The agent never touches the database itself.
+//// DeploymentStore actor. All state lives in this actor — no global mutable
+//// maps reconstruct it.
 
-import gleam/erlang/process.{type Subject}
+import gleam/erlang/process.{type Monitor, type Pid, type Subject, ProcessDown}
 import gleam/json
 import gleam/option.{type Option, None, Some}
-import gleam/result
 import gleam/otp/actor
 import successor/context.{Passthrough}
 import successor/db
@@ -36,6 +40,11 @@ pub type Msg {
     generation: Int,
     result: Result(provider.Response, Failure),
   )
+  /// The dispatch process died without delivering a completion: treat as
+  /// outcome-unknown failure for the matching activation only.
+  DispatchDown(pid: Pid)
+  /// Monitor noise from ports (this host creates none) — ignored.
+  DownIgnored
 }
 
 /// Turn events delivered to the session/host observer.
@@ -50,7 +59,13 @@ pub type TurnEvent {
 }
 
 type Active {
-  Active(activation: ActivationId, generation: Int, attempt: ProviderAttemptId)
+  Active(
+    activation: ActivationId,
+    generation: Int,
+    attempt: ProviderAttemptId,
+    dispatch: Pid,
+    monitor: Monitor,
+  )
 }
 
 type State {
@@ -82,6 +97,18 @@ pub type Spec {
 pub fn start(spec spec: Spec) -> Result(Subject(Msg), String) {
   let builder =
     actor.new_with_initialiser(10_000, fn(subject) {
+      // Own-subject + monitor messages: provider dispatches run unlinked, so
+      // a crashing adapter cannot kill the agent, and a dead dispatch is
+      // observed as a Down, not a silence.
+      let selector =
+        process.new_selector()
+        |> process.select_map(subject, fn(m: Msg) { m })
+        |> process.select_monitors(fn(down: process.Down) {
+          case down {
+            ProcessDown(_, pid, _) -> DispatchDown(pid)
+            _ -> DownIgnored
+          }
+        })
       Ok(
         actor.initialised(State(
           self: subject,
@@ -94,6 +121,7 @@ pub fn start(spec spec: Spec) -> Result(Subject(Msg), String) {
           generation: 0,
           active: None,
         ))
+        |> actor.selecting(selector)
         |> actor.returning(subject),
       )
     })
@@ -121,7 +149,7 @@ fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
       }
     ProviderDone(attempt, activation, generation, result) -> {
       let stale = case state.active {
-        Some(Active(a, g, _)) -> a != activation || g != generation
+        Some(Active(a, g, _, _, _)) -> a != activation || g != generation
         None -> True
       }
       case stale {
@@ -136,6 +164,46 @@ fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
         False -> settle(state, attempt, activation, result)
       }
     }
+    DownIgnored -> actor.continue(state)
+    DispatchDown(pid) -> {
+      // Only the CURRENT dispatch's death fails the turn; stale downs are
+      // noise from already-settled generations.
+      let matches = case state.active {
+        Some(Active(_, _, _, dispatch, _)) -> dispatch == pid
+        None -> False
+      }
+      case matches {
+        False -> actor.continue(state)
+        True -> {
+          let assert Some(Active(activation, _, attempt, _, monitor)) =
+            state.active
+          process.demonitor_process(monitor)
+          let cleared = State(..state, active: None)
+          let _ =
+            ask_store(cleared.store, fn(r) {
+              store.CompleteAttempt(
+                id: attempt,
+                status: "aborted",
+                usage_input: None,
+                usage_output: None,
+                reply: r,
+              )
+            })
+          logging.warn(name: "agent.dispatch_died", fields: [
+            logging.field("activation", activation.value),
+          ])
+          emit(
+            cleared.events,
+            TurnFailed(
+              cleared.session,
+              activation,
+              "provider dispatch died before completing",
+            ),
+          )
+          actor.continue(cleared)
+        }
+      }
+    }
   }
 }
 
@@ -146,11 +214,9 @@ fn start_turn(
 ) -> actor.Next(State, Msg) {
   // 1. Durable user record first (chapter 23.1F required path).
   let user_payload =
-    json.to_string(
-      json.array([provider.TextBlock(user_text)], encode_block),
-    )
+    json.to_string(json.array([provider.TextBlock(user_text)], encode_block))
   case
-    ask_store(state.store, fn(r: Subject(Result(db.Record, db.StoreError))) {
+    ask_store(state.store, fn(r) {
       store.AppendRecord(
         session: state.session,
         branch: state.branch,
@@ -165,33 +231,70 @@ fn start_turn(
       actor.continue(state)
     }
     Ok(_user_record) -> {
-      let generation = state.generation + 1
-      let activation = ids.new_activation_id()
-      let attempt = ids.new_provider_attempt_id()
-      // 2. Context plan over the whole tail (passthrough).
-      let records_result = ask_store(
-        state.store,
-        fn(r: Subject(Result(List(db.Record), db.StoreError))) {
-          store.ListRecords(session: state.session, branch: state.branch, reply: r)
-        },
+      // 2. History read. A failed read must NEVER become empty model
+      // context: the turn fails here instead.
+      case read_history(state) {
+        Error(e) -> {
+          process.send(reply, Error(e))
+          actor.continue(state)
+        }
+        Ok(records) -> {
+          let generation = state.generation + 1
+          let activation = ids.new_activation_id()
+          let attempt = ids.new_provider_attempt_id()
+          dispatch_turn(state, records, generation, activation, attempt, reply)
+        }
+      }
+    }
+  }
+}
+
+fn read_history(state: State) -> Result(List(db.Record), String) {
+  let records_result =
+    ask_store(state.store, fn(r) {
+      store.ListRecords(session: state.session, branch: state.branch, reply: r)
+    })
+  case records_result {
+    Ok(records) -> Ok(records)
+    Error(e) ->
+      Error("history read failed, refusing to plan empty context: " <> e)
+  }
+}
+
+fn dispatch_turn(
+  state: State,
+  records: List(db.Record),
+  generation: Int,
+  activation: ActivationId,
+  attempt: ProviderAttemptId,
+  reply: Subject(Result(ActivationId, String)),
+) -> actor.Next(State, Msg) {
+  // 3. Context plan over the whole tail (passthrough).
+  let plan = context.plan(policy: Passthrough, records: records)
+  // 4. Durable attempt intent BEFORE the call. If the intent cannot be
+  // saved, the call does not proceed (chapter 22.7 boundary).
+  case
+    ask_store(state.store, fn(r) {
+      store.CreateAttempt(
+        id: attempt,
+        session: state.session,
+        activation: activation.value,
+        provider_name: state.adapter.id,
+        model: state.model,
+        reply: r,
       )
-      let empty: List(db.Record) = []
-      let records = result.unwrap(records_result, empty)
-      let plan = context.plan(policy: Passthrough, records: records)
-      // 3. Durable attempt intent BEFORE the call (chapter 22.7 boundary).
-      let _ =
-        ask_store(state.store, fn(r: Subject(Result(Nil, db.StoreError))) {
-          store.CreateAttempt(
-            id: attempt,
-            session: state.session,
-            activation: activation.value,
-            provider_name: state.adapter.id,
-            model: state.model,
-            reply: r,
-          )
-        })
-      // 4. Async dispatch: the provider runs in its own process; the
-      // completion carries attempt + activation + generation.
+    })
+  {
+    Error(e) -> {
+      process.send(
+        reply,
+        Error("attempt intent not durable, call not made: " <> e),
+      )
+      actor.continue(state)
+    }
+    Ok(_) -> {
+      // 5. Unlinked, monitored dispatch: a crashing adapter cannot kill the
+      // agent, and a dead dispatch is observed as DispatchDown.
       let request =
         provider.Request(
           model: state.model,
@@ -204,14 +307,29 @@ fn start_turn(
         )
       let self = state.self
       let adapter = state.adapter
-      process.spawn(fn() {
-        let result = adapter.complete(request, option_none())
-        process.send(self, ProviderDone(attempt, activation, generation, result))
-      })
+      let dispatch =
+        spawn_dispatch(fn() {
+          let result = adapter.complete(request, None)
+          process.send(
+            self,
+            ProviderDone(attempt, activation, generation, result),
+          )
+        })
+      let monitor = process.monitor(dispatch)
       process.send(reply, Ok(activation))
       emit(state.events, TurnStarted(state.session, activation))
       actor.continue(
-        State(..state, generation: generation, active: Some(Active(activation, generation, attempt))),
+        State(
+          ..state,
+          generation: generation,
+          active: Some(Active(
+            activation,
+            generation,
+            attempt,
+            dispatch,
+            monitor,
+          )),
+        ),
       )
     }
   }
@@ -223,24 +341,15 @@ fn settle(
   activation: ActivationId,
   result: Result(provider.Response, Failure),
 ) -> actor.Next(State, Msg) {
+  let assert Some(Active(_, _, _, _, monitor)) = state.active
+  process.demonitor_process(monitor)
   let cleared = State(..state, active: None)
   case result {
     Ok(response) -> {
-      let usage = response.usage
-      let _ =
-        ask_store(state.store, fn(r: Subject(Result(Nil, db.StoreError))) {
-          store.CompleteAttempt(
-            id: attempt,
-            status: "completed",
-            usage_input: Some(usage.input_tokens),
-            usage_output: Some(usage.output_tokens),
-            reply: r,
-          )
-        })
-      let payload =
-        json.to_string(json.array(response.blocks, encode_block))
+      // 6. Durable assistant record.
+      let payload = json.to_string(json.array(response.blocks, encode_block))
       case
-        ask_store(cleared.store, fn(r: Subject(Result(db.Record, db.StoreError))) {
+        ask_store(cleared.store, fn(r) {
           store.AppendRecord(
             session: cleared.session,
             branch: cleared.branch,
@@ -250,13 +359,66 @@ fn settle(
           )
         })
       {
-        Ok(record) -> {
-          emit(cleared.events, TurnCompleted(cleared.session, activation, record))
+        Error(e) -> {
+          // Transcript not durable: attempt records an honest failure.
+          let _ =
+            ask_store(cleared.store, fn(r) {
+              store.CompleteAttempt(
+                id: attempt,
+                status: "failed",
+                usage_input: None,
+                usage_output: None,
+                reply: r,
+              )
+            })
+          emit(
+            cleared.events,
+            TurnFailed(
+              cleared.session,
+              activation,
+              "assistant record failed: " <> e,
+            ),
+          )
           actor.continue(cleared)
         }
-        Error(e) -> {
-          emit(cleared.events, TurnFailed(cleared.session, activation, "assistant record failed: " <> e))
-          actor.continue(cleared)
+        Ok(record) -> {
+          // 7. Terminal receipt LAST: it is the proof the turn settled. A
+          // turn whose receipt could not be saved is reported as failed with
+          // outcome-unknown, never as completed.
+          let usage = response.usage
+          case
+            ask_store(cleared.store, fn(r) {
+              store.CompleteAttempt(
+                id: attempt,
+                status: "completed",
+                usage_input: Some(usage.input_tokens),
+                usage_output: Some(usage.output_tokens),
+                reply: r,
+              )
+            })
+          {
+            Error(e) -> {
+              logging.error(name: "agent.receipt_not_durable", fields: [
+                logging.field("reason", e),
+              ])
+              emit(
+                cleared.events,
+                TurnFailed(
+                  cleared.session,
+                  activation,
+                  "terminal receipt not durable, outcome uncertain: " <> e,
+                ),
+              )
+              actor.continue(cleared)
+            }
+            Ok(_) -> {
+              emit(
+                cleared.events,
+                TurnCompleted(cleared.session, activation, record),
+              )
+              actor.continue(cleared)
+            }
+          }
         }
       }
     }
@@ -266,7 +428,7 @@ fn settle(
         _ -> "failed"
       }
       let _ =
-        ask_store(cleared.store, fn(r: Subject(Result(Nil, db.StoreError))) {
+        ask_store(cleared.store, fn(r) {
           store.CompleteAttempt(
             id: attempt,
             status: status,
@@ -275,7 +437,10 @@ fn settle(
             reply: r,
           )
         })
-      emit(cleared.events, TurnFailed(cleared.session, activation, describe_failure(failure)))
+      emit(
+        cleared.events,
+        TurnFailed(cleared.session, activation, describe_failure(failure)),
+      )
       actor.continue(cleared)
     }
   }
@@ -283,14 +448,17 @@ fn settle(
 
 // --- helpers --------------------------------------------------------------
 
+/// The dispatch runs UNLINKED: its death is observed via monitor, and it can
+/// never take the agent down with it.
+@external(erlang, "successor_ffi", "spawn_unlinked")
+fn spawn_dispatch(running: fn() -> anything) -> Pid
+
 fn ask_store(
   store: Subject(store.Msg),
   make: fn(Subject(Result(a, db.StoreError))) -> store.Msg,
 ) -> Result(a, String) {
   let reply = process.new_subject()
   process.send(store, make(reply))
-  // The reply carries the store's full Result; flatten both layers into
-  // a single Result(a, String) so call sites stay readable.
   case process.receive(reply, 15_000) {
     Ok(Ok(value)) -> Ok(value)
     Ok(Error(e)) -> Error(describe_store_error(e))
@@ -349,8 +517,4 @@ fn encode_block(b: provider.ContentBlock) -> json.Json {
 fn emit(events: Subject(TurnEvent), event: TurnEvent) -> Nil {
   process.send(events, event)
   Nil
-}
-
-fn option_none() -> Option(Subject(provider.Abort)) {
-  None
 }

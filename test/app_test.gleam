@@ -12,7 +12,9 @@ import successor/store
 
 pub fn host_starts_and_stops_with_zero_providers_test() {
   let cfg = config.default(data_dir: tmp_dir())
-  let assert Ok(host) = app.start(cfg)
+  let events = process.new_subject()
+  let assert Ok(host) = app.start(cfg, events)
+  let _ = events
   let operator.HealthReport(healthy, providers, schema_version) =
     operator.health(host.operator)
   assert healthy
@@ -26,16 +28,17 @@ pub fn host_starts_and_stops_with_zero_providers_test() {
 }
 
 pub fn restart_reopens_same_deployment_and_sessions_test() {
+  let events = process.new_subject()
   let dir = tmp_dir()
-  let assert Ok(host1) = app.start(config.default(data_dir: dir))
+  let assert Ok(host1) = app.start(config.default(data_dir: dir), events)
   let deployment = host1.deployment
-  let reply = process.new_subject()
-  process.send(host1.store, store.CreateSession("probe", reply))
-  let assert Ok(Ok(_)) = process.receive(reply, 5000)
+  let assert Ok(sid) = app.start_session(host1, name: "probe")
+  let assert Ok(_) = app.session_of(host1, sid)
   app.stop(host1)
 
-  let assert Ok(host2) = app.start(config.default(data_dir: dir))
-  assert db_deploy_to_string(host2.deployment) == db_deploy_to_string(deployment)
+  let assert Ok(host2) = app.start(config.default(data_dir: dir), events)
+  assert db_deploy_to_string(host2.deployment)
+    == db_deploy_to_string(deployment)
   let reply2 = process.new_subject()
   process.send(host2.store, store.ListSessions(reply2))
   let assert Ok(Ok(sessions)) = process.receive(reply2, 5000)
@@ -46,7 +49,6 @@ pub fn restart_reopens_same_deployment_and_sessions_test() {
 fn db_deploy_to_string(id: ids.DeploymentId) -> String {
   db.deploy_to_string(id)
 }
-
 
 fn tmp_dir() -> String {
   "/tmp/" <> ids.fresh(prefix: "successor-apptest")

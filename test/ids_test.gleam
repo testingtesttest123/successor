@@ -45,8 +45,22 @@ pub fn each_ontology_id_has_a_generator_test() {
 
 fn is_hex_digit(c: String) -> Bool {
   case c {
-    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "a" | "b" | "c"
-    | "d" | "e" | "f" -> True
+    "0"
+    | "1"
+    | "2"
+    | "3"
+    | "4"
+    | "5"
+    | "6"
+    | "7"
+    | "8"
+    | "9"
+    | "a"
+    | "b"
+    | "c"
+    | "d"
+    | "e"
+    | "f" -> True
     _ -> False
   }
 }

@@ -34,15 +34,15 @@ pub fn reopen_preserves_deployment_and_data_test() {
 pub fn create_session_is_atomic_with_main_branch_test() {
   let assert Ok(conn) = db.open(path: tmp_db())
   let id = ids.new_session_id()
-  let assert Ok(session) =
-    db.create_session(conn, id: id, name: "alpha")
+  let assert Ok(session) = db.create_session(conn, id: id, name: "alpha")
   // The default branch exists and is current, in the same committed step.
   let assert Ok(main) = db.get_branch(conn, id, session.current_branch)
   assert main.name == "main"
   assert main.head_sequence == 0
   assert main.parent == None
   let assert Ok([only]) = db.list_branches(conn, id)
-  assert db.branch_to_string(only.id) == db.branch_to_string(session.current_branch)
+  assert db.branch_to_string(only.id)
+    == db.branch_to_string(session.current_branch)
   db.close(conn)
 }
 
@@ -64,11 +64,10 @@ pub fn duplicate_session_id_is_rejected_without_partial_rows_test() {
 pub fn duplicate_branch_name_is_rejected_test() {
   let assert Ok(conn) = db.open(path: tmp_db())
   let session = ids.new_session_id()
-  let assert Ok(s) = db.create_session(conn, id: session, name: "s")
-  let assert Ok(_) =
-    db.create_branch(conn, session: session, name: "spare", parent: s.current_branch, at: None)
+  let assert Ok(_) = db.create_session(conn, id: session, name: "s")
+  let assert Ok(_) = db.create_branch(conn, session: session, name: "spare")
   let assert Error(db.AlreadyExists(_)) =
-    db.create_branch(conn, session: session, name: "spare", parent: s.current_branch, at: None)
+    db.create_branch(conn, session: session, name: "spare")
   db.close(conn)
 }
 
@@ -80,7 +79,8 @@ pub fn ambiguous_session_name_is_an_error_test() {
     db.create_session(conn, id: ids.new_session_id(), name: "dup")
   let assert Ok(_) =
     db.create_session(conn, id: ids.new_session_id(), name: "dup")
-  let assert Error(db.AmbiguousName("dup")) = db.find_session_by_name(conn, "dup")
+  let assert Error(db.AmbiguousName("dup")) =
+    db.find_session_by_name(conn, "dup")
   db.close(conn)
 }
 
@@ -89,10 +89,22 @@ pub fn branch_point_must_not_exceed_parent_head_test() {
   let session = ids.new_session_id()
   let assert Ok(s) = db.create_session(conn, id: session, name: "s")
   let assert Error(db.Invalid(_)) =
-    db.create_branch(conn, session: session, name: "too-far", parent: s.current_branch, at: Some(5))
-  // Zero is always valid (fresh view).
+    db.fork_branch(
+      conn,
+      session: session,
+      name: "too-far",
+      parent: s.current_branch,
+      at: 5,
+    )
+  // Zero is a valid fork point (view of an empty prefix).
   let assert Ok(_) =
-    db.create_branch(conn, session: session, name: "empty", parent: s.current_branch, at: Some(0))
+    db.fork_branch(
+      conn,
+      session: session,
+      name: "empty",
+      parent: s.current_branch,
+      at: 0,
+    )
   db.close(conn)
 }
 
@@ -102,9 +114,21 @@ pub fn append_assigns_branch_local_sequences_and_moves_head_test() {
   let assert Ok(s) = db.create_session(conn, id: session, name: "s")
 
   let assert Ok(r1) =
-    db.append_record(conn, session: session, branch: s.current_branch, kind: "user", payload: "one")
+    db.append_record(
+      conn,
+      session: session,
+      branch: s.current_branch,
+      kind: "user",
+      payload: "one",
+    )
   let assert Ok(r2) =
-    db.append_record(conn, session: session, branch: s.current_branch, kind: "user", payload: "two")
+    db.append_record(
+      conn,
+      session: session,
+      branch: s.current_branch,
+      kind: "user",
+      payload: "two",
+    )
   assert r1.sequence == 1
   assert r2.sequence == 2
 
@@ -112,10 +136,15 @@ pub fn append_assigns_branch_local_sequences_and_moves_head_test() {
   assert main.head_sequence == 2
 
   // A sibling branch starts at sequence 1: sequences are branch-local.
-  let assert Ok(sp) =
-    db.create_branch(conn, session: session, name: "spare", parent: s.current_branch, at: None)
+  let assert Ok(sp) = db.create_branch(conn, session: session, name: "spare")
   let assert Ok(r) =
-    db.append_record(conn, session: session, branch: sp.id, kind: "user", payload: "three")
+    db.append_record(
+      conn,
+      session: session,
+      branch: sp.id,
+      kind: "user",
+      payload: "three",
+    )
   assert r.sequence == 1
 
   // Contract order: ascending sequence per branch.
