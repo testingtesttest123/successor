@@ -17,17 +17,31 @@ source structure (chapter 23.1 build rule 2).
   catalog (session + `main` branch commit atomically), append-only canonical
   record table with branch-local sequences, branch graph with head
   referential integrity, `schema_version` gate (mismatch refuses to open),
-  one durable deployment identity. Namespaced-state, provider-attempt,
-  effect-receipt and blob tables exist for 1C/1D.
-- [ ] 1C — configuration provenance + compatibility reader for the minimum
-  oracle recipe subset.
-- [ ] 1D — provider boundary (canonical messages, tools, usage, attempt id,
-  continuation capsule, cancellation, typed failures) + deterministic mock
-  adapter.
-- [ ] 1E — ContextPolicy behavior with the passthrough implementation.
-- [ ] 1F — walking scenario: operator message → durable user record →
-  activation → passthrough ContextPlan → provider request/response → durable
-  receipts → idle → restart → same canonical history.
+  one durable deployment identity, provider-attempt receipts (intent before
+  call; completed/failed/aborted; usage only on success).
+- [x] **1C — configuration.** Strict canonical schema (`successor/recipe`)
+  with effective-value provenance (Defaults vs Recipe), plus a compatibility
+  reader for the reference-recipe oracle subset: mock provider selection,
+  mock settings, and module toggles recorded as named accepted-but-not-
+  modeled warnings. Unknown agent fields and unsupported providers are
+  errors, never silent projections.
+- [x] **1D — provider boundary.** Canonical messages/content blocks, tools,
+  usage, per-attempt identity, opaque continuation capsule bound to a
+  compatibility domain (never inspected by the runtime), typed failures
+  incl. `Aborted`. Deterministic mock adapter (echo mode, fixed usage
+  estimate, no network/clock).
+- [x] **1E — ContextPolicy.** Passthrough plan over the record tail:
+  selected records, message projection, deterministic token estimate,
+  sha256 projection hash (stale-plan detection input).
+- [x] **1F — walking scenario.** AgentRuntime (generation-guarded
+  activations; async provider dispatch in its own process; stale completions
+  rejected and never settled) + SessionRuntime (owns its agent; forwards
+  turn events) under a factory supervisor (factory → session → agent).
+  Operator surface: start_session / submit / turn events.
+  **The 23.1F gate is met and tested:** user turn → durable user record →
+  plan → provider response → durable assistant record + attempt receipt →
+  restart → identical canonical history; stale completion settles nothing;
+  second turn appends with branch-local sequences.
 
 ## Layout
 
@@ -45,7 +59,8 @@ src/successor/
 ## Development
 
 ```bash
-gleam test    # 24 tests: 1A gate + 1B durable contracts
+gleam test    # 37 tests: 1A gate, 1B durable contracts, 1C provenance/compat,
+              # provider/context units, and the 1F walking + stale gates
 gleam run     # (no main yet — the host binary arrives with the operator wire surface)
 ```
 

@@ -20,11 +20,16 @@ import gleam/erlang/process.{type Pid, type Subject, ExitMessage}
 import gleam/otp/actor
 import gleam/otp/static_supervisor as supervisor
 import gleam/otp/supervision
+import gleam/otp/factory_supervisor as factory
+import successor/agent
 import successor/config.{type Config}
+import successor/provider
 import successor/db
 import successor/ids.{type DeploymentId}
 import successor/logging
 import successor/operator
+import successor/providers/mock
+import successor/session
 import successor/store
 
 pub type Started {
@@ -32,6 +37,9 @@ pub type Started {
     supervisor_pid: Pid,
     store: Subject(store.Msg),
     operator: Subject(operator.Msg),
+    /// Turn events from every session (host observer).
+    events: Subject(agent.TurnEvent),
+    sessions: factory.Supervisor(session.Spec, Subject(session.Msg)),
     config: Config,
     deployment: DeploymentId,
   )
@@ -43,6 +51,11 @@ pub fn start(config config: Config) -> Result(Started, String) {
     Ok(_) -> {
       let store_name = process.new_name(prefix: "successor_store")
       let operator_name = process.new_name(prefix: "successor_operator")
+      let events = process.new_subject()
+      let sessions_name =
+        process.new_name(prefix: "successor_sessions")
+      let adapter = provider_from(config)
+      let model = "successor-model"
 
       let store_child =
         supervision.worker(fn() {
@@ -61,22 +74,73 @@ pub fn start(config config: Config) -> Result(Started, String) {
           }
         })
 
+      let sessions_child =
+        supervision.worker(fn() {
+          factory_supervisor_start(
+            sessions_name,
+            fn(spec: session.Spec) { session.start(spec: spec) },
+          )
+        })
+
       let tree =
         supervisor.new(supervisor.OneForOne)
         |> supervisor.add(store_child)
         |> supervisor.add(operator_child)
-        // Session and provider supervisors join the tree with their first
-        // real children (1D/1F); the slots exist from day one so ownership
-        // boundaries never move.
-        |> supervisor.add(supervision.supervisor(fn() {
-          supervisor.new(supervisor.OneForOne) |> supervisor.start
-        }))
+        |> supervisor.add(sessions_child)
+        // Provider supervisor slot (adapter children arrive with Phase 2).
         |> supervisor.add(supervision.supervisor(fn() {
           supervisor.new(supervisor.OneForOne) |> supervisor.start
         }))
 
-      start_under_keeper(tree, store_name, operator_name, config)
+      start_under_keeper(tree, store_name, operator_name, events, sessions_name, adapter, model, config)
     }
+  }
+}
+
+/// Create a session and start its runtime under the session factory.
+pub fn start_session(
+  host host: Started,
+  name name: String,
+) -> Result(Subject(session.Msg), String) {
+  let reply = process.new_subject()
+  process.send(host.store, store.CreateSession(name, reply))
+  let created = case process.receive(reply, 10_000) {
+    Ok(Ok(s)) -> Ok(s)
+    Ok(Error(_)) -> Error("session create failed")
+    Error(_) -> Error("store did not reply")
+  }
+  case created {
+    Error(e) -> Error(e)
+    Ok(s) -> {
+      let spec =
+        session.Spec(
+          session: s.id,
+          branch: s.current_branch,
+          store: host.store,
+          adapter: host_adapter(host),
+          model: "successor-model",
+          events: host.events,
+        )
+      case factory.start_child(host.sessions, spec) {
+        Ok(started) -> Ok(started.data)
+        Error(_) -> Error("session runtime failed to start")
+      }
+    }
+  }
+}
+
+fn host_adapter(host: Started) -> provider.Adapter {
+  host_adapter_of(host.config)
+}
+
+fn provider_from(config: Config) -> provider.Adapter {
+  host_adapter_of(config)
+}
+
+fn host_adapter_of(config: Config) -> provider.Adapter {
+  case config.providers {
+    [first, ..] -> mock.from_config(first)
+    [] -> mock.adapter(settings: mock.default_settings())
   }
 }
 
@@ -86,6 +150,10 @@ fn start_under_keeper(
   tree: supervisor.Builder,
   store_name: process.Name(store.Msg),
   operator_name: process.Name(operator.Msg),
+  events: Subject(agent.TurnEvent),
+  sessions_name: process.Name(factory.Message(session.Spec, Subject(session.Msg))),
+  adapter: provider.Adapter,
+  model: String,
   config: Config,
 ) -> Result(Started, String) {
   let ack = process.new_subject()
@@ -108,11 +176,15 @@ fn start_under_keeper(
     Error(_) -> Error("keeper did not report supervisor startup")
     Ok(Error(e)) -> Error(e)
     Ok(Ok(supervisor_pid)) -> {
+      let _ = adapter
+      let _ = model
       let host =
         Started(
           supervisor_pid: supervisor_pid,
           store: process.named_subject(store_name),
           operator: process.named_subject(operator_name),
+          events: events,
+          sessions: factory.get_by_name(sessions_name),
           config: config,
           deployment: store.deployment(process.named_subject(store_name)),
         )
@@ -166,4 +238,13 @@ fn describe_reason(reason: process.ExitReason) -> String {
     process.Killed -> "killed"
     process.Abnormal(_) -> "shutdown/abnormal"
   }
+}
+
+fn factory_supervisor_start(
+  name: process.Name(factory.Message(session.Spec, Subject(session.Msg))),
+  template: fn(session.Spec) -> actor.StartResult(Subject(session.Msg)),
+) -> actor.StartResult(factory.Supervisor(session.Spec, Subject(session.Msg))) {
+  factory.start(
+    factory.worker_child(template) |> factory.named(name),
+  )
 }

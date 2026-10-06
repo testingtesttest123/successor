@@ -17,7 +17,7 @@ pub type OperatorBinding {
 
 pub type ProviderConfig {
   /// Deterministic offline provider (chapter 22 fixture surface).
-  MockProvider(id: String)
+  MockProvider(id: String, echo_mode: Bool, default_response: String)
 }
 
 pub type Config {
@@ -65,7 +65,7 @@ fn check_provider_ids(
 ) -> Result(Nil, String) {
   case providers {
     [] -> Ok(Nil)
-    [MockProvider(id), ..rest] ->
+    [MockProvider(id, ..), ..rest] ->
       case id == "" || list_contains(seen, id) {
         True -> Error("config: provider ids must be non-empty and unique: " <> id)
         False -> check_provider_ids(rest, [id, ..seen])

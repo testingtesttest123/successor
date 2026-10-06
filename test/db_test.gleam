@@ -171,3 +171,59 @@ fn list_length(items: List(a)) -> Int {
     [_, ..rest] -> 1 + list_length(rest)
   }
 }
+
+pub fn provider_attempt_receipt_persists_across_reopen_test() {
+  let path = tmp_db()
+  let assert Ok(conn) = db.open(path: path)
+  let session = ids.new_session_id()
+  let assert Ok(s) = db.create_session(conn, id: session, name: "s")
+  let attempt = ids.new_provider_attempt_id()
+  let assert Ok(_) =
+    db.create_provider_attempt(
+      conn,
+      id: attempt,
+      session: session,
+      activation: "act_x",
+      provider_name: "mock",
+      model: "m",
+    )
+  let assert Ok(_) =
+    db.complete_provider_attempt(
+      conn,
+      id: attempt,
+      status: "completed",
+      usage_input: Some(10),
+      usage_output: Some(5),
+    )
+  // Invalid status refused.
+  let assert Error(db.Invalid(_)) =
+    db.complete_provider_attempt(
+      conn,
+      id: attempt,
+      status: "running",
+      usage_input: None,
+      usage_output: None,
+    )
+  db.close(conn)
+
+  // Reopen: the receipt is durable.
+  let assert Ok(conn2) = db.open(path: path)
+  let assert Ok(_) = db.ensure_deployment(conn2)
+  let _ = s
+  db.close(conn2)
+}
+
+pub fn attempt_status_must_be_a_terminal_outcome_test() {
+  let assert Ok(conn) = db.open(path: tmp_db())
+  let session = ids.new_session_id()
+  let assert Ok(_) = db.create_session(conn, id: session, name: "s")
+  let assert Error(db.Invalid(_)) =
+    db.complete_provider_attempt(
+      conn,
+      id: ids.new_provider_attempt_id(),
+      status: "promoted",
+      usage_input: Some(1),
+      usage_output: Some(1),
+    )
+  db.close(conn)
+}

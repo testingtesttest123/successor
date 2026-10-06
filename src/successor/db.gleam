@@ -17,8 +17,8 @@ import gleam/string
 import sqlight
 import successor/config.{schema_version}
 import successor/ids.{
-  type BranchId, type DeploymentId, type SessionId, BranchId, DeploymentId,
-  SessionId,
+  type BranchId, type DeploymentId, type ProviderAttemptId, type SessionId,
+  BranchId, DeploymentId, SessionId,
 }
 import successor/logging
 
@@ -586,6 +586,72 @@ pub fn list_records(
   }
 }
 
+// --- provider attempt receipts -------------------------------------------
+
+/// Record the durable INTENT to call a provider (chapter 22.7 boundary:
+/// intent exists before the call). Status starts 'running'.
+pub fn create_provider_attempt(
+  conn: sqlight.Connection,
+  id id: ProviderAttemptId,
+  session session: SessionId,
+  activation activation: String,
+  provider_name provider_name: String,
+  model model: String,
+) -> Result(Nil, StoreError) {
+  case
+    sqlight.query(
+      "INSERT INTO provider_attempts (id, session_id, activation_id, provider, model, status, started_at_ms)
+       VALUES (?, ?, ?, ?, ?, 'running', ?)",
+      on: conn,
+      with: [
+        sqlight.text(attempt_to_string(id)),
+        sqlight.text(session_to_string(session)),
+        sqlight.text(activation),
+        sqlight.text(provider_name),
+        sqlight.text(model),
+        sqlight.int(logging.now_ms()),
+      ],
+      expecting: decode.dynamic,
+    )
+  {
+    Ok(_) -> Ok(Nil)
+    Error(e) -> Error(map_insert_error(e, "provider_attempt"))
+  }
+}
+
+/// Complete an attempt with its outcome. Usage stays nil on failure —
+/// a failed attempt must never be promoted to accepted state (chapter 22.6).
+pub fn complete_provider_attempt(
+  conn: sqlight.Connection,
+  id id: ProviderAttemptId,
+  status status: String,
+  usage_input usage_input: Option(Int),
+  usage_output usage_output: Option(Int),
+) -> Result(Nil, StoreError) {
+  case status {
+    "completed" | "failed" | "aborted" ->
+      case
+        sqlight.query(
+          "UPDATE provider_attempts SET status = ?, usage_input = ?, usage_output = ?, finished_at_ms = ?
+           WHERE id = ?",
+          on: conn,
+          with: [
+            sqlight.text(status),
+            sqlight.nullable(sqlight.int, usage_input),
+            sqlight.nullable(sqlight.int, usage_output),
+            sqlight.int(logging.now_ms()),
+            sqlight.text(attempt_to_string(id)),
+          ],
+          expecting: decode.dynamic,
+        )
+      {
+        Ok(_) -> Ok(Nil)
+        Error(e) -> Error(OpenFailed(describe(e)))
+      }
+    _ -> Error(Invalid("attempt status must be completed|failed|aborted"))
+  }
+}
+
 // --- transaction helpers -------------------------------------------------
 
 fn tx_begin(conn: sqlight.Connection) -> Result(Nil, StoreError) {
@@ -779,6 +845,10 @@ pub fn branch_to_string(id: BranchId) -> String {
 }
 
 pub fn deploy_to_string(id: DeploymentId) -> String {
+  id.value
+}
+
+pub fn attempt_to_string(id: ProviderAttemptId) -> String {
   id.value
 }
 

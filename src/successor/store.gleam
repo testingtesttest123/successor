@@ -7,6 +7,7 @@
 
 import gleam/erlang/process.{type Name, type Subject}
 import gleam/option.{type Option}
+
 import gleam/otp/actor
 import successor/db.{
   type Branch, type Record, type Session, type StoreError,
@@ -47,6 +48,21 @@ pub type Msg {
     session: SessionId,
     branch: BranchId,
     reply: Subject(Result(List(Record), StoreError)),
+  )
+  CreateAttempt(
+    id: ids.ProviderAttemptId,
+    session: SessionId,
+    activation: String,
+    provider_name: String,
+    model: String,
+    reply: Subject(Result(Nil, StoreError)),
+  )
+  CompleteAttempt(
+    id: ids.ProviderAttemptId,
+    status: String,
+    usage_input: Option(Int),
+    usage_output: Option(Int),
+    reply: Subject(Result(Nil, StoreError)),
   )
 }
 
@@ -158,6 +174,33 @@ fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
     }
     ListRecords(session, branch, reply) -> {
       process.send(reply, db.list_records(state.conn, session, branch))
+      actor.continue(state)
+    }
+    CreateAttempt(id, session, activation, provider_name, model, reply) -> {
+      process.send(
+        reply,
+        db.create_provider_attempt(
+          state.conn,
+          id: id,
+          session: session,
+          activation: activation,
+          provider_name: provider_name,
+          model: model,
+        ),
+      )
+      actor.continue(state)
+    }
+    CompleteAttempt(id, status, usage_input, usage_output, reply) -> {
+      process.send(
+        reply,
+        db.complete_provider_attempt(
+          state.conn,
+          id: id,
+          status: status,
+          usage_input: usage_input,
+          usage_output: usage_output,
+        ),
+      )
       actor.continue(state)
     }
   }
