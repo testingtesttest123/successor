@@ -20,4 +20,5 @@ jobs:
           # elixir-version: "1"
       - run: gleam deps download
       - run: gleam test
+      - run: python3 -m unittest discover -s conformance -p 'test_*.py' -v
       - run: gleam format --check src test

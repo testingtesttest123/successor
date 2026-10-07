@@ -74,7 +74,7 @@ pub const known_operator = ["host", "port"]
 pub const known_provider = ["id", "kind", "echoMode", "defaultResponse"]
 
 // Compatibility-reader allowlists (reference recipe subset).
-pub const known_recipe_top_level = ["name", "agent", "modules"]
+pub const known_recipe_top_level = ["name", "description", "agent", "modules"]
 
 pub const known_recipe_agent = ["name", "provider", "systemPrompt", "mock"]
 
@@ -236,6 +236,7 @@ pub fn read_reference_recipe(
 
 fn recipe_decoder() -> decode.Decoder(#(Config, List(String))) {
   use name <- decode.optional_field("name", "", decode.string)
+  use description <- decode.optional_field("description", "", decode.string)
   use agent <- decode.field("agent", agent_decoder())
   use modules <- decode.optional_field("modules", [], module_decoder())
   let #(providers, agent_warnings) = agent
@@ -245,6 +246,13 @@ fn recipe_decoder() -> decode.Decoder(#(Config, List(String))) {
       "recipe module accepted, not modeled: " <> m
     })
   let agent_and_modules = list.append(agent_warnings, module_warnings)
+  let agent_and_modules = case description {
+    "" -> agent_and_modules
+    _ -> [
+      "recipe.description accepted (display metadata): " <> description,
+      ..agent_and_modules
+    ]
+  }
   let warnings = case name {
     "" -> agent_and_modules
     _ -> [

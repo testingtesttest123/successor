@@ -67,11 +67,29 @@ src/successor/
 ## Development
 
 ```bash
-gleam test    # 62 tests: 1A gate, 1B durable contracts, 1C provenance/compat,
+gleam test    # 64 tests: 1A gate, 1B durable contracts, 1C provenance/compat,
               # provider/context units, 1F walking/stale gates, review regressions,
               # real supervised lifecycle/recovery tests, and durable-session reopen tests
 gleam run     # (no main yet — the host binary arrives with the operator wire surface)
+python3 -m unittest discover -s conformance -p 'test_*.py' -v  # test bridge plumbing
 ```
 
 Prerequisites: Gleam 1.19+, Erlang/OTP 27 (full distribution incl. `erlang-dev`
 for the esqlite NIF), rebar3.
+
+## Shared conformance bridge
+
+`gleam run -m conformance_host` exposes a **test-only** JSONL adapter used by
+Home's shared `provider/mock-text-turn` and
+`storage/restart-after-committed-turn` scenarios. The adapter uses the public
+application/session APIs and read-only SQLite snapshots. Each host start is a
+fresh BEAM process; reopening uses the exact previously observed durable
+session ID. See [the bridge contract](conformance/README.md).
+
+This is bounded acceptance of **2 of 13** Home scenarios, not full parity.
+Reference time/IPC context injection, mock echo selection, Chronicle bookkeeping,
+and diagnostic/UI projections differ deliberately. Provider request, model,
+system-prompt, and tool-surface parity are not established by this slice.
+Home owns the shared scenarios, immutable reference baselines, explicit delta
+rules, corpus/schema validation, and fresh-reference execution gate. The local
+protocol tests above only check adapter plumbing; they do not replace that gate.
