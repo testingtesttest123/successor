@@ -9,9 +9,15 @@
 import gleam/dict
 import gleam/erlang/process.{type Name, type Subject}
 import gleam/otp/actor
+import successor/calls
 
 pub type Msg(handle) {
   Register(key: String, subject: Subject(handle))
+  Claim(
+    key: String,
+    subject: Subject(handle),
+    reply: Subject(Result(Nil, String)),
+  )
   Lookup(key: String, reply: Subject(Result(Subject(handle), Nil)))
 }
 
@@ -36,6 +42,28 @@ fn handle_msg(
   case msg {
     Register(key, subject) ->
       actor.continue(State(entries: dict.insert(state.entries, key, subject)))
+    Claim(key, subject, reply) -> {
+      let alive = case dict.get(state.entries, key) {
+        Ok(previous) ->
+          case process.subject_owner(previous) {
+            Ok(pid) -> process.is_alive(pid)
+            Error(_) -> False
+          }
+        Error(_) -> False
+      }
+      case alive {
+        True -> {
+          process.send(reply, Error("identity already has a live owner"))
+          actor.continue(state)
+        }
+        False -> {
+          process.send(reply, Ok(Nil))
+          actor.continue(
+            State(entries: dict.insert(state.entries, key, subject)),
+          )
+        }
+      }
+    }
     Lookup(key, reply) -> {
       process.send(reply, dict.get(state.entries, key))
       actor.continue(state)
@@ -48,9 +76,7 @@ pub fn lookup(
   registry: Subject(Msg(handle)),
   key key: String,
 ) -> Result(Subject(handle), Nil) {
-  let reply = process.new_subject()
-  process.send(registry, Lookup(key, reply))
-  case process.receive(reply, 5000) {
+  case calls.call(registry, Lookup(key, _), 5000) {
     Ok(result) -> result
     Error(_) -> Error(Nil)
   }

@@ -3,7 +3,7 @@
 //// Tree ownership, one slot per live-resource kind, so ownership boundaries
 //// never move as phases add children:
 ////
-////   root (one_for_one)
+////   root (rest_for_one)
 ////   ├── DeploymentStore worker   (single durable writer)
 ////   ├── Operator worker          (single operator authority)
 ////   ├── Session supervisor       (empty until 1F)
@@ -22,6 +22,7 @@ import gleam/otp/factory_supervisor as factory
 import gleam/otp/static_supervisor as supervisor
 import gleam/otp/supervision
 import successor/agent
+import successor/calls
 import successor/config.{type Config}
 import successor/db
 import successor/ids.{type DeploymentId}
@@ -29,9 +30,12 @@ import successor/logging
 import successor/operator
 import successor/provider
 import successor/providers/mock
+import successor/python
 import successor/registry
 import successor/session
 import successor/store
+import successor/workspace_types
+import successor/workspaces
 
 pub type Started {
   Started(
@@ -43,6 +47,7 @@ pub type Started {
     sessions: factory.Supervisor(session.Spec, Subject(session.Msg)),
     registry: Subject(registry.Msg(session.Msg)),
     config: Config,
+    workspaces: Subject(workspaces.Msg),
     deployment: DeploymentId,
   )
 }
@@ -59,6 +64,7 @@ pub fn start(
       let sessions_name = process.new_name(prefix: "successor_sessions")
       let registry_name: process.Name(registry.Msg(session.Msg)) =
         process.new_name(prefix: "successor_registry")
+      let workspaces_name = process.new_name(prefix: "successor_workspaces")
       let adapter = provider_from(config)
       let model = "successor-model"
 
@@ -69,6 +75,15 @@ pub fn start(
               Ok(actor.Started(pid: started.pid, data: started.subject))
             Error(e) -> Error(actor.InitFailed(e))
           }
+        })
+
+      let workspaces_child =
+        supervision.worker(fn() {
+          workspaces.start(
+            process.named_subject(store_name),
+            config.data_dir,
+            workspaces_name,
+          )
         })
 
       let operator_child =
@@ -90,11 +105,12 @@ pub fn start(
         supervision.worker(fn() { registry_start(registry_name) })
 
       let tree =
-        supervisor.new(supervisor.OneForOne)
+        supervisor.new(supervisor.RestForOne)
         |> supervisor.add(store_child)
+        |> supervisor.add(workspaces_child)
         |> supervisor.add(operator_child)
-        |> supervisor.add(sessions_child)
         |> supervisor.add(registry_child)
+        |> supervisor.add(sessions_child)
         // Provider supervisor slot (adapter children arrive with Phase 2).
         |> supervisor.add(
           supervision.supervisor(fn() {
@@ -109,6 +125,7 @@ pub fn start(
         events,
         sessions_name,
         registry_name,
+        workspaces_name,
         adapter,
         model,
         config,
@@ -124,32 +141,95 @@ pub fn start_session(
   host host: Started,
   name name: String,
 ) -> Result(ids.SessionId, String) {
-  let reply = process.new_subject()
-  process.send(host.store, store.CreateSession(name, reply))
-  let created = case process.receive(reply, 10_000) {
+  let created = case
+    calls.call(host.store, store.CreateSession(name, _), 10_000)
+  {
     Ok(Ok(s)) -> Ok(s)
     Ok(Error(_)) -> Error("session create failed")
     Error(_) -> Error("store did not reply")
   }
   case created {
     Error(e) -> Error(e)
-    Ok(s) -> {
-      let spec =
-        session.Spec(
-          session: s.id,
-          branch: s.current_branch,
-          store: host.store,
-          adapter: host_adapter(host),
-          model: "successor-model",
-          events: host.events,
-          registry: host.registry,
-        )
-      case factory.start_child(host.sessions, spec) {
-        Ok(_started) -> Ok(s.id)
-        Error(_) -> Error("session runtime failed to start")
+    Ok(s) -> open_session(host, s.id)
+  }
+}
+
+/// Reopen an existing durable session without replacing its history/identity.
+/// The registry claim prevents concurrent opens from creating two live owners.
+pub fn open_session(
+  host: Started,
+  id: ids.SessionId,
+) -> Result(ids.SessionId, String) {
+  case calls.call(host.store, store.GetSession(id, _), 10_000) {
+    Ok(Ok(saved)) -> {
+      case root_workspace(host, id) {
+        Error(error) -> Error(error)
+        Ok(_) ->
+          case session_of(host, id) {
+            Ok(_) -> Ok(id)
+            Error(_) -> {
+              let spec =
+                session.Spec(
+                  session: saved.id,
+                  branch: saved.current_branch,
+                  store: host.store,
+                  adapter: host_adapter(host),
+                  model: "successor-model",
+                  events: host.events,
+                  registry: host.registry,
+                )
+              case calls.start_child(host.sessions, spec) {
+                Ok(_) -> Ok(id)
+                Error(_) ->
+                  case session_of(host, id) {
+                    Ok(_) -> Ok(id)
+                    Error(_) -> Error("session runtime failed to start")
+                  }
+              }
+            }
+          }
       }
     }
+    Ok(Error(_)) -> Error("session not found or unreadable")
+    Error(_) -> Error("store did not acknowledge session open")
   }
+}
+
+/// Stable resident workspace, independent of project directories and models.
+pub fn root_workspace(
+  host: Started,
+  session: ids.SessionId,
+) -> Result(workspace_types.AgentWorkspace, String) {
+  workspaces.root(host.workspaces, session, "resident")
+}
+
+/// Creates an independent child execution workspace, not a model inference job.
+pub fn child_workspace(
+  host: Started,
+  parent: ids.AgentId,
+  name: String,
+) -> Result(workspace_types.AgentWorkspace, String) {
+  workspaces.child(host.workspaces, parent, name)
+}
+
+pub fn execute_python(
+  host: Started,
+  agent: ids.AgentId,
+  source: String,
+  limits: python.Limits,
+) -> Result(workspace_types.Cell, String) {
+  workspaces.execute(host.workspaces, agent, source, limits)
+}
+
+pub fn inspect_python(
+  host: Started,
+  id: String,
+) -> Result(workspace_types.Cell, String) {
+  workspaces.inspect(host.store, id)
+}
+
+pub fn close_python(host: Started, agent: ids.AgentId) -> Result(Nil, String) {
+  workspaces.close(host.workspaces, agent)
 }
 
 /// Resolve a session id to its CURRENT runtime handle. Survives restarts of
@@ -158,7 +238,18 @@ pub fn session_of(
   host host: Started,
   session session: ids.SessionId,
 ) -> Result(Subject(session.Msg), Nil) {
-  registry.lookup(host.registry, key: session.value)
+  case registry.lookup(host.registry, key: session.value) {
+    Error(_) -> Error(Nil)
+    Ok(subject) ->
+      case process.subject_owner(subject) {
+        Ok(pid) ->
+          case process.is_alive(pid) {
+            True -> Ok(subject)
+            False -> Error(Nil)
+          }
+        Error(_) -> Error(Nil)
+      }
+  }
 }
 
 fn host_adapter(host: Started) -> provider.Adapter {
@@ -187,6 +278,7 @@ fn start_under_keeper(
     factory.Message(session.Spec, Subject(session.Msg)),
   ),
   registry_name: process.Name(registry.Msg(session.Msg)),
+  workspaces_name: process.Name(workspaces.Msg),
   adapter: provider.Adapter,
   model: String,
   config: Config,
@@ -222,6 +314,7 @@ fn start_under_keeper(
           sessions: factory.get_by_name(sessions_name),
           registry: process.named_subject(registry_name),
           config: config,
+          workspaces: process.named_subject(workspaces_name),
           deployment: store.deployment(process.named_subject(store_name)),
         )
       logging.info(name: "host.started", fields: [

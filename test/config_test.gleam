@@ -22,8 +22,8 @@ pub fn out_of_range_port_is_rejected_test() {
   let assert Error(_) = config.validate(bad)
 }
 
-pub fn schema_version_is_one_test() {
-  assert config.schema_version == 1
+pub fn schema_version_is_two_test() {
+  assert config.schema_version == 2
 }
 
 pub fn zero_providers_is_valid_test() {

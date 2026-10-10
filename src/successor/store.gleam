@@ -11,12 +11,17 @@ import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import sqlight
 import successor/db.{type Branch, type Record, type Session, type StoreError}
-import successor/ids.{type BranchId, type SessionId}
+import successor/ids.{
+  type AgentId, type AgentIncarnationId, type BranchId, type SessionId,
+}
 import successor/logging
+import successor/workspace_store
+import successor/workspace_types.{type AgentWorkspace, type Cell}
 
 pub type Msg {
   Shutdown(reply: Subject(Nil))
   Deployment(reply: Subject(ids.DeploymentId))
+  RecoverWorkspaces(reply: Subject(Result(Nil, String)))
   CreateSession(name: String, reply: Subject(Result(Session, StoreError)))
   GetSession(id: SessionId, reply: Subject(Result(Session, StoreError)))
   FindSessionByName(name: String, reply: Subject(Result(Session, StoreError)))
@@ -59,6 +64,26 @@ pub type Msg {
     usage_output: Option(Int),
     reply: Subject(Result(Nil, StoreError)),
   )
+  EnsureRootWorkspace(
+    session: SessionId,
+    name: String,
+    reply: Subject(Result(AgentWorkspace, String)),
+  )
+  CreateChildWorkspace(
+    parent: AgentId,
+    name: String,
+    reply: Subject(Result(AgentWorkspace, String)),
+  )
+  GetWorkspace(agent: AgentId, reply: Subject(Result(AgentWorkspace, String)))
+  ActivateWorkspace(
+    agent: AgentId,
+    incarnation: AgentIncarnationId,
+    reply: Subject(Result(Nil, String)),
+  )
+  BeginCell(cell: Cell, reply: Subject(Result(Nil, String)))
+  SettleCell(cell: Cell, reply: Subject(Result(Nil, String)))
+  GetCell(id: String, reply: Subject(Result(Cell, String)))
+  ListCells(agent: AgentId, reply: Subject(Result(List(Cell), String)))
 }
 
 type State {
@@ -84,15 +109,22 @@ pub fn start(
               db.close(conn)
               Error("store: " <> describe_error(e))
             }
-            Ok(deployment) -> {
-              logging.info(name: "store.started", fields: [
-                logging.field("data_dir", data_dir),
-              ])
-              Ok(
-                actor.initialised(State(conn: conn, deployment: deployment))
-                |> actor.returning(subject),
-              )
-            }
+            Ok(deployment) ->
+              case workspace_store.recover(conn) {
+                Error(e) -> {
+                  db.close(conn)
+                  Error("store: workspace recovery failed: " <> e)
+                }
+                Ok(_) -> {
+                  logging.info(name: "store.started", fields: [
+                    logging.field("data_dir", data_dir),
+                  ])
+                  Ok(
+                    actor.initialised(State(conn: conn, deployment: deployment))
+                    |> actor.returning(subject),
+                  )
+                }
+              }
           }
       }
     })
@@ -130,6 +162,10 @@ fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
     }
     Deployment(reply) -> {
       process.send(reply, state.deployment)
+      actor.continue(state)
+    }
+    RecoverWorkspaces(reply) -> {
+      process.send(reply, workspace_store.recover(state.conn))
       actor.continue(state)
     }
     CreateSession(name, reply) -> {
@@ -212,6 +248,47 @@ fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
           usage_output: usage_output,
         ),
       )
+      actor.continue(state)
+    }
+    EnsureRootWorkspace(session, name, reply) -> {
+      process.send(
+        reply,
+        workspace_store.ensure_root_workspace(state.conn, session, name),
+      )
+      actor.continue(state)
+    }
+    CreateChildWorkspace(parent, name, reply) -> {
+      process.send(
+        reply,
+        workspace_store.create_child_workspace(state.conn, parent, name),
+      )
+      actor.continue(state)
+    }
+    GetWorkspace(agent, reply) -> {
+      process.send(reply, workspace_store.get_workspace(state.conn, agent))
+      actor.continue(state)
+    }
+    ActivateWorkspace(agent, incarnation, reply) -> {
+      process.send(
+        reply,
+        workspace_store.activate_workspace(state.conn, agent, incarnation),
+      )
+      actor.continue(state)
+    }
+    BeginCell(cell, reply) -> {
+      process.send(reply, workspace_store.begin_cell(state.conn, cell))
+      actor.continue(state)
+    }
+    SettleCell(cell, reply) -> {
+      process.send(reply, workspace_store.settle_cell(state.conn, cell))
+      actor.continue(state)
+    }
+    GetCell(id, reply) -> {
+      process.send(reply, workspace_store.get_cell(state.conn, id))
+      actor.continue(state)
+    }
+    ListCells(agent, reply) -> {
+      process.send(reply, workspace_store.list_cells(state.conn, agent))
       actor.continue(state)
     }
   }

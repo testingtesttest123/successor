@@ -1,22 +1,22 @@
 # successor
 
-Clean-room reimplementation of the useful Connectome model on **Gleam/BEAM**
-(chapter 20.2), built against the executable oracle in
+Independent, Connectome-informed behavioral implementation on **Gleam/BEAM**,
+with specifications and an executable reference oracle in
 [`testingtesttest123/home/conformance`](https://github.com/testingtesttest123/home).
-Behavior contracts come from the observed pinned reference, not from its
-source structure (chapter 23.1 build rule 2).
+Reference source has been inspected; this is not a claim of legal clean-room
+provenance. Albedo's coding machinery is a reuse source, not a replacement for
+successor's identity and durable ownership model.
 
-## Status: Phase 1 in progress (chapter 23)
+## Status: walking core + private Python coding workspaces
 
 - [x] **1A — application skeleton.** Supervision root owned by a keeper
   process (a crashing tree cannot take the caller with it; `stop` is
-  gen_server ordered termination). Tree slots: DeploymentStore worker,
-  Operator worker, Session supervisor (awaiting 1F), Provider supervisor
-  (awaiting 1D). Starts and stops cleanly with zero configured providers.
+  gen_server ordered termination). Tree slots: DeploymentStore, Python workspace coordinator,
+  Operator, session registry/factory, and provider supervisor. Starts and stops cleanly with zero configured providers.
 - [x] **1B — durable store.** SQLite via sqlight: transactional session
   catalog (session + `main` branch commit atomically), append-only canonical
   record table with branch-local sequences, branch graph with head
-  referential integrity, `schema_version` gate (mismatch refuses to open),
+  referential integrity, `schema_version` gate (v1 migrates atomically to v2; future/corrupt refuses),
   one durable deployment identity, provider-attempt receipts (intent before
   call; completed/failed/aborted; usage only on success).
 - [x] **1C — configuration.** Strict canonical schema (`successor/recipe`)
@@ -43,26 +43,61 @@ source structure (chapter 23.1 build rule 2).
   restart → identical canonical history; stale completion settles nothing;
   second turn appends with branch-local sequences.
 
+- [x] **Agent-owned Python workspaces.** Stable root AgentId per session;
+  separately identified child execution workspaces; private scratch directories
+  and persistent Python namespaces; durable intent before dispatch and fenced
+  result receipts. Timeout/crash means unknown effects, never automatic replay.
+  Close/restart retains IDs, files, source and receipts, but not Python heaps.
+  This advances a narrow Python-first slice, not the entire old Phase 5 plan.
+
+- [x] **Albedo-derived coding helpers.** Files/read/exact-edit/search, async owned
+  jobs/pipelines, bounded output/spill/artifact saves, persistent top-level await.
+  Independent guardians clean ordinary job groups even if the kernel blocks or
+  dies; shared leases plus persisted active-job cleanup markers refuse unsafe
+  replacement, including loss of the guardian itself.
+
+**Trusted local interpreters, not sandboxes.** This is an operator/library API;
+model-driven tool dispatch, full subagent inference, live providers, daemon/UI
+and remote execution are not implemented yet. No commit/push of these slices.
+
+See [workspace contract and usage](docs/python-workspaces.md),
+[local test evidence](docs/python-workspaces-results.md), and
+[coding-helper usage/evidence](docs/coding-helpers-results.md),
+[Albedo reuse cohorts](docs/albedo-reuse.md), and
+[third-party notices](THIRD_PARTY_NOTICES.md).
+
 ## Layout
 
 ```text
 src/successor/
   ids.gleam        chapter-20.7 opaque identity ontology + generators
-  config.gleam     strict typed configuration (schema v1)
+  config.gleam     strict typed configuration; storage schema v2
   logging.gleam    structured key=value events
   db.gleam         SQLite storage layer (pure functions over a connection)
   store.gleam      DeploymentStore actor — single durable writer
   operator.gleam   minimal operator authority (health; wire protocol in 1F)
-  app.gleam        supervision root + lifecycle
+  app.gleam        rest-for-one supervision root + operator/library APIs
+  workspace_store.gleam  durable agent identities and fenced cell journal
+  workspaces.gleam       lazy execution actors + lifecycle coordination
+  python.gleam           process-owned persistent Python transport
+  calls.gleam            monitored, incarnation-pinned request/ack helper
+priv/python/             stdlib-only kernel, locks and adapted successor_tools/
 ```
 
 ## Development
 
 ```bash
-gleam test    # 37 tests: 1A gate, 1B durable contracts, 1C provenance/compat,
-              # provider/context units, and the 1F walking + stale gates
+ERL_FLAGS="+S 4:4" gleam test  # 76 tests, including real Python + SQLite integration
+python3 -m unittest discover -s test/python -v  # 77 tests, kernel/helpers/guardian/native acceptance
 gleam run     # (no main yet — the host binary arrives with the operator wire surface)
 ```
 
 Prerequisites: Gleam 1.19+, Erlang/OTP 27 (full distribution incl. `erlang-dev`
-for the esqlite NIF), rebar3.
+for the esqlite NIF), rebar3. Python execution additionally needs Python 3.10+
+and a POSIX/Linux host (`env`, `/bin/kill`, process groups, `fcntl.flock`).
+
+File search additionally requires ripgrep (`rg`) on the kernel PATH. The native
+launcher intentionally uses `/usr/bin:/bin`, not the embedding user's full
+PATH or credentials. Install trusted tools there, use an explicit absolute
+program path, or deliberately configure `os.environ['PATH']` inside a journaled
+Python cell. No implicit shell expansion or credential-store discovery occurs.

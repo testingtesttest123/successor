@@ -8,6 +8,7 @@
 import gleam/erlang/process.{type Subject}
 import gleam/otp/actor
 import successor/agent
+import successor/calls
 import successor/db
 import successor/ids.{type BranchId, type SessionId}
 import successor/logging
@@ -48,40 +49,54 @@ pub fn start(spec spec: Spec) -> actor.StartResult(Subject(Msg)) {
       // The session selects its agent child's events into its own mailbox.
       let agent_events = process.new_subject()
       // Register BEFORE serving: lookups never see an unregistered incarnation.
-      process.send(
-        spec.registry,
-        registry.Register(key: spec.session.value, subject: subject),
-      )
       case
-        agent.start(spec: agent.Spec(
-          session: spec.session,
-          branch: spec.branch,
-          store: spec.store,
-          adapter: spec.adapter,
-          events: agent_events,
-          model: spec.model,
-        ))
+        calls.call(
+          spec.registry,
+          registry.Claim(spec.session.value, subject, _),
+          5000,
+        )
       {
-        Error(e) -> Error(e)
-        Ok(agent_subject) -> {
-          let selector =
-            process.new_selector()
-            |> process.select_map(subject, fn(m: Msg) { m })
-            |> process.select_map(agent_events, FromAgent)
-          Ok(
-            actor.initialised(State(
-              agent: agent_subject,
-              session: spec.session,
-              events: spec.events,
-            ))
-            |> actor.selecting(selector)
-            |> actor.returning(subject),
-          )
-        }
+        Ok(Ok(_)) -> start_owned_agent(spec, subject, agent_events)
+        Ok(Error(error)) -> Error(error)
+        Error(_) -> Error("session ownership claim not acknowledged")
       }
     })
     |> actor.on_message(handle)
   actor.start(builder)
+}
+
+fn start_owned_agent(
+  spec: Spec,
+  subject: Subject(Msg),
+  agent_events: Subject(agent.TurnEvent),
+) {
+  case
+    agent.start(spec: agent.Spec(
+      session: spec.session,
+      branch: spec.branch,
+      store: spec.store,
+      adapter: spec.adapter,
+      events: agent_events,
+      model: spec.model,
+    ))
+  {
+    Error(e) -> Error(e)
+    Ok(agent_subject) -> {
+      let selector =
+        process.new_selector()
+        |> process.select_map(subject, fn(m: Msg) { m })
+        |> process.select_map(agent_events, FromAgent)
+      Ok(
+        actor.initialised(State(
+          agent: agent_subject,
+          session: spec.session,
+          events: spec.events,
+        ))
+        |> actor.selecting(selector)
+        |> actor.returning(subject),
+      )
+    }
+  }
 }
 
 type State {
