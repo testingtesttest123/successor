@@ -21,6 +21,7 @@ import successor/ids.{
   BranchId, DeploymentId, SessionId,
 }
 import successor/logging
+import successor/workspace_store
 
 pub type StoreError {
   /// The database could not be opened or created.
@@ -150,11 +151,26 @@ pub fn open(path path: String) -> Result(sqlight.Connection, StoreError) {
   use conn <- result.try(
     sqlight.open(path) |> result.map_error(fn(e) { OpenFailed(describe(e)) }),
   )
+  case enable_foreign_keys(conn) {
+    Error(e) -> close_error(conn, e)
+    Ok(_) -> open_checked(conn, path)
+  }
+}
+
+fn open_checked(
+  conn: sqlight.Connection,
+  path: String,
+) -> Result(sqlight.Connection, StoreError) {
   case probe_schema_state(conn) {
-    Error(e) -> {
-      let _ = sqlight.close(conn)
-      Error(e)
-    }
+    Error(e) -> close_error(conn, e)
+    Ok(StoreNeedsV1Migration) ->
+      case migrate_v1_to_v2(conn) {
+        Error(e) -> {
+          let _ = sqlight.close(conn)
+          Error(e)
+        }
+        Ok(_) -> finish_open(conn, path)
+      }
     Ok(StoreIsCompatible) ->
       case ensure_deployment(conn) {
         Ok(deployment) -> {
@@ -187,9 +203,29 @@ pub fn open(path path: String) -> Result(sqlight.Connection, StoreError) {
   }
 }
 
+fn enable_foreign_keys(conn: sqlight.Connection) -> Result(Nil, StoreError) {
+  use _ <- result.try(
+    sqlight.exec("PRAGMA foreign_keys = ON", on: conn)
+    |> result.map_error(fn(e) { OpenFailed(describe(e)) }),
+  )
+  case
+    sqlight.query(
+      "PRAGMA foreign_keys",
+      on: conn,
+      with: [],
+      expecting: decode.at([0], decode.int),
+    )
+  {
+    Ok([1]) -> Ok(Nil)
+    Ok(_) -> Error(OpenFailed("SQLite foreign-key enforcement is unavailable"))
+    Error(e) -> Error(OpenFailed(describe(e)))
+  }
+}
+
 type SchemaState {
   StoreIsFresh
   StoreIsCompatible
+  StoreNeedsV1Migration
   StoreIsIncompatible(found: String)
   StoreIsBroken(detail: String)
 }
@@ -208,7 +244,7 @@ fn probe_schema_state(
     )
   case meta_table {
     Error(e) -> Error(OpenFailed(describe(e)))
-    Ok([]) -> Ok(StoreIsFresh)
+    Ok([]) -> probe_empty_store(conn)
     Ok(_) ->
       case
         sqlight.query(
@@ -219,9 +255,14 @@ fn probe_schema_state(
         )
       {
         Ok([v]) ->
-          case v == int.to_string(schema_version) {
-            True -> Ok(StoreIsCompatible)
-            False -> Ok(StoreIsIncompatible(v))
+          case v {
+            "2" ->
+              case verify_v2_shape(conn) {
+                Ok(_) -> Ok(StoreIsCompatible)
+                Error(e) -> Error(e)
+              }
+            "1" -> Ok(StoreNeedsV1Migration)
+            _ -> Ok(StoreIsIncompatible(v))
           }
         Ok([]) ->
           Ok(StoreIsBroken("meta table exists without a schema_version row"))
@@ -231,39 +272,433 @@ fn probe_schema_state(
   }
 }
 
-/// DDL + version stamp + deployment, only ever on a store we determined is
-/// fresh (or empty).
+fn probe_empty_store(
+  conn: sqlight.Connection,
+) -> Result(SchemaState, StoreError) {
+  case
+    sqlight.query(
+      "SELECT COUNT(*) FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'",
+      on: conn,
+      with: [],
+      expecting: decode.at([0], decode.int),
+    )
+  {
+    Ok([0]) -> Ok(StoreIsFresh)
+    Ok(_) ->
+      Ok(StoreIsBroken(
+        "database has schema objects but no metadata; database left unmodified",
+      ))
+    Error(e) -> Error(OpenFailed(describe(e)))
+  }
+}
+
+/// DDL + version stamp + deployment, only ever on a store verified empty.
 fn initialize(
   conn: sqlight.Connection,
   path: String,
 ) -> Result(sqlight.Connection, StoreError) {
-  case sqlight.exec(ddl, on: conn) {
-    Error(e) -> {
-      let _ = sqlight.close(conn)
-      Error(OpenFailed(describe(e)))
-    }
-    Ok(_) ->
-      case stamp_schema_version(conn) {
+  case tx_begin(conn) {
+    Error(e) -> close_error(conn, e)
+    Ok(_) -> {
+      let prepared =
+        sqlight.exec(ddl, on: conn)
+        |> result.map_error(fn(e) { OpenFailed(describe(e)) })
+        |> result.try(fn(_) {
+          workspace_store.create_schema(conn)
+          |> result.map_error(fn(e) { OpenFailed(e) })
+        })
+        |> result.try(fn(_) { stamp_schema_version(conn) })
+        |> result.try(fn(_) {
+          ensure_deployment(conn) |> result.map(fn(_) { Nil })
+        })
+      case prepared {
         Error(e) -> {
-          let _ = sqlight.close(conn)
-          Error(e)
+          rollback(conn)
+          close_error(conn, e)
         }
         Ok(_) ->
-          case ensure_deployment(conn) {
-            Ok(deployment) -> {
-              logging.info(name: "store.open", fields: [
-                logging.field("path", path),
-                logging.field("deployment", deploy_to_string(deployment)),
-              ])
-              Ok(conn)
-            }
+          case tx_commit(conn) {
             Error(e) -> {
-              let _ = sqlight.close(conn)
-              Error(e)
+              rollback(conn)
+              close_error(conn, e)
             }
+            Ok(_) -> finish_open(conn, path)
           }
       }
+    }
   }
+}
+
+/// Only an intact schema-1 store is eligible. Validation happens before the
+/// write transaction, and tables plus version stamp commit as one unit.
+fn migrate_v1_to_v2(conn: sqlight.Connection) -> Result(Nil, StoreError) {
+  use _ <- result.try(verify_v1_shape(conn))
+  use _ <- result.try(tx_begin(conn))
+  let migrated =
+    workspace_store.create_schema(conn)
+    |> result.map_error(fn(e) {
+      Corrupt("schema 1 to 2 migration failed: " <> e)
+    })
+    |> result.try(fn(_) {
+      sqlight.exec(
+        "UPDATE meta SET value = '2' WHERE key = 'schema_version' AND value = '1'",
+        on: conn,
+      )
+      |> result.map_error(fn(e) { Corrupt(describe(e)) })
+    })
+    |> result.try(fn(_) { ensure_deployment(conn) |> result.map(fn(_) { Nil }) })
+  case migrated {
+    Error(e) -> {
+      rollback(conn)
+      Error(e)
+    }
+    Ok(_) ->
+      case tx_commit(conn) {
+        Ok(_) -> Ok(Nil)
+        Error(e) -> {
+          rollback(conn)
+          Error(e)
+        }
+      }
+  }
+}
+
+fn verify_v1_shape(conn: sqlight.Connection) -> Result(Nil, StoreError) {
+  use _ <- result.try(verify_required_columns(conn, base_shape_queries()))
+  verify_baseline_table_sql(conn)
+}
+
+fn verify_v2_shape(conn: sqlight.Connection) -> Result(Nil, StoreError) {
+  use _ <- result.try(verify_v1_shape(conn))
+  use _ <- result.try(
+    verify_required_columns(conn, [
+      "SELECT id, session_id, parent_id, name, incarnation_id, created_at_ms FROM agent_workspaces LIMIT 0",
+      "SELECT sequence, id, agent_id, incarnation_id, source, state, output, truncated, error, created_at_ms, settled_at_ms FROM workspace_cells LIMIT 0",
+    ]),
+  )
+  use _ <- result.try(verify_table_sql(
+    conn,
+    "agent_workspaces",
+    "CREATE TABLE agent_workspaces (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  parent_id TEXT REFERENCES agent_workspaces(id),
+  name TEXT NOT NULL,
+  incarnation_id TEXT,
+  created_at_ms INTEGER NOT NULL
+)",
+  ))
+  use _ <- result.try(verify_table_sql(
+    conn,
+    "workspace_cells",
+    "CREATE TABLE workspace_cells (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  agent_id TEXT NOT NULL REFERENCES agent_workspaces(id),
+  incarnation_id TEXT NOT NULL,
+  source TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('intent', 'succeeded', 'failed', 'outcome_unknown')),
+  output TEXT NOT NULL,
+  truncated INTEGER NOT NULL CHECK (truncated IN (0, 1)),
+  error TEXT,
+  created_at_ms INTEGER NOT NULL,
+  settled_at_ms INTEGER
+)",
+  ))
+  use _ <- result.try(verify_index(
+    conn,
+    "agent_workspaces",
+    "one_root_workspace_per_session",
+    "session_id",
+    "1:1",
+  ))
+  use _ <- result.try(verify_index_predicate(
+    conn,
+    "one_root_workspace_per_session",
+    "CREATE UNIQUE INDEX one_root_workspace_per_session
+  ON agent_workspaces(session_id) WHERE parent_id IS NULL",
+  ))
+  use _ <- result.try(verify_index(
+    conn,
+    "agent_workspaces",
+    "agent_workspaces_by_parent",
+    "parent_id",
+    "0:0",
+  ))
+  use _ <- result.try(verify_index(
+    conn,
+    "workspace_cells",
+    "one_workspace_intent_per_agent",
+    "agent_id",
+    "1:1",
+  ))
+  use _ <- result.try(verify_index_predicate(
+    conn,
+    "one_workspace_intent_per_agent",
+    "CREATE UNIQUE INDEX one_workspace_intent_per_agent
+  ON workspace_cells(agent_id) WHERE state = 'intent'",
+  ))
+  verify_index(
+    conn,
+    "workspace_cells",
+    "workspace_cells_by_agent_sequence",
+    "agent_id,sequence",
+    "0:0",
+  )
+}
+
+fn base_shape_queries() -> List(String) {
+  [
+    "SELECT key, value FROM meta LIMIT 0",
+    "SELECT id, created_at_ms FROM deployments LIMIT 0",
+    "SELECT id, name, created_at_ms, current_branch_id FROM sessions LIMIT 0",
+    "SELECT id, session_id, name, parent_id, branch_point, head_sequence, created_at_ms FROM branches LIMIT 0",
+    "SELECT id, session_id, branch_id, sequence, kind, payload, created_at_ms FROM records LIMIT 0",
+    "SELECT session_id, namespace, key, value FROM namespaced_state LIMIT 0",
+    "SELECT id, session_id, activation_id, provider, model, status, usage_input, usage_output, started_at_ms, finished_at_ms FROM provider_attempts LIMIT 0",
+    "SELECT id, session_id, tool_call_id, kind, status, receipt, created_at_ms FROM effects LIMIT 0",
+    "SELECT hash, content FROM blobs LIMIT 0",
+  ]
+}
+
+/// These statements prepare but return no rows. SQLite therefore validates
+/// required table/column names without changing the database. This is schema
+/// shape validation, not a claim to validate arbitrary hostile row contents.
+fn verify_required_columns(
+  conn: sqlight.Connection,
+  statements: List(String),
+) -> Result(Nil, StoreError) {
+  case statements {
+    [] -> Ok(Nil)
+    [statement, ..rest] ->
+      case
+        sqlight.query(statement, on: conn, with: [], expecting: decode.dynamic)
+      {
+        Ok(_) -> verify_required_columns(conn, rest)
+        Error(e) ->
+          Error(Corrupt(
+            "required schema shape is missing; database left unmodified: "
+            <> describe(e),
+          ))
+      }
+  }
+}
+
+fn verify_baseline_table_sql(
+  conn: sqlight.Connection,
+) -> Result(Nil, StoreError) {
+  use _ <- result.try(verify_table_sql(
+    conn,
+    "meta",
+    "CREATE TABLE meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+)",
+  ))
+  use _ <- result.try(verify_table_sql(
+    conn,
+    "deployments",
+    "CREATE TABLE deployments (
+  id TEXT PRIMARY KEY,
+  created_at_ms INTEGER NOT NULL
+)",
+  ))
+  use _ <- result.try(verify_table_sql(
+    conn,
+    "sessions",
+    "CREATE TABLE sessions (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  current_branch_id TEXT NOT NULL
+)",
+  ))
+  use _ <- result.try(verify_table_sql(
+    conn,
+    "branches",
+    "CREATE TABLE branches (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  name TEXT NOT NULL,
+  parent_id TEXT REFERENCES branches(id),
+  branch_point INTEGER,
+  head_sequence INTEGER NOT NULL DEFAULT 0,
+  created_at_ms INTEGER NOT NULL,
+  UNIQUE (session_id, name)
+)",
+  ))
+  use _ <- result.try(verify_table_sql(
+    conn,
+    "records",
+    "CREATE TABLE records (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  branch_id TEXT NOT NULL REFERENCES branches(id),
+  sequence INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  UNIQUE (session_id, branch_id, sequence)
+)",
+  ))
+  use _ <- result.try(verify_table_sql(
+    conn,
+    "namespaced_state",
+    "CREATE TABLE namespaced_state (
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  namespace TEXT NOT NULL,
+  key TEXT NOT NULL,
+  value TEXT NOT NULL,
+  PRIMARY KEY (session_id, namespace, key)
+)",
+  ))
+  use _ <- result.try(verify_table_sql(
+    conn,
+    "provider_attempts",
+    "CREATE TABLE provider_attempts (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  activation_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  status TEXT NOT NULL,
+  usage_input INTEGER,
+  usage_output INTEGER,
+  started_at_ms INTEGER NOT NULL,
+  finished_at_ms INTEGER
+)",
+  ))
+  use _ <- result.try(verify_table_sql(
+    conn,
+    "effects",
+    "CREATE TABLE effects (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  tool_call_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  receipt TEXT,
+  created_at_ms INTEGER NOT NULL
+)",
+  ))
+  verify_table_sql(
+    conn,
+    "blobs",
+    "CREATE TABLE blobs (
+  hash TEXT PRIMARY KEY,
+  content BLOB NOT NULL
+)",
+  )
+}
+
+fn verify_table_sql(
+  conn: sqlight.Connection,
+  table: String,
+  expected: String,
+) -> Result(Nil, StoreError) {
+  case
+    sqlight.query(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+      on: conn,
+      with: [sqlight.text(table)],
+      expecting: decode.at([0], decode.string),
+    )
+  {
+    Ok([found]) if found == expected -> Ok(Nil)
+    _ ->
+      Error(Corrupt(
+        "required schema table "
+        <> table
+        <> " is missing or malformed; database left unmodified",
+      ))
+  }
+}
+
+fn verify_index(
+  conn: sqlight.Connection,
+  table: String,
+  index: String,
+  columns: String,
+  attributes: String,
+) -> Result(Nil, StoreError) {
+  let column_rows =
+    sqlight.query(
+      "SELECT group_concat(name, ',') FROM (SELECT name FROM pragma_index_info('"
+        <> index
+        <> "') ORDER BY seqno)",
+      on: conn,
+      with: [],
+      expecting: decode.at([0], decode.string),
+    )
+  let attribute_rows =
+    sqlight.query(
+      "SELECT CAST(\"unique\" AS TEXT) || ':' || CAST(partial AS TEXT) FROM pragma_index_list('"
+        <> table
+        <> "') WHERE name = '"
+        <> index
+        <> "'",
+      on: conn,
+      with: [],
+      expecting: decode.at([0], decode.string),
+    )
+  case column_rows, attribute_rows {
+    Ok([found_columns]), Ok([found_attributes]) ->
+      case found_columns == columns && found_attributes == attributes {
+        True -> Ok(Nil)
+        False -> malformed_index(index)
+      }
+    _, _ -> malformed_index(index)
+  }
+}
+
+fn verify_index_predicate(
+  conn: sqlight.Connection,
+  index: String,
+  expected_sql: String,
+) -> Result(Nil, StoreError) {
+  case
+    sqlight.query(
+      "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+      on: conn,
+      with: [sqlight.text(index)],
+      expecting: decode.at([0], decode.string),
+    )
+  {
+    Ok([found]) if found == expected_sql -> Ok(Nil)
+    _ -> malformed_index(index)
+  }
+}
+
+fn malformed_index(index: String) -> Result(Nil, StoreError) {
+  Error(Corrupt(
+    "required schema index "
+    <> index
+    <> " is missing or malformed; database left unmodified",
+  ))
+}
+
+fn finish_open(
+  conn: sqlight.Connection,
+  path: String,
+) -> Result(sqlight.Connection, StoreError) {
+  case ensure_deployment(conn) {
+    Ok(deployment) -> {
+      logging.info(name: "store.open", fields: [
+        logging.field("path", path),
+        logging.field("deployment", deploy_to_string(deployment)),
+      ])
+      Ok(conn)
+    }
+    Error(e) -> close_error(conn, e)
+  }
+}
+
+fn close_error(
+  conn: sqlight.Connection,
+  error: StoreError,
+) -> Result(a, StoreError) {
+  let _ = sqlight.close(conn)
+  Error(error)
 }
 
 pub fn close(conn: sqlight.Connection) -> Nil {

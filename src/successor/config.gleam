@@ -7,7 +7,7 @@
 import successor/ids
 
 /// Bumped only by a deliberate, tested migration.
-pub const schema_version = 1
+pub const schema_version = 2
 
 /// Where the operator surface binds. Port 0 lets the OS assign one; the
 /// bound port is reported through the operator surface once listening.

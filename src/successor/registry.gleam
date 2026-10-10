@@ -11,6 +11,7 @@
 import gleam/dict
 import gleam/erlang/process.{type Name, type Subject}
 import gleam/otp/actor
+import successor/calls
 
 pub type Msg(handle) {
   Register(key: String, subject: Subject(handle))
@@ -50,16 +51,9 @@ pub fn lookup(
   registry: Subject(Msg(handle)),
   key key: String,
 ) -> Result(Subject(handle), Nil) {
-  case connect(registry) {
+  case calls.call(registry, Lookup(key, _), 5000) {
+    Ok(result) -> result
     Error(_) -> Error(Nil)
-    Ok(endpoint) -> {
-      let reply = process.new_subject()
-      process.send(endpoint, Lookup(key, reply))
-      case process.receive(reply, 5000) {
-        Ok(result) -> result
-        Error(_) -> Error(Nil)
-      }
-    }
   }
 }
 

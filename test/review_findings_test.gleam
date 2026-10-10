@@ -268,6 +268,42 @@ fn fake_store(fault: FakeFault) -> Subject(store.Msg) {
           process.send(reply, ids.DeploymentId("dep_fake"))
           actor.continue(fault)
         }
+        store.RecoverWorkspaces(reply) -> {
+          process.send(reply, Ok(Nil))
+          actor.continue(fault)
+        }
+        store.EnsureRootWorkspace(_, _, reply) -> {
+          process.send(reply, Error("unused in fake"))
+          actor.continue(fault)
+        }
+        store.CreateChildWorkspace(_, _, reply) -> {
+          process.send(reply, Error("unused in fake"))
+          actor.continue(fault)
+        }
+        store.GetWorkspace(_, reply) -> {
+          process.send(reply, Error("unused in fake"))
+          actor.continue(fault)
+        }
+        store.ActivateWorkspace(_, _, reply) -> {
+          process.send(reply, Error("unused in fake"))
+          actor.continue(fault)
+        }
+        store.BeginCell(_, reply) -> {
+          process.send(reply, Error("unused in fake"))
+          actor.continue(fault)
+        }
+        store.SettleCell(_, reply) -> {
+          process.send(reply, Error("unused in fake"))
+          actor.continue(fault)
+        }
+        store.GetCell(_, reply) -> {
+          process.send(reply, Error("unused in fake"))
+          actor.continue(fault)
+        }
+        store.ListCells(_, reply) -> {
+          process.send(reply, Error("unused in fake"))
+          actor.continue(fault)
+        }
       }
     })
     |> actor.start

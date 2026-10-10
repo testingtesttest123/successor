@@ -15,11 +15,14 @@ open(Name, Id, Spec) ->
     Child = #{id => Id, start => {?MODULE, start_session, [Spec]},
               restart => transient, shutdown => 5000,
               type => worker, modules => ['successor@session']},
+    %% Resolve the catalog owner once. A replaced registered name must never
+    %% silently receive this request or a retained-child retry.
+    Pid = whereis(Name),
     try
-        case supervisor:start_child(Name, Child) of
+        case gen_server:call(Pid, {start_child, Child}, 15000) of
             {ok, _Pid, _Data} -> {ok, nil};
             {error, {already_started, _Pid}} -> {ok, nil};
-            {error, already_present} -> restart_retained(Name, Id);
+            {error, already_present} -> restart_retained(Pid, Id);
             {error, Reason} -> {error, {start_failed, describe(Reason)}}
         end
     catch
@@ -30,8 +33,8 @@ open(Name, Id, Spec) ->
 %% spec. Restart it through the same serialized OTP owner, never by deleting
 %% the spec and admitting a second child. Concurrent callers may observe the
 %% first restart as running or in progress.
-restart_retained(Name, Id) ->
-    case supervisor:restart_child(Name, Id) of
+restart_retained(Pid, Id) ->
+    case gen_server:call(Pid, {restart_child, Id}, 15000) of
         {ok, _Pid, _Data} -> {ok, nil};
         {ok, _Pid} -> {ok, nil};
         {error, running} -> {ok, nil};
