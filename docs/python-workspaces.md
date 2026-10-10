@@ -97,6 +97,18 @@ during restart returns an error instead of a caller panic. Session-factory
 creation pins the owner and waits at most 15 seconds; a timeout may leave a
 late-created runtime, which the registry can discover. Creation is not retried
 automatically.
+Idle transport death is monitored through its cleanup. An empty executor releases
+its slot without waiting for another Execute or Close. If the coordinator already
+admitted a Run, that executor is retained to start a fresh incarnation; no cell
+is dropped during the retirement handshake. Before recording a new intent, a
+source-free readiness probe waits behind any already-started transport cleanup.
+Existing kernel/job leases and cleanup markers can still refuse replacement.
+The probe can wait through the transport's bounded cleanup (up to approximately
+five seconds); other agents remain independently executable. A death after the
+ready acknowledgement remains execution-time uncertainty, never permission to
+replay. A valid terminal result delivered after transport death is preserved,
+while the dead executor slot is retired.
+
 Temporary execution actors never automatically restart/reexecute a cell.
 Executor death attempts a tombstone fence/classification before releasing its
 slot; a tombstone incarnation is not evidence of a live kernel. If the writer
@@ -119,7 +131,7 @@ latency isolation while the writer is stalled.
 - Default capacity is 16 live kernel slots, including startup/cleanup. The
   standalone coordinator exposes `start_with_policy(..., Policy(n))`; app
   configuration wiring is not yet exposed. Close idle workspaces to free slots.
-  Failed startup, unknown outcome, or receipt failure retires its actor/slot.
+  Failed startup, idle transport death, unknown outcome, or receipt failure retires its actor/slot.
 - Timeout is 1..4,294,937,295 ms (BEAM timer limit minus call headroom), not a
   campaign/token budget. Source/output guards are configurable. Wire/output
   protection also has a hard 64 MiB frame/output ceiling; very large escaped

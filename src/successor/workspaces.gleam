@@ -53,6 +53,7 @@ pub type Msg {
     result: Result(types.Cell, String),
     retire: Bool,
   )
+  IdleKernelDown(agent: ids.AgentId, pid: Pid)
   WorkerDown(pid: Pid)
   IgnoreDown
 }
@@ -102,8 +103,8 @@ type ExecMsg {
     incarnation: ids.AgentIncarnationId,
     outcome: Result(python.Outcome, String),
   )
-  DispatchDown(pid: Pid)
-  IgnoreDispatchDown
+  ExecutorDown(monitor: Monitor, pid: Pid)
+  IgnoreExecutorDown
   Stop
   PidRequest(reply: Subject(Result(Int, String)))
 }
@@ -122,6 +123,7 @@ type Executor {
     self: Subject(ExecMsg),
     spec: ExecSpec,
     kernel: Option(python.Kernel),
+    kernel_monitor: Option(Monitor),
     incarnation: ids.AgentIncarnationId,
     active: Option(Active),
   )
@@ -341,6 +343,21 @@ fn handle_pool(state: Pool, msg: Msg) -> actor.Next(Pool, Msg) {
         Error(_) -> actor.continue(state)
       }
     }
+    IdleKernelDown(agent, pid) -> {
+      case dict.get(state.workers, agent.value) {
+        Ok(worker) if worker.pid == pid && !worker.busy && !worker.closing -> {
+          // The transport has finished cleanup and no Run is admitted. Remove
+          // this empty owner atomically with releasing capacity. If Execute won
+          // this race, retain the owner so its queued Run starts a fresh kernel.
+          process.demonitor_process(worker.monitor)
+          process.send(worker.subject, Stop)
+          actor.continue(
+            Pool(..state, workers: dict.delete(state.workers, agent.value)),
+          )
+        }
+        _ -> actor.continue(state)
+      }
+    }
     WorkerDown(pid) -> {
       case
         list.find(dict.to_list(state.workers), fn(pair) { pair.1.pid == pid })
@@ -464,14 +481,15 @@ fn start_executor(spec: ExecSpec) -> actor.StartResult(Subject(ExecMsg)) {
       |> process.select_map(subject, fn(msg) { msg })
       |> process.select_monitors(fn(down) {
         case down {
-          ProcessDown(_, pid, _) -> DispatchDown(pid)
-          _ -> IgnoreDispatchDown
+          ProcessDown(monitor, pid, _) -> ExecutorDown(monitor, pid)
+          _ -> IgnoreExecutorDown
         }
       })
     Ok(
       actor.initialised(Executor(
         subject,
         spec,
+        None,
         None,
         ids.new_agent_incarnation_id(),
         None,
@@ -513,7 +531,7 @@ fn handle_executor(
           }
         None -> actor.continue(state)
       }
-    DispatchDown(pid) ->
+    ExecutorDown(monitor, pid) ->
       case state.active {
         Some(active) ->
           case active.dispatch == pid {
@@ -527,9 +545,21 @@ fn handle_executor(
               )
             False -> actor.continue(state)
           }
-        None -> actor.continue(state)
+        None ->
+          case state.kernel_monitor == Some(monitor) {
+            True -> {
+              process.send(
+                state.spec.pool,
+                IdleKernelDown(state.spec.agent, process.self()),
+              )
+              actor.continue(
+                Executor(..state, kernel: None, kernel_monitor: None),
+              )
+            }
+            False -> actor.continue(state)
+          }
       }
-    IgnoreDispatchDown -> actor.continue(state)
+    IgnoreExecutorDown -> actor.continue(state)
     PidRequest(reply) -> {
       let pid = case state.kernel {
         Some(kernel) -> python.os_pid(kernel)
@@ -570,7 +600,20 @@ fn handle_executor(
 
 fn prepare_kernel(state: Executor) -> Result(Executor, String) {
   case state.kernel {
-    Some(_) -> Ok(state)
+    Some(kernel) ->
+      case python.ready(kernel) {
+        True -> Ok(state)
+        False -> {
+          // Run can precede DOWN, or arrive while the transport is cleaning up.
+          // The source-free probe waits for that cleanup before returning false.
+          // No intent exists yet; startup still enforces the persistent locks.
+          case state.kernel_monitor {
+            Some(monitor) -> process.demonitor_process(monitor)
+            None -> Nil
+          }
+          prepare_kernel(Executor(..state, kernel: None, kernel_monitor: None))
+        }
+      }
     None -> {
       let incarnation = ids.new_agent_incarnation_id()
       use _ <- result.try(
@@ -581,7 +624,14 @@ fn prepare_kernel(state: Executor) -> Result(Executor, String) {
         )),
       )
       use kernel <- result.try(python.start(state.spec.path))
-      Ok(Executor(..state, kernel: Some(kernel), incarnation: incarnation))
+      Ok(
+        Executor(
+          ..state,
+          kernel: Some(kernel),
+          kernel_monitor: Some(python.monitor(kernel)),
+          incarnation: incarnation,
+        ),
+      )
     }
   }
 }
@@ -649,7 +699,14 @@ fn finish(
   }
   let cell = terminal(active.cell, result)
   let saved = ask_store(state.spec.store, store.SettleCell(cell, _))
-  let preserve = cell.state != types.OutcomeUnknown && saved == Ok(Nil)
+  // DOWN can arrive before the dispatch forwards a valid terminal result.
+  // Preserve that receipt, but never retain a transport whose DOWN was already
+  // consumed while active; there would be no later notification to free it.
+  let alive = case state.kernel {
+    Some(kernel) -> python.is_alive(kernel)
+    None -> False
+  }
+  let preserve = cell.state != types.OutcomeUnknown && saved == Ok(Nil) && alive
   let kernel = case preserve {
     True -> state.kernel
     False -> {

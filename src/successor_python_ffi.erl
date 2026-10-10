@@ -3,7 +3,7 @@
 %% lessons; no Albedo source is copied here.
 -module(successor_python_ffi).
 
--export([start/1, execute/5, close/1, os_pid/1]).
+-export([start/1, execute/5, close/1, os_pid/1, monitor/1, ready/1]).
 
 -define(STARTUP_MS, 5000).
 -define(MAX_FRAME, 67108864).
@@ -37,6 +37,11 @@ close(_) -> nil.
 os_pid(Pid) when is_pid(Pid) ->
     case call(Pid, os_pid) of {ok, N} when is_integer(N) -> N; _ -> -1 end;
 os_pid(_) -> -1.
+
+monitor(Pid) -> erlang:monitor(process, Pid).
+
+ready(Pid) ->
+    case call(Pid, ready) of {ok, ready} -> true; _ -> false end.
 
 call(Pid, Request) ->
     Ref = make_ref(),
@@ -229,6 +234,7 @@ loop(S = #{owner_mon := OwnerMon, lock := LockPort, port := Port, os_pid := OsPi
             end;
         {call, From, Ref, {execute, _, _, _, _}} ->
             From ! {Ref, {error, <<"invalid execute limits">>}}, loop(S);
+        {call, From, Ref, ready} -> From ! {Ref, {ok, ready}}, loop(S);
         {call, From, Ref, os_pid} -> From ! {Ref, {ok, OsPid}}, loop(S);
         {call, From, Ref, close} ->
             shutdown(S), From ! {Ref, nil};
