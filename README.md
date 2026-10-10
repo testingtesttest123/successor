@@ -36,12 +36,20 @@ successor's identity and durable ownership model.
 - [x] **1F — walking scenario.** AgentRuntime (generation-guarded
   activations; async provider dispatch in its own process; stale completions
   rejected and never settled) + SessionRuntime (owns its agent; forwards
-  turn events) under a factory supervisor (factory → session → agent).
-  Operator surface: start_session / submit / turn events.
+  turn events) under a keyed supervisor (supervisor → session → agent).
+  Sessions re-register after registry restart without losing their live
+  runtime. Provider workers are cancelled on owner death via an isolated
+  guardian, while adapter crashes remain contained.
+  Operator surface: start_session / open_session / submit / turn events.
   **The 23.1F gate is met and tested:** user turn → durable user record →
   plan → provider response → durable assistant record + attempt receipt →
   restart → identical canonical history; stale completion settles nothing;
   second turn appends with branch-local sequences.
+  Explicit reopen by durable session ID selects the persisted branch and
+  current host config, preserves history and receipts, and does not replay
+  provider work. Concurrent/repeated opens share one live owner even during
+  registry loss. A restarted host can reopen that same session and append
+  another turn without creating a new session or branch.
 
 - [x] **Agent-owned Python workspaces.** Stable root AgentId per session;
   separately identified child execution workspaces; private scratch directories
@@ -58,7 +66,7 @@ successor's identity and durable ownership model.
 
 **Trusted local interpreters, not sandboxes.** This is an operator/library API;
 model-driven tool dispatch, full subagent inference, live providers, daemon/UI
-and remote execution are not implemented yet. No commit/push of these slices.
+and remote execution are not implemented yet. Publication is tracked through the coding-workspace PR.
 
 See [workspace contract and usage](docs/python-workspaces.md),
 [local test evidence](docs/python-workspaces-results.md), and
@@ -87,9 +95,10 @@ priv/python/             stdlib-only kernel, locks and adapted successor_tools/
 ## Development
 
 ```bash
-ERL_FLAGS="+S 4:4" gleam test  # 76 tests, including real Python + SQLite integration
+ERL_FLAGS="+S 4:4" gleam test  # includes real Python/SQLite, lifecycle/reopen and conformance integration
 python3 -m unittest discover -s test/python -v  # 77 tests, kernel/helpers/guardian/native acceptance
 gleam run     # (no main yet — the host binary arrives with the operator wire surface)
+python3 -m unittest discover -s conformance -p 'test_*.py' -v  # test bridge plumbing
 ```
 
 Prerequisites: Gleam 1.19+, Erlang/OTP 27 (full distribution incl. `erlang-dev`
@@ -101,3 +110,19 @@ launcher intentionally uses `/usr/bin:/bin`, not the embedding user's full
 PATH or credentials. Install trusted tools there, use an explicit absolute
 program path, or deliberately configure `os.environ['PATH']` inside a journaled
 Python cell. No implicit shell expansion or credential-store discovery occurs.
+## Shared conformance bridge
+
+`gleam run -m conformance_host` exposes a **test-only** JSONL adapter used by
+Home's shared `provider/mock-text-turn` and
+`storage/restart-after-committed-turn` scenarios. The adapter uses the public
+application/session APIs and read-only SQLite snapshots. Each host start is a
+fresh BEAM process; reopening uses the exact previously observed durable
+session ID. See [the bridge contract](conformance/README.md).
+
+This is bounded acceptance of **2 of 13** Home scenarios, not full parity.
+Reference time/IPC context injection, mock echo selection, Chronicle bookkeeping,
+and diagnostic/UI projections differ deliberately. Provider request, model,
+system-prompt, and tool-surface parity are not established by this slice.
+Home owns the shared scenarios, immutable reference baselines, explicit delta
+rules, corpus/schema validation, and fresh-reference execution gate. The local
+protocol tests above only check adapter plumbing; they do not replace that gate.

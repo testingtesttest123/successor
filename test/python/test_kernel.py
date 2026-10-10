@@ -154,6 +154,32 @@ class KernelTests(unittest.TestCase):
         # unknown and close it; it is not silently accepted as a cell result.
         self.assertEqual(exact(kernel.output, 4), b"junk")
 
+    def test_raw_request_bounds_reject_before_source_evaluation(self):
+        maximum = (64 * 1024 * 1024 - 65536) // 6
+        cases = [
+            ("x" * 4097, maximum, "bad-id"),
+            ("valid", maximum + 1, "bad-output-limit"),
+        ]
+        for cell_id, output_limit, effect in cases:
+            kernel = self.kernel()
+            source = f"open({effect!r}, 'w').write('must not run')"
+            kernel.input.write(frame({"v": 1, "type": "execute", "id": cell_id,
+                                      "source": source, "max_output_bytes": output_limit}))
+            kernel.input.flush()
+            self.assertEqual(kernel.process.wait(timeout=2), 2)
+            self.assertFalse((Path(self.directories[-1].name) / effect).exists())
+
+    def test_write_frame_enforces_hard_response_limit(self):
+        import importlib.util
+        import io
+        spec = importlib.util.spec_from_file_location("tested_successor_kernel", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        module.MAX_FRAME_BYTES = 100
+        with self.assertRaisesRegex(ValueError, "response frame exceeds"):
+            module.write_frame(io.BytesIO(), {"output": chr(0) * 20})
+
     def test_termination_reaps_nonadversarial_child_group(self):
         kernel = self.kernel()
         result = kernel.execute("child", "import subprocess; child = subprocess.Popen(['sleep', '30']); child.pid")

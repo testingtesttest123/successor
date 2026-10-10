@@ -46,6 +46,21 @@ pub fn reference_recipe_reader_accepts_mock_subset_test() {
   assert list.any(outcome.warnings, fn(w) { string_contains(w, "wake") })
 }
 
+pub fn reference_recipe_description_is_typed_display_metadata_test() {
+  let assert Ok(outcome) =
+    recipe.read_reference_recipe(
+      "{\"name\":\"Fixture\",\"description\":\"Offline fixture\",\"agent\":{\"name\":\"agent\",\"provider\":\"mock\"}}",
+    )
+  assert list.contains(
+    outcome.warnings,
+    "recipe.description accepted (display metadata): Offline fixture",
+  )
+  let assert Error(_) =
+    recipe.read_reference_recipe(
+      "{\"description\":42,\"agent\":{\"name\":\"agent\",\"provider\":\"mock\"}}",
+    )
+}
+
 pub fn reference_recipe_mock_settings_test() {
   let recipe_text =
     "{ \"agent\": { \"name\": \"a\", \"provider\": \"mock\","

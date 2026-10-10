@@ -8,6 +8,8 @@ import gleam/string
 
 pub type Kernel
 
+pub const max_output_bytes_limit = 11_173_888
+
 pub type Limits {
   Limits(timeout_ms: Int, max_source_bytes: Int, max_output_bytes: Int)
 }
@@ -42,13 +44,14 @@ pub fn execute(
         || timeout_ms > 4_294_937_295
         || max_source_bytes < 0
         || max_output_bytes < 0
+        || max_output_bytes > max_output_bytes_limit
         || cell_id == ""
         || string.byte_size(cell_id) > 4096
         || string.byte_size(source) > max_source_bytes
       {
         True ->
           Error(
-            "invalid cell id or limits (timeout must be 1..4294937295 ms), or source exceeds its byte limit",
+            "invalid cell id or limits (timeout must be 1..4294937295 ms and output at most 11173888 bytes), or source exceeds its byte limit",
           )
         False ->
           execute_native(kernel, cell_id, source, timeout_ms, max_output_bytes)

@@ -7,6 +7,8 @@
 
 -define(STARTUP_MS, 5000).
 -define(MAX_FRAME, 67108864).
+-define(RESPONSE_OVERHEAD, 65536).
+-define(MAX_OUTPUT, ((?MAX_FRAME - ?RESPONSE_OVERHEAD) div 6)).
 
 start(Workspace) when is_binary(Workspace) ->
     Caller = self(),
@@ -204,8 +206,9 @@ decode_startup(Data, OsPid) ->
 loop(S = #{owner_mon := OwnerMon, lock := LockPort, port := Port, os_pid := OsPid}) ->
     receive
         {call, From, Ref, {execute, Id, Source, Timeout, MaxOutput}}
-                when Timeout > 0, Timeout =< 4294937295,
-                     MaxOutput >= 0, MaxOutput =< ?MAX_FRAME ->
+                when byte_size(Id) > 0, byte_size(Id) =< 4096,
+                     Timeout > 0, Timeout =< 4294937295,
+                     MaxOutput >= 0, MaxOutput =< ?MAX_OUTPUT ->
             Request = iolist_to_binary(json:encode(#{v => 1, type => <<"execute">>, id => Id,
                                     source => Source, max_output_bytes => MaxOutput})),
             Size = byte_size(Request),
@@ -251,7 +254,7 @@ wait_result(S, From, Ref, Id, Deadline, MaxOutput, Parser) ->
 wait_result_receive(S = #{owner_mon := OwnerMon, lock := LockPort,
                           port := Port, os_pid := OsPid},
                     From, Ref, Id, Deadline, MaxOutput, Parser, After) ->
-    FrameLimit = min(?MAX_FRAME, MaxOutput * 6 + 65536),
+    FrameLimit = MaxOutput * 6 + ?RESPONSE_OVERHEAD,
     receive
         {Port, {data, Data}} ->
             case feed_frame(Data, Parser, FrameLimit) of

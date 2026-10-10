@@ -26,4 +26,5 @@ jobs:
       - run: gleam test
       - name: Python kernel and transport tests (stdlib only)
         run: python3 -m unittest discover -s test/python -v
+      - run: python3 -m unittest discover -s conformance -p 'test_*.py' -v
       - run: gleam format --check src test

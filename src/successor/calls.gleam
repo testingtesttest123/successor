@@ -2,8 +2,6 @@
 //// a request is never silently re-routed or re-sent across owner replacement.
 
 import gleam/erlang/process.{type Pid, type Subject}
-import gleam/otp/actor
-import gleam/otp/factory_supervisor as factory
 import gleam/result
 
 type Event(a) {
@@ -53,11 +51,3 @@ fn send_pinned(
   owner: Pid,
   message: message,
 ) -> Result(Nil, String)
-
-/// A replacement window is an error, never an exit propagated to the caller.
-/// The factory owner is pinned once; timed-out child creation is not retried.
-@external(erlang, "successor_calls_ffi", "start_child_safe")
-pub fn start_child(
-  supervisor: factory.Supervisor(a, b),
-  argument: a,
-) -> actor.StartResult(b)

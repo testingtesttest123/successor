@@ -68,3 +68,9 @@ source retry, no heap persistence, no GC or deployment lease. Model tool
 projection, rich files/jobs/output helpers, full inference subagents, real
 providers, remote worker, daemon and UI remain subsequent work. The reuse map
 identifies actual Albedo cohorts; it does not claim they have already been ported.
+
+## Publication follow-up
+
+The measurements above describe the local checkpoint before publication.
+See [PR integration and release acceptance](coding-workspaces-pr-results.md)
+for current-main preservation, independent-review fixes, and final CI evidence.

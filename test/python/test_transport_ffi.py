@@ -117,6 +117,22 @@ class ErlangTransportTests(unittest.TestCase):
           true=(erlang:monotonic_time(millisecond)-T < 1000), halt().""")
 
 
+    def test_maximum_escaped_output_frame_and_plus_one_admission(self):
+        self.erl(r"""
+          application:load(successor),
+          {ok,K}=successor_python_ffi:start(list_to_binary("/tmp/successor-ffi-output-bound-"++os:getpid())),
+          Max=(67108864-65536) div 6,
+          {error,<<"invalid execute limits">>}=successor_python_ffi:execute(
+            K,binary:copy(<<"x">>,4097),<<"ran_bad_id=True">>,1000,Max),
+          {error,<<"invalid execute limits">>}=successor_python_ffi:execute(
+            K,<<"too-large">>,<<"ran_too_large=True">>,1000,Max+1),
+          {ok,{succeeded,Output,true}}=successor_python_ffi:execute(
+            K,<<"boundary">>,<<"import sys; sys.stdout.write(chr(0) * 11173889)">>,30000,Max),
+          Max=byte_size(Output), 0=binary:last(Output),
+          {ok,{succeeded,<<"(False, False)\n">>,false}}=successor_python_ffi:execute(
+            K,<<"healthy">>,<<"('ran_bad_id' in globals(), 'ran_too_large' in globals())">>,1000,1000),
+          nil=successor_python_ffi:close(K), halt().""", timeout=45)
+
     def test_invalid_timer_is_refused_before_dispatch_and_kernel_stays_healthy(self):
         self.erl(r"""
           application:load(successor),

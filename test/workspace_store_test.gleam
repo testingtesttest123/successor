@@ -32,6 +32,29 @@ pub fn root_identity_is_stable_and_children_are_independent_test() {
   db.close(conn)
 }
 
+pub fn foreign_keys_are_enabled_and_missing_session_root_is_refused_test() {
+  let path = tmp_db()
+  let assert Ok(conn) = db.open(path: path)
+  assert foreign_keys_enabled(conn)
+  let assert Error(_) =
+    workspace_store.ensure_root_workspace(
+      conn,
+      ids.SessionId("missing-session"),
+      "orphan",
+    )
+  db.close(conn)
+
+  let assert Ok(reopened) = db.open(path: path)
+  assert foreign_keys_enabled(reopened)
+  let assert Error(_) =
+    workspace_store.ensure_root_workspace(
+      reopened,
+      ids.SessionId("still-missing"),
+      "orphan",
+    )
+  db.close(reopened)
+}
+
 pub fn begin_and_settle_are_fenced_compare_and_set_test() {
   let assert Ok(conn) = db.open(path: tmp_db())
   let root = root(conn)
@@ -261,6 +284,169 @@ pub fn genuine_v1_upgrade_preserves_canonical_history_test() {
   db.close(upgraded)
 }
 
+pub fn nonempty_database_without_meta_is_refused_byte_for_byte_test() {
+  // Raw sqlight.open does not create a parent directory (unlike db.open).
+  let path = "/tmp/" <> ids.fresh(prefix: "successor-partial-store") <> ".db"
+  let assert Ok(conn) = sqlight.open(path)
+  let assert Ok(_) = sqlight.exec("CREATE TABLE partial (bad TEXT)", on: conn)
+  let _ = sqlight.close(conn)
+  let before = file_bytes(path)
+  let assert Error(db.Corrupt(_)) = db.open(path: path)
+  assert file_bytes(path) == before
+}
+
+pub fn weak_workspace_cells_constraints_are_refused_byte_for_byte_test() {
+  let path = tmp_db()
+  let assert Ok(conn) = db.open(path: path)
+  let assert Ok(_) = sqlight.exec("DROP TABLE workspace_cells", on: conn)
+  let assert Ok(_) =
+    sqlight.exec(
+      "CREATE TABLE workspace_cells (
+        sequence INTEGER,
+        id TEXT,
+        agent_id TEXT,
+        incarnation_id TEXT,
+        source TEXT,
+        state TEXT,
+        output TEXT,
+        truncated INTEGER,
+        error TEXT,
+        created_at_ms INTEGER,
+        settled_at_ms INTEGER
+      );
+      CREATE UNIQUE INDEX one_workspace_intent_per_agent
+        ON workspace_cells(agent_id) WHERE state = 'intent';
+      CREATE INDEX workspace_cells_by_agent_sequence
+        ON workspace_cells(agent_id, sequence);",
+      on: conn,
+    )
+  db.close(conn)
+  let before = file_bytes(path)
+  let assert Error(db.Corrupt(_)) = db.open(path: path)
+  assert file_bytes(path) == before
+}
+
+pub fn changed_quoted_workspace_state_literal_is_refused_byte_for_byte_test() {
+  let path = tmp_db()
+  let assert Ok(conn) = db.open(path: path)
+  let assert Ok(_) = sqlight.exec("DROP TABLE workspace_cells", on: conn)
+  let assert Ok(_) =
+    sqlight.exec(
+      "CREATE TABLE workspace_cells (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        agent_id TEXT NOT NULL REFERENCES agent_workspaces(id),
+        incarnation_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('Intent', 'succeeded', 'failed', 'outcome_unknown')),
+        output TEXT NOT NULL,
+        truncated INTEGER NOT NULL CHECK (truncated IN (0, 1)),
+        error TEXT,
+        created_at_ms INTEGER NOT NULL,
+        settled_at_ms INTEGER
+      );
+      CREATE UNIQUE INDEX one_workspace_intent_per_agent
+        ON workspace_cells(agent_id) WHERE state = 'intent';
+      CREATE INDEX workspace_cells_by_agent_sequence
+        ON workspace_cells(agent_id, sequence);",
+      on: conn,
+    )
+  db.close(conn)
+  let before = file_bytes(path)
+  let assert Error(db.Corrupt(_)) = db.open(path: path)
+  assert file_bytes(path) == before
+}
+
+pub fn weak_agent_workspace_constraints_are_refused_byte_for_byte_test() {
+  let path = tmp_db()
+  let assert Ok(conn) = db.open(path: path)
+  let assert Ok(_) = sqlight.exec("PRAGMA foreign_keys = OFF", on: conn)
+  let assert Ok(_) = sqlight.exec("DROP TABLE agent_workspaces", on: conn)
+  let assert Ok(_) =
+    sqlight.exec(
+      "CREATE TABLE agent_workspaces (
+        id TEXT,
+        session_id TEXT,
+        parent_id TEXT,
+        name TEXT,
+        incarnation_id TEXT,
+        created_at_ms INTEGER
+      );
+      CREATE UNIQUE INDEX one_root_workspace_per_session
+        ON agent_workspaces(session_id) WHERE parent_id IS NULL;
+      CREATE INDEX agent_workspaces_by_parent ON agent_workspaces(parent_id);",
+      on: conn,
+    )
+  db.close(conn)
+  let before = file_bytes(path)
+  let assert Error(db.Corrupt(_)) = db.open(path: path)
+  assert file_bytes(path) == before
+}
+
+pub fn weak_valid_column_v1_table_is_refused_byte_for_byte_test() {
+  let path = tmp_db()
+  let assert Ok(conn) = db.open(path: path)
+  let assert Ok(_) = sqlight.exec("DROP TABLE workspace_cells", on: conn)
+  let assert Ok(_) = sqlight.exec("DROP TABLE agent_workspaces", on: conn)
+  let assert Ok(_) = sqlight.exec("DROP TABLE effects", on: conn)
+  let assert Ok(_) =
+    sqlight.exec(
+      "CREATE TABLE effects (
+        id TEXT,
+        session_id TEXT,
+        tool_call_id TEXT,
+        kind TEXT,
+        status TEXT,
+        receipt TEXT,
+        created_at_ms INTEGER
+      )",
+      on: conn,
+    )
+  let assert Ok(_) =
+    sqlight.exec(
+      "UPDATE meta SET value = '1' WHERE key = 'schema_version'",
+      on: conn,
+    )
+  db.close(conn)
+  let before = file_bytes(path)
+  let assert Error(db.Corrupt(_)) = db.open(path: path)
+  assert file_bytes(path) == before
+}
+
+pub fn false_root_partial_index_is_refused_byte_for_byte_test() {
+  let path = tmp_db()
+  let assert Ok(conn) = db.open(path: path)
+  let assert Ok(_) =
+    sqlight.exec("DROP INDEX one_root_workspace_per_session", on: conn)
+  let assert Ok(_) =
+    sqlight.exec(
+      "CREATE UNIQUE INDEX one_root_workspace_per_session
+        ON agent_workspaces(session_id) WHERE parent_id IS NULL AND 0",
+      on: conn,
+    )
+  db.close(conn)
+  let before = file_bytes(path)
+  let assert Error(db.Corrupt(_)) = db.open(path: path)
+  assert file_bytes(path) == before
+}
+
+pub fn false_intent_partial_index_is_refused_byte_for_byte_test() {
+  let path = tmp_db()
+  let assert Ok(conn) = db.open(path: path)
+  let assert Ok(_) =
+    sqlight.exec("DROP INDEX one_workspace_intent_per_agent", on: conn)
+  let assert Ok(_) =
+    sqlight.exec(
+      "CREATE UNIQUE INDEX one_workspace_intent_per_agent
+        ON workspace_cells(agent_id) WHERE state = 'intent' AND 0",
+      on: conn,
+    )
+  db.close(conn)
+  let before = file_bytes(path)
+  let assert Error(db.Corrupt(_)) = db.open(path: path)
+  assert file_bytes(path) == before
+}
+
 pub fn malformed_v1_columns_are_refused_byte_for_byte_test() {
   let path = tmp_db()
   let assert Ok(conn) = db.open(path: path)
@@ -357,6 +543,17 @@ fn root(conn: sqlight.Connection) -> AgentWorkspace {
   let assert Ok(workspace) =
     workspace_store.ensure_root_workspace(conn, session, "root")
   workspace
+}
+
+fn foreign_keys_enabled(conn: sqlight.Connection) -> Bool {
+  let assert Ok([enabled]) =
+    sqlight.query(
+      "PRAGMA foreign_keys",
+      on: conn,
+      with: [],
+      expecting: decode.at([0], decode.int),
+    )
+  enabled == 1
 }
 
 fn file_bytes(path: String) -> BitArray {

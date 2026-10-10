@@ -14,6 +14,6 @@ suspend_actor(Pid) -> erlang:suspend_process(Pid), nil.
 resume_actor(Pid) -> erlang:resume_process(Pid), nil.
 
 factory_count(Supervisor) ->
-    try 'gleam@otp@factory_supervisor':count_children(Supervisor) of
+    try successor_session_supervisor:count_children(Supervisor) of
         Count -> {ok, Count}
     catch exit:_ -> {error, nil} end.

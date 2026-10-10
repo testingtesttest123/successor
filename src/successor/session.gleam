@@ -1,14 +1,15 @@
 //// SessionRuntime (chapter 23.1A/1F): the durable session's live owner.
 ////
-//// One session runtime per open session (spawned under the session factory
+//// One session runtime per open session (spawned under the keyed session
 //// supervisor). It owns its AgentRuntime child and forwards turn events to
-//// the host observer. Session state lives in the actor; the factory
+//// the host observer. Session state lives in the actor; the session
 //// supervisor restarts it (and it re-anchors to the same durable session).
 
-import gleam/erlang/process.{type Subject}
+import gleam/erlang/process.{type Monitor, type Subject}
+import gleam/int
+import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import successor/agent
-import successor/calls
 import successor/db
 import successor/ids.{type BranchId, type SessionId}
 import successor/logging
@@ -24,6 +25,9 @@ pub type Msg {
   /// Operator capability: which agent owns this session (future cancel /
   /// introspection surfaces address the agent through this).
   GetAgent(reply: Subject(Subject(agent.Msg)))
+  /// Reconnect after the registry restarts or is temporarily unavailable.
+  ConnectRegistry
+  RegistryDown(process.Down)
 }
 
 pub type Spec {
@@ -41,66 +45,58 @@ pub type Spec {
   )
 }
 
-/// Start under the session factory supervisor. The agent child is spawned in
-/// the initialiser, so ownership is: factory -> session -> agent.
+/// Start under the keyed session supervisor. The agent child is spawned in
+/// the initialiser, so ownership is: supervisor -> session -> agent.
 pub fn start(spec spec: Spec) -> actor.StartResult(Subject(Msg)) {
   let builder =
     actor.new_with_initialiser(10_000, fn(subject) {
       // The session selects its agent child's events into its own mailbox.
       let agent_events = process.new_subject()
-      // Register BEFORE serving: lookups never see an unregistered incarnation.
       case
-        calls.call(
-          spec.registry,
-          registry.Claim(spec.session.value, subject, _),
-          5000,
-        )
+        agent.start(spec: agent.Spec(
+          session: spec.session,
+          branch: spec.branch,
+          store: spec.store,
+          adapter: spec.adapter,
+          events: agent_events,
+          model: spec.model,
+        ))
       {
-        Ok(Ok(_)) -> start_owned_agent(spec, subject, agent_events)
-        Ok(Error(error)) -> Error(error)
-        Error(_) -> Error("session ownership claim not acknowledged")
+        Error(e) -> Error(e)
+        Ok(agent_subject) -> {
+          let selector =
+            process.new_selector()
+            |> process.select_map(subject, fn(m: Msg) { m })
+            |> process.select_map(agent_events, FromAgent)
+            |> process.select_monitors(RegistryDown)
+          Ok(
+            actor.initialised(
+              connect_registry(State(
+                self: subject,
+                agent: agent_subject,
+                session: spec.session,
+                events: spec.events,
+                registry: spec.registry,
+                registry_monitor: None,
+                retry_ms: 10,
+              )),
+            )
+            |> actor.selecting(selector)
+            |> actor.returning(subject),
+          )
+        }
       }
     })
     |> actor.on_message(handle)
   actor.start(builder)
 }
 
-fn start_owned_agent(
-  spec: Spec,
-  subject: Subject(Msg),
-  agent_events: Subject(agent.TurnEvent),
-) {
-  case
-    agent.start(spec: agent.Spec(
-      session: spec.session,
-      branch: spec.branch,
-      store: spec.store,
-      adapter: spec.adapter,
-      events: agent_events,
-      model: spec.model,
-    ))
-  {
-    Error(e) -> Error(e)
-    Ok(agent_subject) -> {
-      let selector =
-        process.new_selector()
-        |> process.select_map(subject, fn(m: Msg) { m })
-        |> process.select_map(agent_events, FromAgent)
-      Ok(
-        actor.initialised(State(
-          agent: agent_subject,
-          session: spec.session,
-          events: spec.events,
-        ))
-        |> actor.selecting(selector)
-        |> actor.returning(subject),
-      )
-    }
-  }
-}
-
 type State {
   State(
+    self: Subject(Msg),
+    registry: Subject(registry.Msg(Msg)),
+    registry_monitor: Option(Monitor),
+    retry_ms: Int,
     agent: Subject(agent.Msg),
     session: SessionId,
     events: Subject(agent.TurnEvent),
@@ -109,6 +105,15 @@ type State {
 
 fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
   case msg {
+    ConnectRegistry -> actor.continue(connect_registry(state))
+    RegistryDown(down) ->
+      case down {
+        process.ProcessDown(ref, _, _) if state.registry_monitor == Some(ref) ->
+          actor.continue(connect_registry(
+            State(..state, registry_monitor: None),
+          ))
+        _ -> actor.continue(state)
+      }
     SubmitUserText(text, reply) -> {
       // Straight-through activation: the agent replies to the requester.
       // The completion event arrives via FromAgent.
@@ -175,5 +180,31 @@ pub fn records(
     Ok(Ok(records)) -> Ok(records)
     Ok(Error(_)) -> Error("store error")
     Error(_) -> Error("store did not reply")
+  }
+}
+
+// Monitor the exact incarnation that receives registration. If it dies
+// before processing that message, DOWN triggers registration again. A
+// capped backoff keeps sessions alive without spinning during an outage.
+fn connect_registry(state: State) -> State {
+  case state.registry_monitor {
+    Some(_) -> state
+    None ->
+      case registry.connect(state.registry) {
+        Ok(endpoint) -> {
+          let assert Ok(pid) = process.subject_owner(endpoint)
+          let monitor = process.monitor(pid)
+          process.send(
+            endpoint,
+            registry.Register(state.session.value, state.self),
+          )
+          State(..state, registry_monitor: Some(monitor), retry_ms: 10)
+        }
+        Error(_) -> {
+          let _ =
+            process.send_after(state.self, state.retry_ms, ConnectRegistry)
+          State(..state, retry_ms: int.min(state.retry_ms * 2, 1000))
+        }
+      }
   }
 }

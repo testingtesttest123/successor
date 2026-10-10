@@ -3,16 +3,15 @@ import gleam/int
 import gleam/list
 import gleam/option.{Some}
 import gleam/otp/actor
-import gleam/otp/factory_supervisor as factory
 import gleam/string
 import successor/app
-import successor/calls
 import successor/config
 import successor/ids
 import successor/providers/mock
 import successor/python
 import successor/registry
 import successor/session
+import successor/session_supervisor as factory
 import successor/store
 import successor/workspace_types as types
 import successor/workspaces
@@ -113,6 +112,21 @@ pub fn bounded_output_and_pre_dispatch_validation_test() {
   assert !exists(path <> "/bad-timer")
   let assert Ok(cells) = workspaces.cells(host.store, root.id)
   assert list.length(cells) == 1
+  app.stop(host)
+}
+
+pub fn excessive_output_limit_is_rejected_before_intent_test() {
+  let host = host()
+  let assert Ok(sid) = app.start_session(host, "output-limit")
+  let assert Ok(root) = app.root_workspace(host, sid)
+  let source =
+    "from pathlib import Path\nPath('must-not-run').write_text('bad')"
+  let limits = python.Limits(5000, 4096, python.max_output_bytes_limit + 1)
+  let assert Error(_) = app.execute_python(host, root.id, source, limits)
+  let assert Ok(path) = workspaces.workspace_path(host.config.data_dir, root.id)
+  assert !exists(path <> "/must-not-run")
+  let assert Ok(cells) = workspaces.cells(host.store, root.id)
+  assert cells == []
   app.stop(host)
 }
 
@@ -725,7 +739,8 @@ pub fn concurrent_session_open_has_one_live_owner_test() {
   assert one == sid && two == sid
   let assert Ok(after) = app.session_of(host, sid)
   assert before == after
-  // A direct concurrent factory start cannot replace the live registry claim.
+  // The keyed OTP catalog, not registry presence, serializes ownership.
+  // An idempotent duplicate cannot replace the running child or its spec.
   let spec =
     session.Spec(
       sid,
@@ -736,9 +751,10 @@ pub fn concurrent_session_open_has_one_live_owner_test() {
       host.events,
       host.registry,
     )
-  let assert Error(_) = session.start(spec)
+  let assert Ok(_) = factory.start_child(host.sessions, spec)
   let assert Ok(still) = app.session_of(host, sid)
   assert still == before
+  assert factory.count_children(host.sessions) == 1
   app.stop(host)
 }
 
@@ -757,7 +773,7 @@ pub fn absent_registered_runtime_returns_error_without_panicking_test() {
       process.new_subject(),
       process.new_subject(),
     )
-  let assert Error(_) = calls.start_child(missing_factory, spec)
+  let assert Error(_) = factory.start_child(missing_factory, spec)
 }
 
 pub fn coding_helpers_pipeline_private_child_and_retained_artifact_test() {
@@ -964,7 +980,7 @@ fn suspend_actor(pid: Pid) -> Nil
 @external(erlang, "successor_workspace_test_ffi", "resume_actor")
 fn resume_actor(pid: Pid) -> Nil
 
-fn await_factory(supervisor: factory.Supervisor(a, b), remaining: Int) -> Int {
+fn await_factory(supervisor: factory.Supervisor, remaining: Int) -> Int {
   case factory_count(supervisor) {
     Ok(count) -> count
     Error(_) -> {
@@ -976,4 +992,4 @@ fn await_factory(supervisor: factory.Supervisor(a, b), remaining: Int) -> Int {
 }
 
 @external(erlang, "successor_workspace_test_ffi", "factory_count")
-fn factory_count(supervisor: factory.Supervisor(a, b)) -> Result(Int, Nil)
+fn factory_count(supervisor: factory.Supervisor) -> Result(Int, Nil)

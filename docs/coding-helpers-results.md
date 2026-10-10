@@ -130,3 +130,9 @@ guardian with vanished lease but persisted marker refusing replacement.
 The verbatim proc module (after its three-line provenance header) has pinned
 SHA256 `25f20d7354b38d10f0c0e9e579fc567b11455bcdfb368cf304bfd52b89b25ea8`.
 Parent personally verified its exact byte equality and the verbatim license.
+
+## Publication follow-up
+
+The measurements above describe the local checkpoint before publication.
+See [PR integration and release acceptance](coding-workspaces-pr-results.md)
+for current-main preservation, independent-review fixes, and final CI evidence.

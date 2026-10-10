@@ -39,6 +39,10 @@ Workspace SQL belongs in `workspace_store.gleam` called only by DeploymentStore 
 Public exact API:
 
 - opaque `Kernel`.
+- `max_output_bytes_limit = 11173888`, derived as `(64MiB-65536)//6`
+  for worst-case JSON escaping within the response frame. Higher capture limits
+  refuse before intent/evaluation; nonempty cell IDs are at most4096 UTF8 bytes.
+  The kernel independently refuses response frames above64MiB.
 - `Limits(timeout_ms: Int, max_source_bytes: Int, max_output_bytes: Int)`; `default_limits()` returns 300000 ms, 1048576 source bytes, 262144 retained output bytes. These are configurable transport guards, not task/token quotas.
 - `Outcome { Succeeded(output: String, truncated: Bool); Failed(output: String, truncated: Bool, error: String); Unknown(reason: String) }`.
 - `start(workspace: String) -> Result(Kernel, String)`; owns a persistent interpreter, linked/monitored to calling execution actor; ensure private directory exists and reject bad startup.
@@ -54,7 +58,7 @@ Root/child/get APIs produce durable IDs. Lazy per-agent actors/kernels on execut
 
 ## Acceptance
 
-- Existing 45 tests remain green, no regression to walking provider path.
+- Published main lifecycle/reopen/conformance coverage remains green, no regression to walking provider path.
 - Real Python: repeat cells retain variables; root and same-label children have independent names, files/default CWD; Python errors keep namespace; output overflow bounded/truncated; no inherited synthetic secret; cell timeout unknown/new namespace; close/death no ordinary owned-process leak.
 - Journal intent is visible while a slow cell runs; rejected intent causes zero Python side effects; failures/duplicates/stale incarnation cannot overwrite receipts.
 - Close/restart retains AgentIds, paths/files and terminal receipts; heap state loss explicit; unfinished intent is classified unknown and not replayed.
@@ -88,7 +92,7 @@ Never equate an error with permission to resend side-effecting source.
 
 Root supervision is rest-for-one: a writer failure stops later runtime owners
 before recovery. Session factory references retain the registered name, not
-an obsolete PID. Session registry claims refuse a second live owner. Registered-name absence
+an obsolete PID. Session keyed session-supervisor child catalogs refuse a second live owner. Registered-name absence
 during restart returns an error instead of a caller panic. Session-factory
 creation pins the owner and waits at most 15 seconds; a timeout may leave a
 late-created runtime, which the registry can discover. Creation is not retried

@@ -21,8 +21,11 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 PROTOCOL = 1
-MAX_REQUEST_BYTES = 64 * 1024 * 1024
-MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+MAX_FRAME_BYTES = 64 * 1024 * 1024
+MAX_REQUEST_BYTES = MAX_FRAME_BYTES
+RESPONSE_OVERHEAD_BYTES = 64 * 1024
+MAX_OUTPUT_BYTES = (MAX_FRAME_BYTES - RESPONSE_OVERHEAD_BYTES) // 6
+MAX_CELL_ID_BYTES = 4096
 
 
 async def read_frame(stream: asyncio.StreamReader) -> bytes | None:
@@ -43,6 +46,8 @@ async def read_frame(stream: asyncio.StreamReader) -> bytes | None:
 
 def write_frame(stream: BinaryIO, value: dict[str, Any]) -> None:
     payload = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(payload) > MAX_FRAME_BYTES:
+        raise ValueError("response frame exceeds protocol limit")
     stream.write(struct.pack(">I", len(payload)))
     stream.write(payload)
     stream.flush()
@@ -215,6 +220,7 @@ async def serve() -> int:
                     request.get("v") != PROTOCOL
                     or request.get("type") != "execute"
                     or not isinstance(cell_id, str)
+                    or not 0 < len(cell_id.encode("utf-8")) <= MAX_CELL_ID_BYTES
                     or not isinstance(source, str)
                     or not isinstance(maximum, int)
                     or isinstance(maximum, bool)

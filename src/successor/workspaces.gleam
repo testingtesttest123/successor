@@ -707,6 +707,7 @@ fn validate(source: String, limits: python.Limits) -> Result(Nil, String) {
     || limits.timeout_ms > 4_294_937_295
     || limits.max_source_bytes < 0
     || limits.max_output_bytes < 0
+    || limits.max_output_bytes > python.max_output_bytes_limit
     || string.byte_size(source) > limits.max_source_bytes
   {
     True -> Error("invalid Python limits or source exceeds its byte limit")

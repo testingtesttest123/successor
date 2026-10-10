@@ -6,3 +6,4 @@ erl_crash.dump
 # Local stdlib Python execution/tests
 __pycache__/
 *.py[cod]
+/conformance/__pycache__/
