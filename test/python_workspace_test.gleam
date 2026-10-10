@@ -160,6 +160,302 @@ pub fn deadline_closes_kernel_and_new_incarnation_has_no_heap_test() {
   app.stop(host)
 }
 
+pub fn idle_kernel_death_releases_slot_and_next_cell_runs_fresh_test() {
+  let host = host()
+  let assert Ok(sid) = app.start_session(host, "idle-death")
+  let assert Ok(root) = app.root_workspace(host, sid)
+  let assert Ok(child) = app.child_workspace(host, root.id, "other")
+  let assert Ok(pool) =
+    workspaces.start_with_policy(
+      host.store,
+      host.config.data_dir,
+      process.new_name("idle-death-pool"),
+      workspaces.Policy(1),
+    )
+  let limits = python.default_limits()
+  let assert Ok(first) =
+    workspaces.execute(
+      pool.data,
+      root.id,
+      "held = 123\nfrom pathlib import Path\nPath('retained').write_text('yes')",
+      limits,
+    )
+  let assert Ok(pid) = workspaces.kernel_pid(pool.data, root.id)
+  kill_os(pid)
+  assert wait_os_dead(pid, 200)
+  // Slot release must happen without another Execute or Close request.
+  assert await_closing(pool.data, root.id, 300)
+  let assert Ok(other) = workspaces.execute(pool.data, child.id, "42", limits)
+  assert other.state == types.Succeeded
+  let assert Ok(_) = workspaces.close(pool.data, child.id)
+  let assert Ok(next) =
+    workspaces.execute(
+      pool.data,
+      root.id,
+      "assert 'held' not in globals()\nfrom pathlib import Path\nassert Path('retained').read_text() == 'yes'\nPath('next-ran').write_text('once')",
+      limits,
+    )
+  assert next.state == types.Succeeded
+  assert next.incarnation != first.incarnation
+  let assert Ok(path) = workspaces.workspace_path(host.config.data_dir, root.id)
+  assert read_text(path <> "/next-ran") == Ok("once")
+  let assert Ok(cells) = workspaces.cells(host.store, root.id)
+  assert list.length(cells) == 2
+  assert app.inspect_python(host, first.id) == Ok(first)
+  let assert Ok(_) = workspaces.close(pool.data, root.id)
+  stop_actor(pool.pid)
+  app.stop(host)
+}
+
+pub fn idle_death_does_not_drop_an_already_admitted_run_test() {
+  admitted_run_survives_idle_death(False)
+}
+
+pub fn admitted_run_before_death_notification_starts_fresh_test() {
+  admitted_run_survives_idle_death(True)
+}
+
+fn admitted_run_survives_idle_death(run_first: Bool) {
+  let host = host()
+  let assert Ok(sid) = app.start_session(host, "idle-admission-race")
+  let assert Ok(root) = app.root_workspace(host, sid)
+  let limits = python.default_limits()
+  let assert Ok(first) = app.execute_python(host, root.id, "held = 123", limits)
+  let assert Ok(pid) = workspaces.kernel_pid(host.workspaces, root.id)
+  let assert Ok(owner) = workspaces.executor_owner(host.workspaces, root.id)
+  let transport = kernel_transport(owner)
+  suspend_actor(owner)
+  case run_first {
+    False -> {
+      kill_os(pid)
+      assert wait_process_dead(transport, 300)
+    }
+    True -> Nil
+  }
+  let response = process.new_subject()
+  process.send(
+    host.workspaces,
+    workspaces.Execute(
+      root.id,
+      "assert 'held' not in globals()\nfrom pathlib import Path\np = Path('next-ran')\np.write_text(p.read_text() + 'once' if p.exists() else 'once')",
+      limits,
+      response,
+    ),
+  )
+  // Same-sender ordering makes this a barrier: Run is admitted and queued.
+  let assert Ok(_) = workspaces.executor_owner(host.workspaces, root.id)
+  case run_first {
+    True -> {
+      kill_os(pid)
+      assert wait_process_dead(transport, 300)
+    }
+    False -> Nil
+  }
+  resume_actor(owner)
+  let assert Ok(Ok(next)) = process.receive(response, 5000)
+  assert next.state == types.Succeeded
+  assert next.incarnation != first.incarnation
+  let assert Ok(path) = workspaces.workspace_path(host.config.data_dir, root.id)
+  assert read_text(path <> "/next-ran") == Ok("once")
+  let assert Ok(cells) = workspaces.cells(host.store, root.id)
+  assert list.length(cells) == 2
+  let assert Ok(_) = app.close_python(host, root.id)
+  app.stop(host)
+}
+
+pub fn next_cell_waits_for_idle_transport_cleanup_before_intent_test() {
+  let host = host()
+  let assert Ok(sid) = app.start_session(host, "cleanup-admission")
+  let assert Ok(root) = app.root_workspace(host, sid)
+  let limits = python.default_limits()
+  let assert Ok(first) = app.execute_python(host, root.id, "held = 123", limits)
+  let assert Ok(pid) = workspaces.kernel_pid(host.workspaces, root.id)
+  let assert Ok(owner) = workspaces.executor_owner(host.workspaces, root.id)
+  let transport = kernel_transport(owner)
+  suspend_actor(transport)
+  kill_os(pid)
+  assert await_port_exit(transport, 200)
+  let response = process.new_subject()
+  process.send(
+    host.workspaces,
+    workspaces.Execute(
+      root.id,
+      "assert 'held' not in globals()\nfrom pathlib import Path\nPath('next-ran').write_text('once')",
+      limits,
+      response,
+    ),
+  )
+  let assert Ok(_) = workspaces.executor_owner(host.workspaces, root.id)
+  assert await_transport_call(transport, 200)
+  let assert Ok(before_cleanup) = workspaces.cells(host.store, root.id)
+  assert before_cleanup == [first]
+  resume_actor(transport)
+  let assert Ok(Ok(next)) = process.receive(response, 5000)
+  assert next.state == types.Succeeded && next.incarnation != first.incarnation
+  let assert Ok(path) = workspaces.workspace_path(host.config.data_dir, root.id)
+  assert read_text(path <> "/next-ran") == Ok("once")
+  let assert Ok(cells) = workspaces.cells(host.store, root.id)
+  assert list.length(cells) == 2
+  let assert Ok(_) = app.close_python(host, root.id)
+  app.stop(host)
+}
+
+fn await_transport_call(pid: Pid, remaining: Int) -> Bool {
+  case transport_call_queued(pid) {
+    True -> True
+    False -> {
+      case remaining > 0 {
+        False -> False
+        True -> {
+          process.sleep(10)
+          await_transport_call(pid, remaining - 1)
+        }
+      }
+    }
+  }
+}
+
+@external(erlang, "successor_workspace_test_ffi", "transport_call_queued")
+fn transport_call_queued(pid: Pid) -> Bool
+
+fn await_port_exit(pid: Pid, remaining: Int) -> Bool {
+  case port_exit_queued(pid) {
+    True -> True
+    False -> {
+      case remaining > 0 {
+        False -> False
+        True -> {
+          process.sleep(10)
+          await_port_exit(pid, remaining - 1)
+        }
+      }
+    }
+  }
+}
+
+@external(erlang, "successor_workspace_test_ffi", "port_exit_queued")
+fn port_exit_queued(pid: Pid) -> Bool
+
+pub fn transport_death_before_success_delivery_still_releases_slot_test() {
+  let host = host()
+  let assert Ok(sid) = app.start_session(host, "late-success")
+  let assert Ok(root) = app.root_workspace(host, sid)
+  let assert Ok(path) = workspaces.workspace_path(host.config.data_dir, root.id)
+  let limits = python.default_limits()
+  let assert Ok(_) = app.execute_python(host, root.id, "held = 123", limits)
+  let assert Ok(pid) = workspaces.kernel_pid(host.workspaces, root.id)
+  let assert Ok(owner) = workspaces.executor_owner(host.workspaces, root.id)
+  let transport = kernel_transport(owner)
+  let response = process.new_subject()
+  process.send(
+    host.workspaces,
+    workspaces.Execute(
+      root.id,
+      "from pathlib import Path\nimport time\nPath('started').write_text('yes')\nwhile not Path('finish').exists(): time.sleep(0.01)\nprint('done')",
+      limits,
+      response,
+    ),
+  )
+  assert await_file(path <> "/started", 200)
+  let dispatch = dispatch_process(owner)
+  suspend_actor(dispatch)
+  write_text(path <> "/finish", "yes")
+  assert await_transport_idle(transport, 200)
+  kill_os(pid)
+  assert wait_process_dead(transport, 300)
+  // A same-owner request is a barrier after its transport DOWN was queued.
+  let assert Ok(_) = workspaces.kernel_pid(host.workspaces, root.id)
+  resume_actor(dispatch)
+  let assert Ok(Ok(cell)) = process.receive(response, 5000)
+  assert cell.state == types.Succeeded
+  assert string.contains(cell.output, "done")
+  assert await_closing(host.workspaces, root.id, 300)
+  let assert Ok(next) =
+    app.execute_python(host, root.id, "assert 'held' not in globals()", limits)
+  assert next.state == types.Succeeded && next.incarnation != cell.incarnation
+  let assert Ok(_) = app.close_python(host, root.id)
+  app.stop(host)
+}
+
+fn await_transport_idle(pid: Pid, remaining: Int) -> Bool {
+  case transport_idle(pid) {
+    True -> True
+    False -> {
+      case remaining > 0 {
+        False -> False
+        True -> {
+          process.sleep(10)
+          await_transport_idle(pid, remaining - 1)
+        }
+      }
+    }
+  }
+}
+
+@external(erlang, "successor_workspace_test_ffi", "dispatch_process")
+fn dispatch_process(owner: Pid) -> Pid
+
+@external(erlang, "successor_workspace_test_ffi", "transport_idle")
+fn transport_idle(pid: Pid) -> Bool
+
+@external(erlang, "successor_workspace_test_ffi", "write_text")
+fn write_text(path: String, text: String) -> Nil
+
+fn wait_process_dead(pid: Pid, remaining: Int) -> Bool {
+  case process.is_alive(pid) {
+    False -> True
+    True -> {
+      case remaining > 0 {
+        False -> False
+        True -> {
+          process.sleep(10)
+          wait_process_dead(pid, remaining - 1)
+        }
+      }
+    }
+  }
+}
+
+@external(erlang, "successor_workspace_test_ffi", "kill_os")
+fn kill_os(pid: Int) -> Nil
+
+@external(erlang, "successor_workspace_test_ffi", "kernel_transport")
+fn kernel_transport(owner: Pid) -> Pid
+
+pub fn kernel_death_during_cell_stays_unknown_and_is_not_replayed_test() {
+  let host = host()
+  let assert Ok(sid) = app.start_session(host, "inflight-kernel-death")
+  let assert Ok(root) = app.root_workspace(host, sid)
+  let assert Ok(path) = workspaces.workspace_path(host.config.data_dir, root.id)
+  let limits = python.default_limits()
+  let assert Ok(_) = app.execute_python(host, root.id, "held = 123", limits)
+  let assert Ok(pid) = workspaces.kernel_pid(host.workspaces, root.id)
+  let response = process.new_subject()
+  process.send(
+    host.workspaces,
+    workspaces.Execute(
+      root.id,
+      "from pathlib import Path\nimport time\np = Path('effect')\np.write_text(p.read_text() + 'once' if p.exists() else 'once')\ntime.sleep(10)\nPath('after').write_text('bad')",
+      limits,
+      response,
+    ),
+  )
+  assert await_file(path <> "/effect", 200)
+  kill_os(pid)
+  let assert Ok(Ok(cell)) = process.receive(response, 5000)
+  assert cell.state == types.OutcomeUnknown
+  let assert Ok(next) =
+    app.execute_python(host, root.id, "assert 'held' not in globals()", limits)
+  assert next.state == types.Succeeded && next.incarnation != cell.incarnation
+  assert read_text(path <> "/effect") == Ok("once")
+  assert !exists(path <> "/after")
+  assert app.inspect_python(host, cell.id) == Ok(cell)
+  let assert Ok(cells) = workspaces.cells(host.store, root.id)
+  assert list.length(cells) == 3
+  let assert Ok(_) = app.close_python(host, root.id)
+  app.stop(host)
+}
+
 pub fn close_preserves_identity_files_and_receipts_test() {
   let host = host()
   let assert Ok(sid) = app.start_session(host, "close")

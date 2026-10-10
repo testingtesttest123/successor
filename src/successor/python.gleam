@@ -4,6 +4,7 @@
 //// filesystem or network sandbox; the limits protect the transport from
 //// accidental runaway cells.
 
+import gleam/erlang/process.{type Monitor}
 import gleam/string
 
 pub type Kernel
@@ -73,3 +74,15 @@ pub fn close(kernel: Kernel) -> Nil
 
 @external(erlang, "successor_python_ffi", "os_pid")
 pub fn os_pid(kernel: Kernel) -> Int
+
+/// Monitor transport termination, which follows its bounded cleanup protocol.
+@external(erlang, "successor_python_ffi", "monitor")
+pub fn monitor(kernel: Kernel) -> Monitor
+
+@external(erlang, "erlang", "is_process_alive")
+pub fn is_alive(kernel: Kernel) -> Bool
+
+/// Source-free preflight. Waits for an already-closing transport to terminate;
+/// a later death is still an execution-time uncertainty, never replay permission.
+@external(erlang, "successor_python_ffi", "ready")
+pub fn ready(kernel: Kernel) -> Bool
