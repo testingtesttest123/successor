@@ -1,9 +1,12 @@
 //// Extension-owned schema. Installation is atomic and creates no identity.
 
 import albedo/daemon/store
+import albedo/harness/extensions/personality/read_tokens
 import gleam/dynamic/decode
+import gleam/json
 import gleam/list
 import gleam/result
+import gleam/string
 import sqlight
 
 pub fn apply(db: sqlight.Connection) -> Result(Nil, String) {
@@ -21,6 +24,16 @@ pub fn apply(db: sqlight.Connection) -> Result(Nil, String) {
       "CREATE TABLE IF NOT EXISTS personality_memory(id TEXT PRIMARY KEY,persona_id TEXT NOT NULL REFERENCES personality_persona(id),revision INTEGER NOT NULL CHECK(revision>0),lifecycle TEXT NOT NULL CHECK(lifecycle IN ('active','retracted')),importance INTEGER NOT NULL CHECK(importance BETWEEN 0 AND 3),tags TEXT NOT NULL,temporal_scope TEXT NOT NULL,unresolved INTEGER NOT NULL CHECK(unresolved IN (0,1))); CREATE INDEX IF NOT EXISTS personality_memory_scope ON personality_memory(persona_id,lifecycle,id); CREATE TABLE IF NOT EXISTS personality_memory_revision(persona_id TEXT NOT NULL REFERENCES personality_persona(id),memory_id TEXT NOT NULL REFERENCES personality_memory(id),revision INTEGER NOT NULL,text TEXT NOT NULL,provenance TEXT NOT NULL,uncertainty TEXT NOT NULL,author TEXT NOT NULL,origin_session TEXT NOT NULL,event_id INTEGER NOT NULL REFERENCES personality_event(id),reason TEXT NOT NULL,lifecycle TEXT NOT NULL,importance INTEGER NOT NULL,tags TEXT NOT NULL,temporal_scope TEXT NOT NULL,unresolved INTEGER NOT NULL,PRIMARY KEY(persona_id,memory_id,revision)); CREATE TABLE IF NOT EXISTS personality_source(id TEXT PRIMARY KEY,persona_id TEXT NOT NULL REFERENCES personality_persona(id),session TEXT NOT NULL,first_seq INTEGER NOT NULL,last_seq INTEGER NOT NULL,digest TEXT NOT NULL,actors TEXT NOT NULL,origin TEXT NOT NULL,binding_revision INTEGER NOT NULL,pre_binding_through INTEGER NOT NULL,lcm_hint TEXT,availability TEXT NOT NULL DEFAULT 'available' CHECK(availability IN ('available','unavailable'))); CREATE INDEX IF NOT EXISTS personality_source_scope ON personality_source(persona_id,id); CREATE TABLE IF NOT EXISTS personality_memory_source(persona_id TEXT NOT NULL,memory_id TEXT NOT NULL,revision INTEGER NOT NULL,source_id TEXT NOT NULL REFERENCES personality_source(id),relation TEXT NOT NULL CHECK(relation IN ('supports','contradicts','corrects')),PRIMARY KEY(persona_id,memory_id,revision,source_id,relation),FOREIGN KEY(persona_id,memory_id,revision) REFERENCES personality_memory_revision(persona_id,memory_id,revision));",
     ))
     use _ <- result.try(
+      store.add_columns(db, "personality_memory", [
+        #("event_id", "INTEGER NOT NULL DEFAULT 0 CHECK(event_id>=0)"),
+        #("search_text", "TEXT NOT NULL DEFAULT ''"),
+      ]),
+    )
+    use _ <- result.try(store.exec(
+      db,
+      "CREATE INDEX IF NOT EXISTS personality_memory_source_pointer ON personality_memory_source(persona_id,source_id,memory_id,revision); CREATE INDEX IF NOT EXISTS personality_memory_unresolved ON personality_memory(persona_id,lifecycle,unresolved,event_id DESC,id); CREATE INDEX IF NOT EXISTS personality_memory_recent ON personality_memory(persona_id,lifecycle,event_id DESC,id); CREATE INDEX IF NOT EXISTS personality_memory_pinned ON personality_memory(persona_id,lifecycle,(CASE WHEN instr(lower(tags),'\"pinned\"')>0 THEN 1 ELSE 0 END),event_id DESC,id);",
+    ))
+    use _ <- result.try(
       store.add_columns(db, "personality_capacity", [
         #("memory_bytes", "INTEGER NOT NULL DEFAULT 0 CHECK(memory_bytes>=0)"),
         #(
@@ -29,6 +42,7 @@ pub fn apply(db: sqlight.Connection) -> Result(Nil, String) {
         ),
       ]),
     )
+    use _ <- result.try(read_tokens.initialise(db))
     // CREATE IF NOT EXISTS may leave an existing malformed relation untouched.
     // Check the real main-schema tables and every used column before committing
     // any new schema. Failure preserves existing data and quarantines the bundle.
@@ -54,7 +68,7 @@ pub fn apply(db: sqlight.Connection) -> Result(Nil, String) {
           ),
           #(
             "personality_memory",
-            "id,persona_id,revision,lifecycle,importance,tags,temporal_scope,unresolved",
+            "id,persona_id,revision,lifecycle,importance,tags,temporal_scope,unresolved,event_id,search_text",
           ),
           #(
             "personality_memory_revision",
@@ -70,9 +84,10 @@ pub fn apply(db: sqlight.Connection) -> Result(Nil, String) {
           ),
           #("personality_operation", "operation_id,request,result,created_at"),
           #("personality_controls", "persona_id,field_locks"),
+          #("personality_read_key", "singleton,secret,fingerprint"),
           #(
             "personality_capacity",
-            "persona_id,ordinary_bytes,corrective_bytes,ordinary_limit,corrective_limit,memory_bytes,record_limit",
+            "persona_id,ordinary_bytes,corrective_bytes,ordinary_limit,corrective_limit,memory_bytes,record_limit,read_token_version",
           ),
           #(
             "personality_tool_receipt",
@@ -101,6 +116,7 @@ pub fn apply(db: sqlight.Connection) -> Result(Nil, String) {
         },
       ),
     )
+    use _ <- result.try(backfill_recall(db))
     use personas <- result.try(store.rows(
       db,
       "SELECT id FROM personality_persona",
@@ -125,4 +141,62 @@ pub fn capacity(
       sqlight.text(persona),
     ],
   )
+}
+
+// This one-time additive migration reads only current heads, fifty at a time.
+// Existing evidence, revision text, receipts, raw transcripts and LCM stay intact.
+fn backfill_recall(db: sqlight.Connection) -> Result(Nil, String) {
+  use rows <- result.try(
+    store.rows(
+      db,
+      "SELECT m.id,m.persona_id,r.text,m.tags,m.temporal_scope,r.event_id FROM personality_memory m JOIN personality_memory_revision r ON r.persona_id=m.persona_id AND r.memory_id=m.id AND r.revision=m.revision WHERE m.search_text='' ORDER BY m.id LIMIT 50",
+      [],
+      {
+        use id <- decode.field(0, decode.string)
+        use persona <- decode.field(1, decode.string)
+        use text <- decode.field(2, decode.string)
+        use tags <- decode.field(3, decode.string)
+        use scope <- decode.field(4, decode.string)
+        use event <- decode.field(5, decode.int)
+        decode.success(#(id, persona, text, tags, scope, event))
+      },
+    ),
+  )
+  use _ <- result.try(
+    list.try_each(rows, fn(row) {
+      use tags <- result.try(
+        json.parse(row.3, decode.list(decode.string))
+        |> result.replace_error(
+          "current memory tags unreadable during recall migration",
+        ),
+      )
+      let search =
+        string.lowercase(row.2 <> " " <> string.join(tags, " ") <> " " <> row.4)
+      use _ <- result.try(
+        store.run(
+          db,
+          "UPDATE personality_memory SET search_text=?,event_id=? WHERE id=? AND persona_id=?",
+          [
+            sqlight.text(search),
+            sqlight.int(row.5),
+            sqlight.text(row.0),
+            sqlight.text(row.1),
+          ],
+        ),
+      )
+      store.run(
+        db,
+        "UPDATE personality_capacity SET ordinary_bytes=ordinary_bytes+?,memory_bytes=memory_bytes+? WHERE persona_id=?",
+        [
+          sqlight.int(string.byte_size(search) + 32),
+          sqlight.int(string.byte_size(search) + 32),
+          sqlight.text(row.1),
+        ],
+      )
+    }),
+  )
+  case rows {
+    [] -> Ok(Nil)
+    _ -> backfill_recall(db)
+  }
 }

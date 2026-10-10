@@ -131,6 +131,63 @@ class PersonalityContextTest(unittest.TestCase):
                     read(app, f"/sessions/{session}/context?view=summary")
                     self.assertEqual(len(provider.requests), before)
 
+    def test_automatic_recall_is_request_only_and_preserves_static_pin(self):
+        for protocol in ("responses", "chat_completions"):
+            with self.subTest(protocol=protocol):
+                provider = Provider(lambda _request: text("source-backed turn"))
+                self.addCleanup(provider.close)
+                with self.app(provider, protocol) as app:
+                    session = app.session()
+                    bind(app, session, create(app)["id"])
+                    app.prompt(session, "needle asserted source").close()
+                    app.idle(session)
+                    transcript = read(app, f"/sessions/{session}/history?limit=100")[
+                        "entries"
+                    ]
+                    seq = next(
+                        row["position"] for row in transcript if row["kind"] == "user"
+                    )
+                    head = inspect(app, session)["persona"]
+                    receipt = value(
+                        app,
+                        f"/sessions/{session}/memories",
+                        {
+                            "operation_id": operation_id(),
+                            "expected_revision": head["revision"],
+                            "expected_identity_revision": head["identity_revision"],
+                            "reason": "explicit foreground curation",
+                            "memories": [
+                                {
+                                    "text": "I was told the needle assertion",
+                                    "provenance": "experienced",
+                                    "uncertainty": "unverified",
+                                    "tags": ["pinned"],
+                                    "sources": [
+                                        {
+                                            "relation": "supports",
+                                            "first_seq": seq,
+                                            "last_seq": seq,
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                    )
+                    app.prompt(session, "needle follow-up").close()
+                    app.idle(session)
+                    sent = [item["request"] for item in provider.requests]
+                    self.assertEqual(identity(sent[0])[0], identity(sent[-1])[0])
+                    self.assertIn(
+                        "[request context: personality recall", json.dumps(sent[-1])
+                    )
+                    summary = read(app, f"/sessions/{session}/context?view=summary")
+                    recalled = summary["request_context"][0]
+                    self.assertIn(receipt["records"][0]["id"], recalled["selected_ids"])
+                    self.assertLessEqual(recalled["candidate_count"], 256)
+                    self.assertLessEqual(recalled["selected_count"], 16)
+                    durable = read(app, f"/sessions/{session}?tail=100")["history"]
+                    self.assertNotIn("[request context:", json.dumps(durable))
+
     def test_gateway_retry_reuses_snapshot_then_next_preparation_refreshes(self):
         for protocol in ("responses", "chat_completions"):
             with self.subTest(protocol=protocol):

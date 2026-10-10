@@ -128,7 +128,7 @@ rules, corpus/schema validation, and fresh-reference execution gate. The local
 protocol tests above only check adapter plumbing; they do not replace that gate.
 
 
-## Albedo personality experiment: reviewed stages 1-5 checkpoint
+## Albedo personality experiment: reviewed stages 1-6 checkpoint
 
 The separate [`albedo-personality/`](albedo-personality/) subtree contains an
 Albedo-derived personal experiment. Existing Successor runtime and entrypoints
@@ -139,32 +139,34 @@ and [staged plan](docs/experiments/albedo-personality-plan.md) describe the goal
 - Albedo source: [okami.mom/albedo](https://tangled.org/okami.mom/albedo), pinned
   baseline `47735ec493f3e3a6ac73b619495098437759e0c0`.
 - Exact independently reviewed publication checkpoint:
-  `b8869c1ed98f022beffa85b5f03bdd4b8f44b30a`, tracked tree
-  `f34b472ac0f37bd57c6d73c3a7deac21caca9df1`. The complete tracked source,
-  tests, required assets, license and third-party/vendored notices are exported.
+  `46046bcccfa46be7d7aeb947ccbb5061bf662568`, tracked tree
+  `993ef6bf735209dfd25be60a5ee96a7548a0abd3`. Complete tracked source, tests,
+  required assets, license and third-party/vendored notices are exported.
   No Albedo Git history, runtime homes or active uncommitted work is imported.
-- Reviewed through stage 5: identity binding/admission, revisioned identity
-  edits/receipts, immutable request-time identity context, and source-backed
-  memory storage, correction/history, source validation and bounded inspection
-  with stable whole-revision attribution. Automatic recall/ranking, LCM persona
-  attribution, relationships, delegation and imports remain later stages.
-- The reviewed OAuth sanitization remains included. Antigravity sign-in/refresh
-  and Colab sign-in require explicit runtime configuration; tokens considered
-  fresh by Albedo remain usable without it. See
+- Reviewed through stage 6: identity binding/admission and revisioned edits,
+  immutable request-time identity context, source-backed memory correction and
+  inspection, bounded current-record recall and canonical episodic expansion.
+  Recall keeps the candidate/record/rendered-byte bounds, revalidates authority
+  and evidence, and authenticates exact episodic references and paging state.
+  Generated local signing state lives only in the application database; it is
+  not part of this source export. LCM persona attribution (stage 7), typed
+  relationships/commitments (stage 8), delegation (stage 9) and imports are future
+  work, not completed features of this checkpoint.
+- Reviewed OAuth sanitization and generic webhook fixture cleanup are retained.
+  Antigravity sign-in/refresh and Colab sign-in require explicit runtime config;
+  tokens considered fresh by Albedo remain usable without it. See
   [`robot-docs/auth.md`](albedo-personality/robot-docs/auth.md).
-- Reviewed fixture cleanup replaces seven Stripe-shaped webhook test examples
-  with clearly fake generic placeholders. The historical GitHub alert remains
-  unresolved; this source cleanup does not dismiss alerts, validate or rotate
-  credentials, or rewrite earlier Successor commits. Scans are scoped checks,
-  not a comprehensive security guarantee.
-- Recorded stage-5 verification: 119 compiled covering cases, 23 real human-HTTP
-  daemon cases, static/generated-contract checks, Rust renderer tests, Go unit
-  checks and API-documentation invariants. The fixture-cleanup TUI suite passed.
-  The prior reviewed OAuth checks included 90 focused/provider cases and 18
-  Colab Python cases. These recorded runs are not a fresh full-suite pass.
+  The historical GitHub fixture alert remains unresolved: this cleanup does not
+  dismiss alerts, validate/rotate credentials or rewrite earlier Successor
+  commits. Scoped scans are not a comprehensive security guarantee.
+- Recorded final stage-6 checks: 135 compiled covering cases, 23 memory/recall
+  human-HTTP daemon cases plus four migration/identity HTTP cases, and successful
+  static/generated-contract/API-doc checks. The hardened read-key restart test
+  was also rechecked. Prior unchanged Rust/Go and sanitization/fixture results
+  remain recorded evidence, not newly rerun full-suite passes.
 - Full `./test.sh`, full `gleam test`, kernel/provider-turn E2E and Chrome remain
   unverified under the approved AF_UNIX/Chrome exception. The inherited setup
-  capacity-accounting gap remains scheduled for stage 11; overall capacity
-  compliance is not yet established. This is WIP, not the stage-12 release.
-  Publication verifies exact subtree parity and existing Successor preservation
-  without rerunning tests in the active implementation worktree.
+  capacity gap remains assigned to stage 11; overall capacity compliance is not
+  established. This is WIP, not the stage-12 release. Publication verifies exact
+  subtree parity and existing Successor preservation without testing the active
+  implementation worktree.

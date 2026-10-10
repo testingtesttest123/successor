@@ -1,5 +1,6 @@
 """Source-backed memory, corrections and hostile references through the real daemon."""
 
+import base64
 import hashlib
 import json
 import sqlite3
@@ -129,6 +130,428 @@ class MemoryFixture(unittest.TestCase):
 
 @exclusive
 class PersonalityMemoryTest(MemoryFixture):
+    def test_explicit_recall_pages_old_records_and_scopes_cursors(self):
+        import urllib.parse
+
+        provider = Provider(lambda _request: text("unused"))
+        self.addCleanup(provider.close)
+        with self.app(provider) as app:
+            create(app, default=True)
+            session = app.session()
+            bind(app, session)
+            seq = self.seed(app, session, ("user", "authorized needle evidence"))[0]
+            ids = set()
+            for batch in range(10):
+                receipt = self.mutate(
+                    app,
+                    session,
+                    [
+                        self.memory(f"needle old item {batch * 30 + i}", seq)
+                        for i in range(30)
+                    ],
+                )
+                ids.update(record["id"] for record in receipt["records"])
+            other = app.session()
+            bind(app, other)
+            before = inspect(app, session)["persona"]
+            seen, cursor = set(), None
+            while True:
+                route = f"/sessions/{session}/recall?query=needle"
+                if cursor:
+                    route += "&cursor=" + urllib.parse.quote(cursor, safe="")
+                page = value(app, route)
+                self.assertLessEqual(page["bytes"], 8192)
+                self.assertLessEqual(len(page["records"]), 50)
+                seen.update(record["id"] for record in page["records"])
+                cursor = page["next_cursor"]
+                if cursor is None:
+                    break
+                if len(seen) == 1:
+                    with self.assertRaises(urllib.error.HTTPError) as denied:
+                        value(
+                            app,
+                            f"/sessions/{other}/recall?query=needle&cursor="
+                            + urllib.parse.quote(cursor, safe=""),
+                        )
+                    self.assertEqual(denied.exception.code, 409)
+            self.assertEqual(seen, ids)
+            self.assertEqual(inspect(app, session)["persona"], before)
+            self.assertEqual(provider.requests, [])
+
+    def test_episodic_recall_authorizes_old_summary_and_expands_canonical_range(self):
+        import urllib.parse
+
+        provider = Provider(lambda _request: text("unused"))
+        self.addCleanup(provider.close)
+        with self.app(provider) as app:
+            create(app, default=True)
+            caller, older, unrelated = app.session(), app.session(), app.session()
+            bind(app, caller)
+            old_seq = self.seed(
+                app, older, ("user", "older canonical needle evidence")
+            )[0]
+            foreign_seq = self.seed(
+                app, unrelated, ("user", "unrelated private evidence")
+            )[0]
+            bind(app, older)
+            node_ids = {}
+
+            def summaries(_app):
+                with sqlite3.connect(app.home / "albedo.sqlite") as db:
+                    for session, seq, summary in (
+                        (
+                            older,
+                            old_seq,
+                            "needle historical derived summary " + "🧭" * 300,
+                        ),
+                        (unrelated, foreign_seq, "needle unrelated private summary"),
+                    ):
+                        row = db.execute(
+                            "INSERT INTO lcm_compaction_node(session,depth,first_seq,last_seq,summary) VALUES(?,0,?,?,?)",
+                            (session, seq, seq, summary),
+                        )
+                        node_ids[session] = row.lastrowid
+
+            app.restart(prepare=summaries)
+            before = inspect(app, caller)["persona"]
+            cursor, pieces, source = None, [], None
+            while True:
+                route = f"/sessions/{caller}/recall?view=episodes&query=needle"
+                if cursor:
+                    route += "&cursor=" + urllib.parse.quote(cursor, safe="")
+                page = value(app, route)
+                self.assertLessEqual(page["bytes"], 8192)
+                self.assertLessEqual(len(page["records"]), 50)
+                self.assertNotIn("unrelated private", json.dumps(page))
+                for episode in page["records"]:
+                    self.assertEqual(
+                        episode["evidence_label"], "derived_fallible_evidence"
+                    )
+                    source = episode["source"]
+                    self.assertEqual(source["session"], older)
+                    self.assertEqual(source["lcm_hint"], str(node_ids[older]))
+                    self.assertEqual(
+                        (source["first_seq"], source["last_seq"]), (old_seq, old_seq)
+                    )
+                    pieces.append(episode["summary"])
+                cursor = page["next_cursor"]
+                if cursor is None:
+                    break
+            self.assertEqual(
+                "".join(pieces), "needle historical derived summary " + "🧭" * 300
+            )
+            assert source is not None
+            expanded = value(app, f"/sessions/{caller}/sources/{source['id']}")
+            self.assertIn("older canonical needle evidence", expanded["text"])
+            with self.assertRaises(urllib.error.HTTPError) as denied:
+                value(app, f"/sessions/{caller}/sources/lcm:{node_ids[unrelated]}:fake")
+            self.assertEqual(denied.exception.code, 403)
+
+            def remove_hint(_app):
+                with sqlite3.connect(app.home / "albedo.sqlite") as db:
+                    db.execute(
+                        "DELETE FROM lcm_compaction_node WHERE id=?", (node_ids[older],)
+                    )
+
+            # The reference must survive restart and hint loss before any curation.
+            app.restart(prepare=remove_hint)
+            without_hint = value(app, f"/sessions/{caller}/sources/{source['id']}")
+            self.assertIn("older canonical needle evidence", without_hint["text"])
+            for field in (
+                "session",
+                "first_seq",
+                "last_seq",
+                "digest",
+                "origin",
+                "binding_revision",
+                "pre_binding_through",
+            ):
+                self.assertEqual(without_hint["source"][field], source[field])
+            self.assertIsNone(without_hint["source"]["lcm_hint"])
+            self.assertEqual(inspect(app, caller)["persona"], before)
+            with sqlite3.connect(app.home / "albedo.sqlite") as db:
+                self.assertEqual(
+                    db.execute("SELECT COUNT(*) FROM personality_source").fetchone()[0],
+                    0,
+                )
+            receipt = self.mutate(
+                app,
+                caller,
+                [
+                    {
+                        "text": "historical recalled claim",
+                        "provenance": "experienced",
+                        "uncertainty": "derived_unverified",
+                        "sources": [
+                            {"relation": "supports", "source_id": source["id"]}
+                        ],
+                    }
+                ],
+            )
+            record = self.records(app, caller, receipt["records"][0]["id"])[0]
+            self.assertEqual(record["provenance"], "imported")
+            self.assertEqual(record["evidence_source_ids"], [source["id"]])
+            self.assertEqual(
+                before["identity_revision"],
+                inspect(app, caller)["persona"]["identity_revision"],
+            )
+            self.assertEqual(provider.requests, [])
+            foreign = create(app, name="Different owner")
+            foreign_caller = app.session()
+            bind(app, foreign_caller, foreign["id"])
+            with self.assertRaises(urllib.error.HTTPError) as foreign_scope:
+                value(app, f"/sessions/{foreign_caller}/sources/{source['id']}")
+            self.assertEqual(foreign_scope.exception.code, 403)
+
+            app.restart()
+            retained = value(app, f"/sessions/{caller}/sources/{source['id']}")
+            self.assertIn("older canonical needle evidence", retained["text"])
+
+            def change_raw(_app):
+                with sqlite3.connect(app.home / "albedo.sqlite") as db:
+                    db.execute(
+                        "UPDATE transcript SET payload=? WHERE seq=?",
+                        (packed("user", "changed evidence"), old_seq),
+                    )
+
+            app.restart(prepare=change_raw)
+            with self.assertRaises(urllib.error.HTTPError) as changed:
+                value(app, f"/sessions/{caller}/sources/{source['id']}")
+            self.assertEqual(changed.exception.code, 409)
+
+            def remove_raw(_app):
+                with sqlite3.connect(app.home / "albedo.sqlite") as db:
+                    db.execute(
+                        "DELETE FROM submission_events WHERE session=? AND seq=?",
+                        (older, old_seq),
+                    )
+                    db.execute("DELETE FROM transcript WHERE seq=?", (old_seq,))
+
+            app.restart(prepare=remove_raw)
+            with self.assertRaises(urllib.error.HTTPError) as missing:
+                value(app, f"/sessions/{caller}/sources/{source['id']}")
+            self.assertEqual(missing.exception.code, 409)
+
+    def test_episode_cursor_survives_restart_and_rejects_position_tampering(self):
+        import urllib.parse
+
+        provider = Provider(lambda _request: text("unused"))
+        self.addCleanup(provider.close)
+        with self.app(provider) as app:
+            create(app, default=True)
+            caller, older = app.session(), app.session()
+            bind(app, caller)
+            seq = self.seed(app, older, ("user", "cursor source evidence"))[0]
+            bind(app, older)
+
+            def summary(_app):
+                with sqlite3.connect(app.home / "albedo.sqlite") as db:
+                    db.execute(
+                        "INSERT INTO lcm_compaction_node(session,depth,first_seq,last_seq,summary) VALUES(?,0,?,?,?)",
+                        (older, seq, seq, "needle " + "x" * 300),
+                    )
+
+            app.restart(prepare=summary)
+            route = f"/sessions/{caller}/recall?view=episodes&query=needle"
+            first = value(app, route)
+            cursor = first["next_cursor"]
+            self.assertIsNotNone(cursor)
+
+            later_ids = []
+
+            def later(_app):
+                with sqlite3.connect(app.home / "albedo.sqlite") as db:
+                    row = db.execute(
+                        "INSERT INTO lcm_compaction_node(session,depth,first_seq,last_seq,summary) VALUES(?,0,?,?,?)",
+                        (older, seq, seq, "later unrelated summary"),
+                    )
+                    later_ids.append(row.lastrowid)
+
+            app.restart(prepare=later)
+            continued = value(
+                app, route + "&cursor=" + urllib.parse.quote(cursor, safe="")
+            )
+            self.assertEqual(continued["records"][0]["scalar_offset"], 128)
+            self.assertNotIn("later unrelated", json.dumps(continued))
+            # Preserve the signature while changing each trusted position field.
+            if "." in cursor:
+                encoded, signature = cursor.split(".")
+                payload = json.loads(
+                    base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+                )
+                state = json.loads(payload["state"])
+            else:
+                payload, signature, state = None, None, json.loads(cursor)
+            attempts = [
+                {0: "foreign"},
+                {1: "999999"},
+                {2: "999999"},
+                {3: "0"},
+                {4: "searching"},
+                {1: str(later_ids[0]), 2: str(later_ids[0]), 3: "0", 4: "matched"},
+            ]
+            for changes in attempts:
+                with self.subTest(fields=list(changes)):
+                    parts = state.copy()
+                    for index, replacement in changes.items():
+                        parts[index] = replacement
+                    if payload is None:
+                        tampered = json.dumps(parts, separators=(",", ":"))
+                    else:
+                        modified = dict(
+                            payload, state=json.dumps(parts, separators=(",", ":"))
+                        )
+                        encoded = (
+                            base64.urlsafe_b64encode(
+                                json.dumps(modified, separators=(",", ":")).encode()
+                            )
+                            .decode()
+                            .rstrip("=")
+                        )
+                        assert signature is not None
+                        tampered = encoded + "." + signature
+                    with self.assertRaises(urllib.error.HTTPError) as denied:
+                        value(
+                            app,
+                            route + "&cursor=" + urllib.parse.quote(tampered, safe=""),
+                        )
+                    self.assertEqual(denied.exception.code, 400)
+            for changed_route in (
+                route.replace("query=needle", "query=other"),
+                route.replace(caller, older),
+            ):
+                with self.assertRaises(urllib.error.HTTPError) as scoped:
+                    value(
+                        app,
+                        changed_route
+                        + "&cursor="
+                        + urllib.parse.quote(cursor, safe=""),
+                    )
+                self.assertEqual(scoped.exception.code, 409)
+            self.mutate(app, older, [self.memory("head changes", seq)])
+            with self.assertRaises(urllib.error.HTTPError) as stale:
+                value(app, route + "&cursor=" + urllib.parse.quote(cursor, safe=""))
+            self.assertEqual(stale.exception.code, 409)
+            self.assertEqual(provider.requests, [])
+
+    def test_restart_with_missing_read_key_quarantines_without_regeneration(self):
+        self.restart_with_damaged_read_key("DELETE FROM personality_read_key")
+
+    def test_restart_with_corrupt_read_key_quarantines_without_regeneration(self):
+        self.restart_with_damaged_read_key(
+            "UPDATE personality_read_key SET secret=hex(randomblob(32))"
+        )
+
+    def restart_with_damaged_read_key(self, damage):
+        provider = Provider(lambda _request: text("unused"))
+        self.addCleanup(provider.close)
+        with self.app(provider) as app:
+            create(app, default=True)
+            caller = app.session()
+            bind(app, caller)
+            before = inspect(app, caller)["persona"]
+            with sqlite3.connect(app.home / "albedo.sqlite") as db:
+                original = db.execute(
+                    "SELECT fingerprint FROM personality_read_key"
+                ).fetchone()[0]
+
+            def corrupt(_app):
+                with sqlite3.connect(app.home / "albedo.sqlite") as db:
+                    db.execute(damage)
+
+            app.restart(prepare=corrupt)
+            with self.assertRaises(urllib.error.HTTPError) as unavailable:
+                value(app, f"/sessions/{caller}/recall?view=episodes")
+            self.assertIn(unavailable.exception.code, (404, 503))
+            with sqlite3.connect(app.home / "albedo.sqlite") as db:
+                saved = db.execute(
+                    "SELECT secret,fingerprint FROM personality_read_key"
+                ).fetchall()
+                if damage.startswith("DELETE"):
+                    self.assertEqual(len(saved), 0)
+                else:
+                    self.assertEqual(saved[0][1], original)
+                    self.assertNotEqual(
+                        hashlib.sha256(saved[0][0].encode()).hexdigest().upper(),
+                        original,
+                    )
+                self.assertEqual(
+                    db.execute(
+                        "SELECT revision FROM personality_persona WHERE id=?",
+                        (before["id"],),
+                    ).fetchone()[0],
+                    before["revision"],
+                )
+            self.assertEqual(provider.requests, [])
+
+    def test_recall_upgrade_backfills_unicode_heads_once_without_rewriting_history(
+        self,
+    ):
+        provider = Provider(lambda _request: text("unused"))
+        self.addCleanup(provider.close)
+        with self.app(provider) as app:
+            create(app, default=True)
+            session = app.session()
+            bind(app, session)
+            seq = self.seed(app, session, ("user", "Unicode asserted source"))[0]
+            receipt = self.mutate(
+                app, session, [self.memory("ÉCLAIR old current claim", seq)]
+            )
+            before = inspect(app, session)["persona"]
+            saved = {}
+
+            def previous_schema(_app):
+                with sqlite3.connect(app.home / "albedo.sqlite") as db:
+                    saved["transcript"] = db.execute(
+                        "SELECT seq,payload FROM transcript ORDER BY seq"
+                    ).fetchall()
+                    saved["revisions"] = db.execute(
+                        "SELECT * FROM personality_memory_revision"
+                    ).fetchall()
+                    saved["sources"] = db.execute(
+                        "SELECT * FROM personality_source"
+                    ).fetchall()
+                    for index in (
+                        "personality_memory_recent",
+                        "personality_memory_pinned",
+                        "personality_memory_unresolved",
+                    ):
+                        db.execute(f"DROP INDEX IF EXISTS {index}")
+                    db.execute("ALTER TABLE personality_memory DROP COLUMN search_text")
+                    db.execute("ALTER TABLE personality_memory DROP COLUMN event_id")
+
+            app.restart(prepare=previous_schema)
+            page = value(app, f"/sessions/{session}/recall?query=%C3%A9clair")
+            self.assertEqual(page["records"][0]["id"], receipt["records"][0]["id"])
+            self.assertEqual(inspect(app, session)["persona"], before)
+            with sqlite3.connect(app.home / "albedo.sqlite") as db:
+                self.assertEqual(
+                    db.execute(
+                        "SELECT seq,payload FROM transcript ORDER BY seq"
+                    ).fetchall(),
+                    saved["transcript"],
+                )
+                self.assertEqual(
+                    db.execute("SELECT * FROM personality_memory_revision").fetchall(),
+                    saved["revisions"],
+                )
+                self.assertEqual(
+                    db.execute("SELECT * FROM personality_source").fetchall(),
+                    saved["sources"],
+                )
+                usage = db.execute(
+                    "SELECT ordinary_bytes,memory_bytes FROM personality_capacity"
+                ).fetchall()
+            app.restart()
+            with sqlite3.connect(app.home / "albedo.sqlite") as db:
+                self.assertEqual(
+                    db.execute(
+                        "SELECT ordinary_bytes,memory_bytes FROM personality_capacity"
+                    ).fetchall(),
+                    usage,
+                )
+            self.assertEqual(provider.requests, [])
+
     def test_memory_survives_restart_with_exact_sources(self):
         provider = Provider(lambda _request: text("done"))
         self.addCleanup(provider.close)

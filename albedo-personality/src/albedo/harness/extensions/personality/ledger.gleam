@@ -410,20 +410,178 @@ pub fn capture(
   session: String,
   query: String,
 ) -> Result(p.Snapshot, p.DomainError) {
-  case string.byte_size(query) > 4096 {
-    True -> Error(p.Invalid("request query exceeds 4 KiB"))
-    False ->
-      store.query(ledger, fn(db) {
-        use inspection <- result.try(inspect_in(db, session))
-        case inspection.binding, inspection.persona {
-          Some(binding), Some(persona) if persona.state == "active" ->
-            Ok(p.Snapshot(persona, binding))
-          None, _ -> Error("setup_required")
-          _, _ -> Error("archived_persona")
-        }
-      })
-      |> result.map_error(domain)
+  use _ <- result.try(valid_query(query))
+  store.query(ledger, fn(db) {
+    use snapshot <- result.try(bound_in(db, session))
+    use count <- result.try(
+      store.one(
+        db,
+        "SELECT COUNT(*) FROM personality_memory WHERE persona_id=? AND lifecycle='active'",
+        [sqlight.text(snapshot.persona.id)],
+        decode.field(0, decode.int, decode.success),
+        "memory count unavailable",
+      )
+      |> result.map_error(p.Storage),
+    )
+    use candidates <- result.try(candidates_in(db, snapshot.persona.id, query))
+    Ok(p.Snapshot(..snapshot, candidates: candidates, eligible_count: count))
+  })
+}
+
+pub fn valid_query(query: String) -> Result(Nil, p.DomainError) {
+  case string.byte_size(query) <= 4096 {
+    True -> Ok(Nil)
+    False -> Error(p.Invalid("request query exceeds 4 KiB"))
   }
+}
+
+/// Bounded lexical terms, matching existing lowercase/literal facilities.
+pub fn query_terms(query: String) -> List(String) {
+  query
+  |> string.lowercase
+  |> string.replace("\n", " ")
+  |> string.replace("\r", " ")
+  |> string.replace("\t", " ")
+  |> string.split(" ")
+  |> list.filter(fn(term) { term != "" })
+  |> list.unique
+  |> list.take(16)
+}
+
+fn matching(query: String) -> #(String, List(sqlight.Value)) {
+  let terms = query_terms(query)
+  case terms {
+    [] -> #("0", [])
+    _ -> #(
+      "("
+        <> string.join(
+        list.map(terms, fn(_) { "instr(m.search_text,?)>0" }),
+        " OR ",
+      )
+        <> ")",
+      list.map(terms, sqlight.text),
+    )
+  }
+}
+
+fn candidate_ids_in(
+  db: sqlight.Connection,
+  persona: String,
+  predicate: String,
+  arguments: List(sqlight.Value),
+  limit: Int,
+) -> Result(List(String), p.DomainError) {
+  store.rows(
+    db,
+    "SELECT m.id FROM personality_memory m WHERE m.persona_id=? AND m.lifecycle='active' AND "
+      <> predicate
+      <> " ORDER BY m.event_id DESC,m.id LIMIT ?",
+    [sqlight.text(persona), ..list.append(arguments, [sqlight.int(limit)])],
+    decode.field(0, decode.string, decode.success),
+  )
+  |> result.map_error(p.Storage)
+}
+
+fn candidates_in(
+  db: sqlight.Connection,
+  persona: String,
+  query: String,
+) -> Result(List(p.Record), p.DomainError) {
+  // Only current heads are probed. Pin and recency indexes are extension-owned;
+  // literal query matching uses the current persona/lifecycle index, not history.
+  use pins <- result.try(candidate_ids_in(
+    db,
+    persona,
+    "CASE WHEN instr(lower(m.tags),'\"pinned\"')>0 THEN 1 ELSE 0 END=1",
+    [],
+    64,
+  ))
+  let #(predicate, arguments) = matching(query)
+  use matches <- result.try(candidate_ids_in(
+    db,
+    persona,
+    predicate
+      <> case pins {
+      [] -> ""
+      _ ->
+        " AND m.id NOT IN ("
+        <> string.join(list.map(pins, fn(_) { "?" }), ",")
+        <> ")"
+    },
+    list.append(arguments, list.map(pins, sqlight.text)),
+    64,
+  ))
+  let anchors = list.unique(list.append(pins, matches))
+  let companion_filter = case anchors {
+    [] -> "m.unresolved=1"
+    _ ->
+      "m.unresolved=1 AND EXISTS(SELECT 1 FROM personality_memory_source own JOIN personality_memory_source anchor ON anchor.persona_id=own.persona_id AND anchor.source_id=own.source_id JOIN personality_memory current ON current.persona_id=anchor.persona_id AND current.id=anchor.memory_id AND current.revision=anchor.revision AND current.lifecycle='active' WHERE own.persona_id=m.persona_id AND own.memory_id=m.id AND own.revision=m.revision AND current.id IN ("
+      <> string.join(list.map(anchors, fn(_) { "?" }), ",")
+      <> "))"
+  }
+  use companions <- result.try(candidate_ids_in(
+    db,
+    persona,
+    companion_filter
+      <> case anchors {
+      [] -> ""
+      _ ->
+        " AND m.id NOT IN ("
+        <> string.join(list.map(anchors, fn(_) { "?" }), ",")
+        <> ")"
+    },
+    list.append(
+      list.map(anchors, sqlight.text),
+      list.map(anchors, sqlight.text),
+    ),
+    64,
+  ))
+  let priority = list.unique(list.append(anchors, companions))
+  // Commitment candidates are supplied by the typed domain in its later slice.
+  let exclusion = case priority {
+    [] -> "1"
+    _ ->
+      "m.id NOT IN ("
+      <> string.join(list.map(priority, fn(_) { "?" }), ",")
+      <> ")"
+  }
+  use recent <- result.try(candidate_ids_in(
+    db,
+    persona,
+    exclusion,
+    list.map(priority, sqlight.text),
+    256 - list.length(priority),
+  ))
+  let ids = list.unique(list.append(priority, recent)) |> list.take(256)
+  list.try_map(ids, fn(id) {
+    use memory <- result.try(
+      store.one(
+        db,
+        "SELECT r.memory_id,r.revision,r.lifecycle,r.text,r.provenance,r.uncertainty,r.importance,r.tags,r.temporal_scope,r.author,r.origin_session,r.event_id,r.reason,r.unresolved FROM personality_memory_revision r JOIN personality_memory m ON m.persona_id=r.persona_id AND m.id=r.memory_id AND m.revision=r.revision WHERE m.persona_id=? AND m.id=? AND m.lifecycle='active'",
+        [sqlight.text(persona), sqlight.text(id)],
+        memory_decoder(),
+        "current recall head unavailable",
+      )
+      |> result.map_error(p.Storage),
+    )
+    use evidence <- result.try(evidence_in(db, persona, id, memory.revision))
+    use related <- result.try(
+      store.rows(
+        db,
+        "SELECT DISTINCT m.id FROM personality_memory m JOIN personality_memory_source own ON own.persona_id=m.persona_id AND own.memory_id=m.id AND own.revision=m.revision JOIN personality_memory_source anchor ON anchor.persona_id=own.persona_id AND anchor.source_id=own.source_id WHERE m.persona_id=? AND m.lifecycle='active' AND m.unresolved=1 AND anchor.memory_id=? AND anchor.revision=? ORDER BY m.id LIMIT 17",
+        [sqlight.text(persona), sqlight.text(id), sqlight.int(memory.revision)],
+        decode.field(0, decode.string, decode.success),
+      )
+      |> result.map_error(p.Storage),
+    )
+    Ok(p.Record(
+      with_evidence(memory, evidence),
+      list.any(memory.tags, fn(tag) { string.lowercase(tag) == "pinned" }),
+      False,
+      False,
+      related,
+    ))
+  })
 }
 
 /// Called exclusively from the actor's ApplyIdle bridge, never model tools.
@@ -932,7 +1090,7 @@ fn bound_snapshot_in(
   use snapshot <- result.try(case inspection.binding, inspection.persona {
     Some(binding), Some(persona)
       if persona.state == "active" && binding.mode == "owner"
-    -> Ok(p.Snapshot(persona, binding))
+    -> Ok(p.Snapshot(persona, binding, [], 0))
     None, _ -> Error(p.SetupRequired)
     _, _ -> Error(p.Forbidden("active owner binding required"))
   })
@@ -1700,7 +1858,7 @@ fn commit_memories_in(
     use _ <- result.try(
       store.run(
         db,
-        "INSERT INTO personality_memory(id,persona_id,revision,lifecycle,importance,tags,temporal_scope,unresolved) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,lifecycle=excluded.lifecycle,importance=excluded.importance,tags=excluded.tags,temporal_scope=excluded.temporal_scope,unresolved=excluded.unresolved",
+        "INSERT INTO personality_memory(id,persona_id,revision,lifecycle,importance,tags,temporal_scope,unresolved,event_id,search_text) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,lifecycle=excluded.lifecycle,importance=excluded.importance,tags=excluded.tags,temporal_scope=excluded.temporal_scope,unresolved=excluded.unresolved,event_id=excluded.event_id,search_text=excluded.search_text",
         [
           sqlight.text(id),
           sqlight.text(persona.id),
@@ -1710,6 +1868,14 @@ fn commit_memories_in(
           sqlight.text(tags),
           sqlight.text(change.temporal_scope),
           sqlight.bool(unresolved),
+          sqlight.int(event),
+          sqlight.text(string.lowercase(
+            change.text
+            <> " "
+            <> string.join(change.tags, " ")
+            <> " "
+            <> change.temporal_scope,
+          )),
         ],
       )
       |> result.map_error(p.Storage),
@@ -1926,6 +2092,27 @@ pub fn memories(
   history: Bool,
   cursor: option.Option(String),
 ) -> Result(p.Page, p.DomainError) {
+  memory_page(db, session, record_id, history, "", cursor)
+}
+
+pub fn search(
+  db: store.Store,
+  session: String,
+  query: String,
+  cursor: option.Option(String),
+) -> Result(p.Page, p.DomainError) {
+  use _ <- result.try(valid_query(query))
+  memory_page(db, session, "", False, query, cursor)
+}
+
+fn memory_page(
+  db: store.Store,
+  session: String,
+  record_id: String,
+  history: Bool,
+  query: String,
+  cursor: option.Option(String),
+) -> Result(p.Page, p.DomainError) {
   use _ <- result.try(
     case
       string.byte_size(record_id) <= 128
@@ -1946,6 +2133,7 @@ pub fn memories(
             int.to_string(snapshot.binding.revision),
             int.to_string(snapshot.persona.revision),
             record_id,
+            sources.hash(query),
             case history {
               True -> "history"
               False -> "current"
@@ -1984,6 +2172,10 @@ pub fn memories(
         }
       })
       let #(after_id, after_revision, fragment) = position
+      let #(match_filter, match_args) = case string.trim(query) {
+        "" -> #("1", [])
+        _ -> matching(query)
+      }
       let predicate = case history {
         True -> ""
         False -> " AND r.revision=m.revision AND m.lifecycle='active'"
@@ -1993,6 +2185,8 @@ pub fn memories(
           connection,
           "SELECT r.memory_id,r.revision,CASE WHEN r.revision<m.revision AND r.lifecycle='active' THEN 'superseded' ELSE r.lifecycle END,r.text,r.provenance,r.uncertainty,r.importance,r.tags,r.temporal_scope,r.author,r.origin_session,r.event_id,r.reason,r.unresolved FROM personality_memory_revision r JOIN personality_memory m ON m.id=r.memory_id AND m.persona_id=r.persona_id WHERE r.persona_id=? AND (?='' OR r.memory_id=?) AND (r.memory_id>? OR (r.memory_id=? AND r.revision>=?))"
             <> predicate
+            <> " AND "
+            <> match_filter
             <> " ORDER BY r.memory_id,r.revision LIMIT 2",
           [
             sqlight.text(snapshot.persona.id),
@@ -2001,6 +2195,7 @@ pub fn memories(
             sqlight.text(after_id),
             sqlight.text(after_id),
             sqlight.int(after_revision),
+            ..match_args
           ],
           memory_decoder(),
         )
@@ -2113,6 +2308,17 @@ fn memory_payload_in(
               #("tags", json.array(memory.tags, json.string)),
               #("temporal_scope", json.string(memory.temporal_scope)),
               #("unresolved", json.bool(memory.unresolved)),
+              #("recall_event_id", json.int(memory.event_id)),
+              #(
+                "recall_search_text",
+                json.string(string.lowercase(
+                  memory.text
+                  <> " "
+                  <> string.join(memory.tags, " ")
+                  <> " "
+                  <> memory.temporal_scope,
+                )),
+              ),
             ]),
           ),
           #(

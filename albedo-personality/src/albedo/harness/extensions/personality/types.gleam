@@ -49,7 +49,12 @@ pub type Binding {
 }
 
 pub type Snapshot {
-  Snapshot(persona: Persona, binding: Binding)
+  Snapshot(
+    persona: Persona,
+    binding: Binding,
+    candidates: List(Record),
+    eligible_count: Int,
+  )
 }
 
 pub type Creation {
@@ -225,4 +230,24 @@ pub type Page {
 
 pub type SourcePage {
   SourcePage(text: String, source: SourceRef, next: Option(String), bytes: Int)
+}
+
+/// Open/due are typed relevance supplied by the commitment domain, never tags.
+/// Current curated-memory capture sets both false until that domain exists.
+pub type Record {
+  Record(
+    memory: Memory,
+    pinned: Bool,
+    open_commitment: Bool,
+    due: Bool,
+    related_unresolved_ids: List(String),
+  )
+}
+
+pub type Episode {
+  Episode(source: SourceRef, summary: String, scalar_offset: Int)
+}
+
+pub type EpisodePage {
+  EpisodePage(records: List(Episode), next: Option(String), bytes: Int)
 }

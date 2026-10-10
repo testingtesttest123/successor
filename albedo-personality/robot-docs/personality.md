@@ -10,8 +10,8 @@ This first setup layer persists empty identities, human configuration, explicit
 owner bindings, operation receipts and audit events. It validates admission on
 each request. Revisioned identity edits and native inspect/edit tools use the
 same domain transaction as authenticated human edits. Dynamic identity projection
-and source-backed curated memories are available. Automatic recall and delegate
-working-context APIs remain separate additions. No new background model call,
+and source-backed curated memories are available. Bounded request-only curated recall and explicit episodic search are available.
+Delegate working-context APIs remain a separate addition. No new background model call,
 worker or scheduler is started.
 
 ## Human setup
@@ -101,7 +101,7 @@ identity together on the store owner and validates an active owner binding.
 Missing binding storage is a preparation error. Current identity fields are
 validated at 4 KiB UTF-8 each and 12 KiB total. Request-time projection renders
 the one captured identity snapshot within the shared prompt budget. Curated
-memory inspection does not automatically add claims to request context.
+recall captures its bounded current candidates on that same store turn.
 Normal preparation, explicit compaction/project inspection and managed background
 request admission all use the generic loaded-composition guard. No provider or
 network work runs inside capture, transactions, or observers.
@@ -211,8 +211,8 @@ import and delegate handback remain separate additions.
 
 Curated formation is deliberate foreground work through `persona_edit` or the
 human API. If no memory operation runs, no curated claim is created. There is
-no extraction worker, background model call, automatic recall/ranking, or changed
-LCM summarization policy in this layer. Persona/source text is inert evidence,
+no extraction worker, background model call, or changed LCM summarization policy
+in this layer. Request-time retrieval does not form additional records. Persona/source text is inert evidence,
 never a grant of tool authority or independently verified truth.
 
 Both `POST /extensions/personality/sessions/{id}/memories` and the existing
@@ -317,7 +317,7 @@ conflict; it never silently continues into another persona/history.
 
 Native `persona_source(source_id, cursor)` and human
 `GET .../sessions/{id}/sources/{source_id}?cursor=...` accept only a previously
-persisted source authorized for the currently bound owner persona. There is no
+persisted or host-issued episodic source authorized for the currently bound owner persona. There is no
 free session or persona search parameter. They return text, full source metadata,
 next cursor and exact rendered bytes, capped at 8 KiB. Text chunks are at most
 768 Unicode scalars, with actual row/actor labels. Cursors bind the exact source
@@ -360,3 +360,111 @@ under the documented restricted executor those remain unverified. Socket-free
 native transaction/publication invariants live in
 `test/harness/personality_memory_test.gleam`. A passing adapter test is not a
 claim that the unavailable provider/kernel lane passed.
+
+
+## Bounded deterministic recall
+
+`ledger.capture` captures the active owner binding, both persona heads, current
+identity and at most 256 distinct current curated candidates together on one
+store turn. It never scans transcript history or calls a provider. Additive
+extension-owned current-head search/recency metadata and pin/recency indexes
+support the queries. The lowercase search key uses Gleam's Unicode facilities;
+its storage payload is accounted, and existing current heads are backfilled in
+50-row migration batches without editing their revisions, sources or receipts.
+The documented `pinned` tag means explicit curation priority only. Tags never
+create commitments or confer authority.
+
+Candidate slots cover explicit pins, bounded lexical/entity-tag matches,
+related unresolved evidence and recent current heads. Query input is at most
+4 KiB UTF-8, normalized to at most sixteen distinct lowercase literal terms.
+Ranking is deterministic: pin, query/entity match, importance, typed open/due
+relevance, event recency, then stable ID. The candidate interface carries typed
+open/due flags, but persisted curated-memory candidates set both false; actual
+commitments and adoption belong to their separate domain, not to memory tags.
+
+`recall.select` is pure over that captured snapshot. It emits at most sixteen
+records and 8 KiB rendered UTF-8 including the request wrapper, complete claim
+labels, evidence pointers and selection reasons. The effective allowance is
+smaller when the captured request capacity leaves less space after mandatory
+identity. Unknown windows retain the byte cap and existing uncertain-estimate
+diagnostic. Whole optional records are dropped. Mandatory identity that cannot
+fit remains a request-preparation error.
+
+Only current active revisions are eligible. Corrections replace the old claim
+while retaining correction pointers; no superseded/retracted text is restored
+because an old revision matched. Unresolved heads sharing evidence with a
+selected claim are an indivisible companion group. Their complete current
+revision/evidence labels reserve room before optional claims. A bounded list of
+required unresolved IDs prevents an excluded companion from silently vanishing;
+an incomplete or oversized group is omitted as a whole. This conservative
+source-sharing rule does not infer that two claims mean the same thing.
+
+Recall is a separate untrusted input block before prepared conversation history.
+It is not a static pin, transcript event, LCM frontier duplicate, or compaction
+requirement. Re-rendering, retry, inspection and strategy projection reuse the
+same captured values. The inspector reports candidates, selected IDs, exclusions
+and per-ID selection reasons. Exclusions include active records beyond candidate
+and prompt limits; no record expires or is erased.
+
+Native `persona_recall` accepts only `query`, opaque `cursor` and
+`view="curated"` (default) or `view="episodes"`. The human equivalent is
+`GET .../sessions/{id}/recall?query=...&view=curated|episodes&cursor=...`.
+Curated search can page to old current records outside the automatic candidate
+set, using the existing complete-revision attribution and fragment contract.
+All pages contain at most fifty results and 8 KiB rendered JSON. Cursors bind
+persona, caller session, binding/head revisions, query and view, so copying a
+cursor to a different scope fails.
+
+Episode search is explicit; automatic recall does not duplicate LCM's current
+frontier. It pages bounded summary fragments in stable node-ID order, with
+query-length-bounded lookahead for literal matches across fragment boundaries.
+Unicode matching runs in Gleam. Empty search pages may have a next cursor:
+continue until null. A match returns its fragment and subsequent fragments of
+that node, with scalar offsets; earlier nonmatching fragments are not replayed.
+Each result labels the summary `derived_fallible_evidence` and contains an
+optional LCM hint, exact canonical transcript boundaries, digest, attribution
+and availability. No claim is made that an old summary used a current policy.
+
+Only live explicitly user-bound owner sessions of this persona, or whole node
+ranges inside retained authorized exact sources, are searched. Arbitrary session
+IDs and unrelated sessions are not accepted. Temporary/family children remain
+fail-closed until the separate delegate manifest path exists. Source expansion
+uses `persona_source`: ephemeral episodic IDs are re-authorized and digested,
+never a stored grant created by reading. Deliberate foreground curation may
+persist an available episodic reference with its normal memory receipt. An issued
+reference carries its exact range, full digest and original provenance/binding
+boundary in a compact authenticated ID (at most 127 bytes within the existing
+128-byte limit). Its globally unique first transcript
+sequence recovers the session, and the proof binds that session and persona.
+Expansion independently rechecks current source authority and the exact raw
+range/digest even before curation; a missing/reorganized node hint does not
+prevent fallback. Deleted, changed, too-wide or otherwise unavailable canonical sources
+are labeled unavailable or fail expansion; no other row is substituted and no
+hidden copy of transcript text is retained. Existing 256-row/256-KiB validation
+and mutation, binding and provenance limits are unchanged.
+
+Episode continuations authenticate the entire captured upper node bound, node,
+scalar offset and matched state using the shared host page-token primitive;
+the signed scope also binds persona, caller, binding/head revisions and query.
+Later authorized node insertion does not widen an issued continuation. Tokens
+expire after fifteen minutes and remain valid across restart while their scope
+and local signing state remain intact.
+
+`personality_read_key` is internal local application state, never an external
+access credential or public inspection field. Atomic extension initialization
+creates a random 256-bit key and fingerprint only on a fresh/legacy unversioned
+schema, with a version marker on `personality_capacity`. Subsequent startup and
+reads validate the singleton key and fingerprint; a missing row/table or corrupt
+key fails closed and never silently regenerates or rotates it. Restore the
+original application database/key state for recovery. Persisted curated source
+IDs continue to use their existing saved source authority/digest, independently
+of token verification. Task 11 must preserve this internal state through local
+database backup, recovery and any authorized maintenance; public claim exports
+must not expose the key. This slice adds no recovery or rotation command. A complete rollback deleting both the marker and key state cannot be
+distinguished from a genuinely older schema.
+
+Live native-provider projection scenarios remain in
+`test/e2e/personality_context_test.py`; AF_UNIX kernel/provider/Chrome lanes are
+unverified in the restricted executor. Real daemon HTTP search/source scenarios
+and compiled socket-free adapter/ranking/snapshot/budget tests exercise the
+available paths without claiming those blocked lanes passed.

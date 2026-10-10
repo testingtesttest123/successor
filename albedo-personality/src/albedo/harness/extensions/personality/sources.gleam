@@ -4,6 +4,7 @@
 import albedo/daemon/http_api as api
 import albedo/daemon/operations
 import albedo/daemon/store
+import albedo/harness/extensions/personality/read_tokens
 import albedo/harness/extensions/personality/types as p
 import albedo/harness/protect
 import albedo/openai_api/types
@@ -449,7 +450,7 @@ fn resolve_one_in(
             ))
         },
       )
-      use saved <- result.try(find_in(db, binding.persona_id, ref.id))
+      use saved <- result.try(reference_in(db, binding, ref.id))
       use metadata <- result.try(read(
         saved.session,
         saved.first_seq,
@@ -486,7 +487,7 @@ pub fn resolve_in(
       case ref.id {
         "" -> Ok(#(binding.session, ref.first_seq, ref.last_seq))
         _ ->
-          find_in(db, binding.persona_id, ref.id)
+          reference_in(db, binding, ref.id)
           |> result.map(fn(source) {
             #(source.session, source.first_seq, source.last_seq)
           })
@@ -650,11 +651,7 @@ pub fn expand(
   use captured <- result.try(
     store.query(db, fn(connection) {
       use binding <- result.try(binding_in(connection, session))
-      use source <- result.try(find_in(
-        connection,
-        binding.persona_id,
-        source_id,
-      ))
+      use source <- result.try(reference_in(connection, binding, source_id))
       use _ <- result.try(case source.availability {
         "available" -> Ok(Nil)
         _ ->
@@ -728,3 +725,290 @@ fn unpack(
   bytes: BitArray,
   read: fn(String) -> Result(String, Nil),
 ) -> Result(types.Input, Nil)
+
+/// Fixed SQL authorization for derived nodes, not caller-selectable sessions.
+/// A live explicitly bound owner session grants its disclosed history. Retained
+/// evidence grants only nodes wholly inside that exact authorized source range.
+pub const episode_authority =
+  "(EXISTS(SELECT 1 FROM personality_session b WHERE b.session=n.session AND b.persona_id=? AND b.mode='owner' AND b.authority='user' AND NOT EXISTS(SELECT 1 FROM session_family f WHERE f.session=b.session)) OR EXISTS(SELECT 1 FROM personality_source s WHERE s.persona_id=? AND s.session=n.session AND s.availability='available' AND s.first_seq<=n.first_seq AND s.last_seq>=n.last_seq))"
+
+pub fn episode_in(
+  db: sqlight.Connection,
+  binding: p.Binding,
+  node: Int,
+) -> Result(p.SourceRef, p.DomainError) {
+  use scope <- result.try(
+    store.one(
+      db,
+      "SELECT n.session,n.first_seq,n.last_seq,COALESCE((SELECT b.binding_revision FROM personality_session b WHERE b.session=n.session AND b.persona_id=? AND b.mode='owner'),0),COALESCE((SELECT b.pre_binding_through FROM personality_session b WHERE b.session=n.session AND b.persona_id=? AND b.mode='owner'),n.last_seq) FROM lcm_compaction_node n WHERE n.id=? AND "
+        <> episode_authority,
+      [
+        sqlight.text(binding.persona_id),
+        sqlight.text(binding.persona_id),
+        sqlight.int(node),
+        sqlight.text(binding.persona_id),
+        sqlight.text(binding.persona_id),
+      ],
+      {
+        use session <- decode.field(0, decode.string)
+        use first <- decode.field(1, decode.int)
+        use last <- decode.field(2, decode.int)
+        use revision <- decode.field(3, decode.int)
+        use boundary <- decode.field(4, decode.int)
+        decode.success(#(session, first, last, revision, boundary))
+      },
+      "episode not in authorized source scope",
+    )
+    |> result.map_error(fn(error) {
+      case error {
+        "episode not in authorized source scope" -> p.Forbidden(error)
+        _ -> p.Storage(error)
+      }
+    }),
+  )
+  use metadata <- result.try(case rows_in(db, scope.0, scope.1, scope.2) {
+    Ok(rows) ->
+      Ok(#(
+        digest(rows),
+        list.map(rows, fn(row) { row.actor }) |> list.unique,
+        "available",
+      ))
+    Error(p.SourceUnavailable(_)) -> Ok(#("", [], "unavailable"))
+    Error(error) -> Error(error)
+  })
+  let origin = case
+    scope.1 <= scope.4
+    || list.any(metadata.1, fn(actor) {
+      actor == "unknown_origin" || string.starts_with(actor, "system_note:")
+    })
+  {
+    True -> "imported"
+    False ->
+      case
+        list.any(metadata.1, fn(actor) {
+          actor == "tool_report"
+          || string.starts_with(actor, "agent_report:")
+          || string.starts_with(actor, "external_report:")
+        })
+      {
+        True -> "reported"
+        False -> "experienced"
+      }
+  }
+  use key <- result.try(read_tokens.key(db))
+  let id = case metadata.2 {
+    "available" -> {
+      let assert Ok(bytes) = bit_array.base16_decode(metadata.0)
+      let state =
+        string.join(
+          [
+            int.to_base36(scope.1),
+            int.to_base36(scope.2),
+            int.to_base36(scope.3),
+            int.to_base36(scope.4),
+            bit_array.base64_url_encode(bytes, False),
+            case origin {
+              "imported" -> "i"
+              "reported" -> "r"
+              _ -> "e"
+            },
+          ],
+          ":",
+        )
+      "ep:"
+      <> state
+      <> ":"
+      <> read_tokens.proof(
+        key,
+        reference_scope(binding.persona_id, scope.0),
+        state,
+      )
+    }
+    _ -> "lcm:" <> int.to_string(node) <> ":unavailable"
+  }
+  Ok(p.SourceRef(
+    id,
+    scope.0,
+    scope.1,
+    scope.2,
+    metadata.0,
+    metadata.1,
+    origin,
+    scope.3,
+    scope.4,
+    Some(int.to_string(node)),
+    metadata.2,
+  ))
+}
+
+/// An episodic pointer is re-authorized and re-digested, never a persisted grant
+/// invented by a search. Foreground curation may persist it with its receipt.
+fn reference_in(
+  db: sqlight.Connection,
+  binding: p.Binding,
+  id: String,
+) -> Result(p.SourceRef, p.DomainError) {
+  case find_in(db, binding.persona_id, id) {
+    Ok(source) -> Ok(source)
+    Error(p.NotFound) ->
+      case string.split(id, ":") {
+        ["ep", first, last, revision, boundary, digest, origin, mac] ->
+          exact_episode_in(
+            db,
+            binding,
+            id,
+            first,
+            last,
+            revision,
+            boundary,
+            digest,
+            origin,
+            mac,
+          )
+        ["lcm", _, _] ->
+          Error(p.Forbidden("episode not in authorized source scope"))
+        _ -> Error(p.NotFound)
+      }
+    Error(error) -> Error(error)
+  }
+}
+
+fn reference_scope(persona: String, session: String) -> String {
+  json.to_string(json.array([persona, session], json.string))
+}
+
+/// The globally unique canonical first sequence recovers the original session,
+/// independently of a derived node. The proof binds that session and persona;
+/// it confers no grant. Current owner/retained-range authority is checked again.
+fn exact_episode_in(
+  db: sqlight.Connection,
+  binding: p.Binding,
+  id: String,
+  first_text: String,
+  last_text: String,
+  revision_text: String,
+  boundary_text: String,
+  digest_text: String,
+  origin_text: String,
+  mac: String,
+) -> Result(p.SourceRef, p.DomainError) {
+  use numbers <- result.try(
+    list.try_map(
+      [first_text, last_text, revision_text, boundary_text],
+      fn(text) {
+        use number <- result.try(
+          int.base_parse(text, 36)
+          |> result.replace_error(p.Invalid("invalid episodic source range")),
+        )
+        case number >= 0 && number <= 9_223_372_036_854_775_807 {
+          True -> Ok(number)
+          False -> Error(p.Invalid("invalid episodic source range"))
+        }
+      },
+    ),
+  )
+  let assert [first, last, revision, boundary] = numbers
+  use _ <- result.try(case first > 0 && last >= first {
+    True -> Ok(Nil)
+    False -> Error(p.Invalid("invalid episodic source range"))
+  })
+  use bytes <- result.try(
+    bit_array.base64_url_decode(digest_text)
+    |> result.replace_error(p.Invalid("invalid episodic source digest")),
+  )
+  use _ <- result.try(case bit_array.byte_size(bytes) == 32 {
+    True -> Ok(Nil)
+    False -> Error(p.Invalid("invalid episodic source digest"))
+  })
+  use origin <- result.try(case origin_text {
+    "i" -> Ok("imported")
+    "r" -> Ok("reported")
+    "e" -> Ok("experienced")
+    _ -> Error(p.Invalid("invalid episodic source origin"))
+  })
+  use session <- result.try(
+    store.one(
+      db,
+      "SELECT session FROM transcript WHERE seq=?",
+      [sqlight.int(first)],
+      decode.field(0, decode.string, decode.success),
+      "exact source boundary unavailable",
+    )
+    |> result.map_error(fn(error) {
+      case error {
+        "exact source boundary unavailable" -> p.SourceUnavailable(error)
+        _ -> p.Storage(error)
+      }
+    }),
+  )
+  use key <- result.try(read_tokens.key(db))
+  let state =
+    string.join(
+      [
+        first_text,
+        last_text,
+        revision_text,
+        boundary_text,
+        digest_text,
+        origin_text,
+      ],
+      ":",
+    )
+  use _ <- result.try(
+    case
+      read_tokens.authentic(
+        key,
+        reference_scope(binding.persona_id, session),
+        state,
+        mac,
+      )
+    {
+      True -> Ok(Nil)
+      False -> Error(p.Forbidden("episodic source is outside issued scope"))
+    },
+  )
+  use _ <- result.try(
+    store.one(
+      db,
+      "SELECT n.session FROM (SELECT session,? AS first_seq,? AS last_seq FROM transcript WHERE seq=?) n WHERE "
+        <> episode_authority,
+      [
+        sqlight.int(first),
+        sqlight.int(last),
+        sqlight.int(first),
+        sqlight.text(binding.persona_id),
+        sqlight.text(binding.persona_id),
+      ],
+      decode.field(0, decode.string, decode.success),
+      "episode not in authorized source scope",
+    )
+    |> result.map_error(fn(error) {
+      case error {
+        "episode not in authorized source scope" -> p.Forbidden(error)
+        _ -> p.Storage(error)
+      }
+    }),
+  )
+  use rows <- result.try(rows_in(db, session, first, last))
+  let expected = bit_array.base16_encode(bytes) |> string.lowercase
+  use _ <- result.try(case digest(rows) == expected {
+    True -> Ok(Nil)
+    False ->
+      Error(p.SourceUnavailable(
+        "source digest mismatch; exact evidence unavailable",
+      ))
+  })
+  Ok(p.SourceRef(
+    id,
+    session,
+    first,
+    last,
+    expected,
+    list.map(rows, fn(row) { row.actor }) |> list.unique,
+    origin,
+    revision,
+    boundary,
+    None,
+    "available",
+  ))
+}

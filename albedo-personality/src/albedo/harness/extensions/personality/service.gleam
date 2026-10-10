@@ -7,6 +7,7 @@ import albedo/harness/command
 import albedo/harness/extension
 import albedo/harness/extensions/personality/domain
 import albedo/harness/extensions/personality/ledger
+import albedo/harness/extensions/personality/recall
 import albedo/harness/extensions/personality/sources
 import albedo/harness/extensions/personality/types as p
 import gleam/dynamic/decode
@@ -86,6 +87,7 @@ fn dispatch(
         "cursor",
       ]
       ["sessions", _, "sources", _] -> ["cursor"]
+      ["sessions", _, "recall"] -> ["query", "cursor", "view"]
       _ -> []
     }),
   )
@@ -160,6 +162,25 @@ fn dispatch(
         |> result.map_error(failure),
       )
       Ok(api.reply(200, ledger.page_json(page)))
+    }
+    Get, ["sessions", id, "recall"] -> {
+      use _ <- result.try(api.empty_body(req))
+      let query = list.key_find(parameters, "query") |> result.unwrap("")
+      let cursor = list.key_find(parameters, "cursor") |> option.from_result
+      let view = list.key_find(parameters, "view") |> result.unwrap("curated")
+      use page <- result.try(
+        case view {
+          "curated" ->
+            recall.search(daemon.ledger, id, query, cursor)
+            |> result.map(ledger.page_json)
+          "episodes" ->
+            recall.episodes(daemon.ledger, id, query, cursor)
+            |> result.map(recall.episode_page_json)
+          _ -> Error(p.Invalid("recall view must be curated or episodes"))
+        }
+        |> result.map_error(failure),
+      )
+      Ok(api.reply(200, page))
     }
     Get, ["sessions", id, "sources", source] -> {
       use _ <- result.try(api.empty_body(req))

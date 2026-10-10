@@ -1,10 +1,10 @@
-//// Identity-only projection. One serialized ledger capture owns all revisions.
-//// Curated recall and autobiographical summary bodies are later slices.
+//// One serialized capture renders mandatory identity and bounded optional recall.
 
 import albedo/harness/extensions/personality/ledger
+import albedo/harness/extensions/personality/recall
 import albedo/harness/request_context
-import gleam/int
 import gleam/json
+import gleam/list
 import gleam/option.{None}
 import gleam/result
 import gleam/string
@@ -12,7 +12,7 @@ import gleam/string
 pub fn prepare(
   input: request_context.Input,
 ) -> Result(request_context.Contribution, String) {
-  use snapshot <- result.map(
+  use snapshot <- result.try(
     ledger.capture(input.store, input.session, input.query)
     |> result.map_error(fn(error) {
       "personality session " <> input.session <> ": " <> ledger.message(error)
@@ -20,14 +20,7 @@ pub fn prepare(
   )
   let persona = snapshot.persona
   let binding = snapshot.binding
-  let snapshot_id =
-    persona.id
-    <> ":identity-"
-    <> int.to_string(persona.identity_revision)
-    <> ":aggregate-"
-    <> int.to_string(persona.revision)
-    <> ":binding-"
-    <> int.to_string(binding.revision)
+  let snapshot_id = recall.snapshot_id(snapshot)
   let content =
     json.object([
       #("snapshot_id", json.string(snapshot_id)),
@@ -53,21 +46,42 @@ pub fn prepare(
       ),
     ])
     |> json.to_string
-  request_context.Contribution(
+  let identity = request_context.Block("personality identity", content, True, 0)
+  let identity_tokens =
+    {
+      string.byte_size("\n\n" <> request_context.render(snapshot_id, identity))
+      + 3
+    }
+    / 4
+    + 1
+  let budget =
+    request_context.Budget(
+      ..input.budget,
+      remaining_tokens: option.map(input.budget.remaining_tokens, fn(tokens) {
+        tokens - identity_tokens
+      }),
+    )
+  let selected = recall.select(snapshot, input.query, budget)
+  Ok(request_context.Contribution(
     snapshot_id,
-    [
-      request_context.Block(
-        "personality identity",
-        content,
-        True,
-        { string.byte_size(content) + 3 } / 4,
-      ),
-    ],
-    [],
+    [identity],
+    case selected.records {
+      [] -> []
+      _ -> [
+        request_context.Block(
+          "personality recall",
+          recall.content(selected.records, selected.selected_reasons),
+          False,
+          0,
+        ),
+      ]
+    },
     None,
-    [],
-    [],
-    0,
-    0,
-  )
+    list.map(selected.selected_reasons, fn(item) {
+      "recall " <> item.0 <> ": " <> item.1
+    }),
+    list.map(selected.records, fn(record) { record.memory.id }),
+    list.length(snapshot.candidates),
+    selected.excluded_count,
+  ))
 }
