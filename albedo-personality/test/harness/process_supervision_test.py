@@ -1,0 +1,311 @@
+"""OS process-group identity and shutdown races need controlled child processes rather than flaky daemon timing."""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import cast
+import asyncio
+import os
+import sys
+import time
+import unittest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(ROOT, "priv", "python"))
+
+import albedo_api  # noqa: E402
+import albedo_cells  # noqa: E402
+import albedo_proc  # noqa: E402
+from albedo_plugins import run as plugin  # noqa: E402
+
+LOOP = asyncio.new_event_loop()
+asyncio.set_event_loop(LOOP)
+albedo_proc.reap_stopped_safely(LOOP)
+EVENTS: list[dict[str, object]] = []
+
+
+def install() -> None:
+    plugin.setup(
+        albedo_api.PythonApi(
+            version=1,
+            loop=LOOP,
+            host=lambda method, args: (_ for _ in ()).throw(
+                RuntimeError("no host in tests")
+            ),
+            HostError=RuntimeError,
+            capture=albedo_cells.background_capture,
+            preview=albedo_cells.PREVIEW,
+            send=EVENTS.append,
+            on_shutdown=lambda close: None,
+            background_handle=lambda _: None,
+        )
+    )
+
+
+def run(coro):
+    return LOOP.run_until_complete(coro)
+
+
+def start(command: str, timeout: float = 300):
+    """Start a shell line as a job without waiting for it; supervision is the
+    same for any program, and a shell makes descendants easy to arrange."""
+    return plugin.start(["/bin/sh", "-c", command], timeout)
+
+
+def quick(term: float = 0.01, kill: float = 0.02):
+    """Patch the ladder windows so a refusing group is tested without real waiting."""
+    real = albedo_proc.terminate
+    quick_term, quick_kill = term, kill
+
+    async def patched(
+        groups: Sequence[albedo_proc.Group], term: float = 0.0, kill: float = 0.0
+    ) -> list[albedo_proc.Termination]:
+        return await real(groups, quick_term, quick_kill)
+
+    setattr(albedo_proc, "terminate", patched)
+    return real
+
+
+def wait(job):
+    return run(job)
+
+
+def present(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def pid_present(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def ready(job, marker: str = "ready") -> None:
+    """Wait for the job to print `marker`. A shell that has not yet run its
+    first line cannot be said to refuse a signal or to have started a child, and
+    how soon it runs one depends on the machine's load, not on the code."""
+    deadline = time.monotonic() + 30
+    while marker not in job.tail():
+        assert time.monotonic() < deadline, f"job never printed {marker!r}"
+        run(asyncio.sleep(0.01))
+
+
+def pid_from(output: str) -> int:
+    return int(output.strip().splitlines()[0])
+
+
+class SupervisionTest(unittest.TestCase):
+    def setUp(self):
+        EVENTS.clear()
+        install()
+
+    def test_deadline_ends_the_whole_group(self):
+        # The deadline must outlast the shell's first lines on a loaded machine,
+        # so wait for the child's pid before relying on the deadline to end it.
+        job = start("sleep 30 & echo $!; wait", timeout=2)
+        ready(job, "\n")
+        wait(job)
+        self.assertTrue(job.timed_out)
+        self.assertTrue(job.termination.gone)
+        self.assertFalse(present(job.group.pgid))
+        self.assertFalse(pid_present(pid_from(job.tail())))
+        self.assertIn("deadline exceeded after 2s", job.tail())
+        self.assertIn("terminated", job.tail())
+
+    def test_command_exit_ends_descendants_that_hold_no_output(self):
+        started = time.monotonic()
+        job = start("sleep 30 >/dev/null 2>&1 & echo $!; exit 0", timeout=30)
+        wait(job)
+        grandchild = pid_from(job.tail())
+        self.assertLess(time.monotonic() - started, 5)  # no wait for the deadline
+        self.assertFalse(job.timed_out)
+        self.assertTrue(job.termination.gone)
+        self.assertFalse(pid_present(grandchild))
+
+    def test_command_exit_leaves_what_a_process_that_left_the_group_parents(self):
+        # Like ssh with ControlPersist: a master forks its proxy, daemonizes out
+        # of the job (setsid), and outlives it; the proxy stays in the group.
+        # A plain background child is an orphan once the command ends.
+        script = (
+            "import os, sys, time\n"
+            "if os.fork() == 0:\n"
+            "    proxy = os.fork()\n"
+            "    if proxy == 0:\n"
+            "        os.execvp('sleep', ['sleep', '31'])\n"
+            "    os.setsid()\n"
+            "    print('proxy', proxy, 'master', os.getpid(), flush=True)\n"
+            "    os.execvp('sleep', ['sleep', '32'])\n"
+            "orphan = os.fork()\n"
+            "if orphan == 0:\n"
+            "    os.execvp('sleep', ['sleep', '33'])\n"
+            "print('orphan', orphan, flush=True)\n"
+            "time.sleep(0.5)\n"
+        )
+        job = plugin.start([sys.executable, "-c", script], 30)
+        wait(job)
+        pids = dict(zip(*[iter(job.tail().split())] * 2))
+        proxy, master, orphan = (
+            int(pids[name]) for name in ("proxy", "master", "orphan")
+        )
+        self.addCleanup(os.kill, master, 9)
+        self.addCleanup(os.kill, proxy, 9)
+        ending, group = job.termination, job.group
+        assert ending is not None and group is not None
+        self.assertTrue(ending.gone, ending)
+        self.assertIn("kept 1 that a process which left the group", ending.note)
+        self.assertTrue(pid_present(proxy))
+        self.assertTrue(pid_present(master))
+        self.assertFalse(pid_present(orphan))
+        # A stop or a deadline still ends everything in the group.
+        self.assertTrue(run(albedo_proc.end(group)).gone)
+        self.assertEqual(albedo_proc.live_members(group.pgid), [])
+
+    def test_stop_escalates_and_is_retryable(self):
+        job = start("trap '' TERM; echo ready; while :; do sleep 0.2; done", timeout=30)
+        self.addCleanup(lambda: run(job.stop()))
+        ready(job)  # the trap is installed before the first signal is sent
+        self.assertIsNone(job.poll())  # still running
+        ending = run(job.stop())
+        self.assertTrue(ending.gone)
+        self.assertEqual(ending.signals, ("SIGTERM", "SIGKILL"))
+        self.assertIs(run(job.stop()), ending)  # a reached verdict is not re-run
+        run(job)
+        self.assertIn(job.id, plugin.retained)
+
+    def test_surviving_group_stays_owned_and_is_surfaced(self):
+        """A group that outlives KILL stays owned and is reported, not forgotten."""
+        real = (
+            albedo_proc.alive,
+            albedo_proc.current,
+            plugin.SHUTDOWN_TERM,
+            plugin.SHUTDOWN_KILL,
+            quick(),
+        )
+
+        def still_alive(group: albedo_proc.Group) -> bool:
+            return True
+
+        setattr(albedo_proc, "alive", still_alive)
+        setattr(albedo_proc, "current", still_alive)
+        plugin.SHUTDOWN_TERM, plugin.SHUTDOWN_KILL = 0.01, 0.02
+        try:
+            job = start("true")
+            wait(job)
+            self.assertFalse(job.termination.gone)
+            self.assertIn(job.id, plugin.active)  # surviving work stays owned
+            self.assertNotIn(job.id, plugin.retained)
+            self.assertIn("cleanup failed", job.tail())
+            run(plugin.close())
+        finally:
+            (
+                albedo_proc.alive,
+                albedo_proc.current,
+                plugin.SHUTDOWN_TERM,
+                plugin.SHUTDOWN_KILL,
+                albedo_proc.terminate,
+            ) = real
+        cleanup = [event for event in EVENTS if event.get("type") == "cleanup"]
+        self.assertEqual(len(cleanup), 1)
+        self.assertTrue(
+            any(
+                "SURVIVED" in failure
+                for failure in cast(list[str], cleanup[0]["failures"])
+            )
+        )
+
+    def test_ladder_reports_gone_and_refuses_reuse(self):
+        self.assertFalse(albedo_proc.alive(albedo_proc.Group(999_999)))
+        ending = run(albedo_proc.terminate([albedo_proc.Group(999_999)]))
+        self.assertEqual(ending[0].signals, ())
+        self.assertTrue(ending[0].gone)
+        leader = run(
+            asyncio.create_subprocess_shell("sleep 30", start_new_session=True)
+        )
+        try:
+            # Linux and Darwin both give a process an identity beyond its pid.
+            self.assertIsNotNone(albedo_proc.leader_token(leader.pid))
+            group = albedo_proc.Group(leader.pid, "not-the-leader-we-created")
+            self.assertFalse(albedo_proc.alive(group))
+            self.assertTrue(present(leader.pid))  # and it was left alone
+        finally:
+            run(albedo_proc.terminate([albedo_proc.Group(leader.pid)]))
+            run(leader.wait())
+
+    def test_stop_before_spawn_and_immediate_cancellation_keep_ownership(self):
+        async def check():
+            job = start("sleep 30")
+            ending = await job.stop()
+            await job
+            self.assertTrue(ending.gone)
+            if job.group is not None:
+                self.assertFalse(present(job.group.pgid))
+            self.assertNotIn(job.id, plugin.active)
+            cancelled = start("sleep 30")
+            cancelled.task.cancel()
+            await asyncio.sleep(0)
+            await cancelled.stop()
+            if cancelled.group is not None:
+                self.assertFalse(present(cancelled.group.pgid))
+            self.assertNotIn(cancelled.id, plugin.active)
+
+        run(check())
+
+    def test_retrying_failed_cleanup_releases_quota(self):
+        from unittest.mock import patch
+
+        async def refused(groups, *args, **kwargs):
+            return [
+                albedo_proc.Termination(group.pgid, (), False, ("fixture refusal",))
+                for group in groups
+            ]
+
+        job = start("true")
+        with patch.object(albedo_proc, "terminate", side_effect=refused):
+            wait(job)
+        self.assertIn(job.id, plugin.active)
+        self.assertTrue(run(job.stop()).gone)
+        self.assertNotIn(job.id, plugin.active)
+        self.assertTrue(cast(dict[str, object], EVENTS[-1]["cleanup"])["gone"])
+
+    def test_helper_watchdog_terminates_native_code_even_if_alarm_was_ignored(self):
+        import signal
+        import subprocess
+
+        helper = os.path.join(ROOT, "priv", "python", "albedo_signal.py")
+        code = (
+            f"import sys; sys.path.insert(0, {os.path.dirname(helper)!r})\n"
+            "import ctypes, runpy, signal, albedo_proc\n"
+            "signal.signal(signal.SIGALRM, signal.SIG_IGN)\n"
+            # the helper's alarm, fired sooner: it still has to arm it and
+            # restore the default action, or the sleep outlasts the timeout
+            "signal.alarm = lambda seconds: signal.setitimer(signal.ITIMER_REAL, 0.2)\n"
+            "async def stuck(*args, **kwargs):\n    ctypes.PyDLL(None).sleep(30)\n"
+            "albedo_proc.terminate = stuck\n"
+            "sys.argv = ['helper', '{\"targets\": []}']\n"
+            f"runpy.run_path({helper!r}, run_name='__main__')\n"
+        )
+        started = time.monotonic()
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, timeout=5
+        )
+        self.assertEqual(result.returncode, -signal.SIGALRM, result.stderr)
+        self.assertLess(time.monotonic() - started, 5)
+
+    def test_start_token_reads_a_kernel_stat_line(self):
+        line = b"1234 (some cmd) S 1 1234 1234 0 -1 4194560 1 0 0 0 5 3 0 0 20 0 3 0 987654 1 2"
+        self.assertEqual(albedo_proc.start_token(line), "987654")
+        self.assertIsNone(albedo_proc.start_token(b"nonsense"))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

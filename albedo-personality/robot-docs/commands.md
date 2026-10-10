@@ -1,0 +1,78 @@
+# commands
+
+every session command is one definition with three faces: the CLI menu, user invocation, and the model's typed `commands` bindings. adding a command adds all three; nothing about a command is reimplemented per surface.
+
+## the catalog
+
+`GET /sessions/{session_id}/catalog?kind=commands` reads prepared command
+definitions separately from fresh discovery. Each definition declares its slash
+name, arguments, permissions, and delivery. Management commands identify their
+canonical HTTP operation; input commands use the identified input resource.
+The CLI combines these with presentation-only entries such as `/sessions`.
+There is no HTTP route that executes an arbitrary slash-command string.
+
+The Go client returns `daemon.APIError` for HTTP failures, retaining the status, daemon error code, and message. Use `errors.As` to inspect it. Workspace failures also unwrap to `daemon.WorkspaceMissingError` so the chat can offer a replacement folder. Capability checks return `daemon.UpgradeRequiredError`; the TUI recognizes that type when displaying catalog upgrade failures. Error wording does not control this routing.
+
+## contributing commands
+
+`CommandPlugin` in an extension declares static commands. Human HTTP resource commands use `command.resource` for catalog metadata; their reads and changes belong to the extension service. a `ManagedPlugin` contributes dynamic ones through `Managed.commands` (this is how skills registers its slash commands). the type lives in [`command.gleam`](../src/albedo/harness/command.gleam):
+
+```gleam
+Command(
+  "/usage",
+  "Show token and cost usage for this session",
+  [Argument("window", "reporting window", False)],
+  True,
+  False,
+  False,
+  None,
+  fn(context, _caller, args) { ... Ok(command.Data(value)) },
+)
+```
+
+a run executes **outside** the session actor — on the kernel's host-call process — and reaches session state only through `Context.state`, whose operations are the `StateOp` variant type in [`command.gleam`](../src/albedo/harness/command.gleam) (the exhaustive case in `session.gleam` answers them). a handler running inside the session actor must never run a command: its state calls would deadlock against itself.
+
+Internal projections keep typed state until the response is built. `KernelJobs`
+passes `List(kernel.Job)` and the optional live count to a pure projection
+callback, after capture and outside the session actor. The callback must not
+read or mutate session state. The command result and HTTP jobs page share
+`kernel.jobs_fields`; the page adds its descriptor from the same typed jobs.
+Do not encode an internal observation to JSON and parse it again to add fields
+or recover its types. Decode external input at ingress and encode the completed
+response at the wire boundary.
+
+`model_callable: False` keeps a command user-only (`/login`-class commands). a `user_turn: True` command submits its outcome as one user turn when a user invokes it and returns data when the model invokes it — one run, two callers, only the delivery differs. dispatch refuses a model invocation of a user-only command and refuses any turn submission from the model.
+
+## python bindings
+
+the `commands` extension exposes the async `commands` object. at kernel boot the catalog mints one typed method per model-callable command: `commands.model("gpt-5")`, `commands.demo("the args")`. each method's docstring and signature come from the declaration, so `help(commands.<method>)` is the command's help text. `commands.catalog()` returns the current catalog, so a session `/reload` reaches it without a kernel restart; `commands.invoke(name, arguments)` runs any model-callable command by slash name with raw text or a dict. a command whose method name is reserved (`catalog`, `invoke`, `help`), invalid, taken, or added after the kernel booted stays callable through `invoke()`.
+
+argument parsing is shared: leading arguments take one whitespace token each, the last declared argument takes the rest with outer whitespace trimmed and inner spacing exact, so `/fix-lint one  two` arrives as `"one  two"`. the TUI also accepts a JSON object naming the arguments. text after a command that declares no arguments is not a command at all: the TUI sends `/jobs is broken` to the model as a prompt.
+
+## v1 commands
+
+- `/model [model] [provider] [effort]` — show the selection (any caller) or switch it (user only, idle session; a model call is always mid-turn, so switching is refused and the model is told to ask the user). A given effort must be one the new model supports; without one, the current effort carries over when the new model supports it.
+- `/context [section] [page]` — the prepared model request: a summary, or one bounded section page.
+- `/raise-cap [on|off] [model]` — raise a model's context window to the provider's maximum, or restore its default (user only). Without a state it toggles; without a model it uses the session's. The choice is saved per model in `raisedCaps` and applies to every session on that model from its next request. See [raised caps](models.md#raised-caps).
+
+the python extension contributes `/kernel [upgrade]` — whether the session's kernel runs older code than the daemon (bundle, module set, or protocol) and what keeps it, or, with `upgrade` (user only, between turns), swap it now past its live jobs (`KernelReport` / `KernelUpgrade` state ops). See [kernel](kernel.md#version-skew).
+
+the links extension contributes `/link [add|remove] [workspace]` — the workspaces linked with this one, as a page (`here`, `gone` for a member whose folder is missing, checked on its host for a remote one, or why the host can't say), or, user only, link one or unlink one; every open session in the workspaces it touches gets a note either way. See [workspaces](workspaces.md#linked-workspaces).
+
+skills contributes one command per cataloged skill; `/tree`, `/fork`, `/login`, and the other picker-style entries stay presentation-only in the CLI.
+
+## CLI page lifecycle
+
+`cli/internal/tui/page.go` allocates a unique generation for each page instance and each superseding request. Generic pages, capability pages, extension pickers, tree pickers, context inspectors, and webhook pages reject responses from earlier generations before changing data or operation state. A delayed tree-fork completion also carries its generation to the app.
+
+The app forwards history and context-window responses to the active chat while a modal is open. Chat checks the session and generation before accepting them. Generic page text and secret inputs receive paste and cursor messages while focused, including the input component's returned command.
+
+## Terminal image paste
+
+`cli/internal/tui/clipboard_terminal.go` owns terminal clipboard reads. The terminal holds the clipboard the user copied from, and it can be on another machine than albedo (ssh, mosh, a tobi or tmux session attached from another device), so ctrl+v asks it first: it sends a DECRQM for private mode 5522 (`CSI ? 5522 $ p`). A terminal that implements the [kitty clipboard protocol](https://sw.kovidgoyal.net/kitty/clipboard/) answers set or reset, and ctrl+v then sends an OSC 5522 request for PNG or JPEG bytes. Any other answer, or none within 500 ms, falls back to the environment: `SSH_CONNECTION`, `SSH_CLIENT` or `MOSH_CONNECTION` still read from the terminal (older terminals implement 5522 without answering the probe), and everything else runs the local clipboard tools. The probe repeats on every ctrl+v and is never cached, because the terminal attached to a long-lived session can change. Albedo has no tobi-specific code; a multiplexer only has to relay the probe and its reply, and tobi routes both to the viewer that typed last.
+
+This needs permission to read the terminal's clipboard; OSC 52 alone supports text, not images. Normal terminal text paste and local image paste are unchanged. In tmux the probe and the request use DCS passthrough, which needs `set -g allow-passthrough on`; if tmux drops the reply, the probe times out and the environment decides.
+
+Bubble Tea's existing terminal reader delivers the replies; no subprocess opens a competing TTY reader. One read may be pending per chat. Request IDs reject delayed replies, session generations reject delayed completions, and replies continue reaching the chat while a modal is open. Reads accept at most 5 MiB total, with individual decoded chunks capped at 4096 bytes, and expire after 30 seconds (including time spent granting permission). Denied permission, unsupported terminals, malformed responses, and timeout report an error without changing the draft. Closing the chat drops its pending buffer.
+
+Each reply chunk is larger than one terminal read. `cli/go.mod` replaces ultraviolet with [okami.mom/ultraviolet](https://tangled.org/okami.mom/ultraviolet), whose reader waits for a reply cut between the ESC and backslash of its terminator, and holds a partial `ESC ]5522;` reply for up to 5 seconds after its last byte instead of flushing it at the 50 ms escape timeout. Upstream dropped the first kind and typed a `\` into the draft, and typed the rest of the payload for the second; both lost image bytes. proxy.golang.org cannot fetch from tangled knots, so Go falls back to fetching the fork with git; `go.sum` pins it.

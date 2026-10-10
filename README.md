@@ -126,3 +126,38 @@ system-prompt, and tool-surface parity are not established by this slice.
 Home owns the shared scenarios, immutable reference baselines, explicit delta
 rules, corpus/schema validation, and fresh-reference execution gate. The local
 protocol tests above only check adapter plumbing; they do not replace that gate.
+
+
+## Albedo personality experiment: reviewed WIP checkpoint
+
+The separate [`albedo-personality/`](albedo-personality/) subtree contains an
+Albedo-derived personal experiment. Existing Successor runtime and entrypoints
+remain unchanged. Approved [design](docs/experiments/albedo-personality-design.md)
+and [staged plan](docs/experiments/albedo-personality-plan.md) describe the goal.
+
+- Original Successor base: `b950f2d831f1fa5463799fbfe50995f644be52c3`.
+- Albedo source: [okami.mom/albedo](https://tangled.org/okami.mom/albedo), pinned
+  baseline `47735ec493f3e3a6ac73b619495098437759e0c0`.
+- Reviewed stages 1-4 checkpoint: `e77e09daaa0abb613b10540d1dfbac7804e11760`.
+- Exact independently reviewed, sanitized publication checkpoint:
+  `0f27c600c6691fd58590c573cfc1c1f155166190`, tracked tree
+  `b6098d473ae594a39944268ddb6564a3167b2287`. All 1,016 tracked files are
+  exported, including the license, third-party notices, vendored font notice
+  and required source assets. No Albedo Git history is imported.
+- Implemented and reviewed through stage 4: default identity and binding/admission,
+  revisioned identity edits/receipts, and immutable request-time identity context
+  with resolved budgets and bounded inspection. Later memory, recall, LCM
+  attribution, relationships, delegation and import work is not included here.
+- A narrow reviewed security fix removes upstream-bundled Google OAuth client
+  secrets. Antigravity sign-in/refresh and Colab sign-in require explicit runtime
+  configuration; tokens considered fresh by Albedo remain usable without it.
+  See [`robot-docs/auth.md`](albedo-personality/robot-docs/auth.md).
+- Recorded stage-4 checks: compilation/static/generated-contract checks,
+  37 socket-free covering tests including 21 personality cases, and two API-doc
+  invariants. Sanitization checks: compilation/static checks, Go unit checks,
+  Rust renderer tests, 90 focused/provider cases and 18 Colab Python cases.
+- Full `./test.sh`, full `gleam test`, kernel projection and scripted-provider
+  E2E lanes remain unverified under the approved AF_UNIX/Chrome runtime exception.
+  This is a WIP source checkpoint, not the stage-12 release or a full-gate pass.
+  Publication checks establish exact export parity, source-scan results and
+  preservation of existing Successor files; no active-worktree tests are rerun.

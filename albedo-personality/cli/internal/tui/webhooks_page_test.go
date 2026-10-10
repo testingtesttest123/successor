@@ -1,0 +1,210 @@
+// Webhook form differential updates, ephemeral secret protection, session picker filtering,
+// the list filter and detail pane, and confirm key handling.
+// Differential step generation, modal reveal dismissal guards, and what the list shows
+// before a key is pressed operate inside unexported state; daemon E2E only sees submitted
+// mutations and cannot verify an unchanged form or an unsent question.
+package tui
+
+import (
+	"albedo/cli/internal/daemon"
+	"errors"
+	"net/http"
+	"strings"
+	"testing"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
+)
+
+var webhookSessions = []daemon.Session{
+	{ID: "s", Title: "infra bot", Workspace: "/srv/infra"},
+	{ID: "t", Title: "release notes", Workspace: "/srv/docs"},
+}
+
+func loadedWebhooksPage(t *testing.T) WebhooksPageModel {
+	t.Helper()
+	m := NewWebhooksPageModel(nil, "s")
+	m.SetSize(100, 30)
+	m, _ = m.Update(webhooksLoadedMsg{Gen: m.Generation, Mounted: true, Sessions: webhookSessions, Hooks: []webhookEntry{
+		{ID: "wh1", Session: "s", Name: "deploy", Enabled: true, URL: "/extensions/webhooks/hooks/wh1/deliveries", Header: "x-hub-signature-256", Prefix: "sha256=", Queued: 2, Deferred: "session busy"},
+		{ID: "wh2", Session: "t", Name: "grafana", URL: "/extensions/webhooks/hooks/wh2/deliveries", Header: "x-albedo-signature", Prefix: "sha256="},
+	}})
+	return m
+}
+
+func TestWebhookEditOnlySendsWhatChanged(t *testing.T) {
+	m := loadedWebhooksPage(t)
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl})
+	if m.Form == nil || m.Form.current() != hookFieldSecret || m.Form.Chosen != "s" {
+		t.Fatal("enter should edit the selected hook, starting at its secret")
+	}
+	if steps, _, _ := m.Form.steps(); len(steps) != 0 {
+		t.Fatalf("unchanged form produced %v", steps)
+	}
+	m.Form.Inputs[hookFieldSecret].SetValue("a-new-sixteen-byte-secret")
+	steps, _, err := m.Form.steps()
+	if err != nil || len(steps) != 1 || steps[0] != (daemon.WebhookRequest{Action: daemon.WebhookRotate, HookID: "wh1", Secret: "a-new-sixteen-byte-secret"}) {
+		t.Fatalf("steps = %v, %v", steps, err)
+	}
+	if strings.Contains(m.View(), "a-new-sixteen-byte-secret") {
+		t.Fatal("an entered secret was rendered")
+	}
+}
+
+func TestGeneratedSecretIsShownUntilDismissed(t *testing.T) {
+	m := loadedWebhooksPage(t)
+	m.Saving = true
+	m, _ = m.Update(webhooksSavedMsg{Gen: m.Generation, Notice: "added ci", Reveal: &webhookSecret{Hook: "ci", Secret: "whsec_generated"}})
+	if !strings.Contains(m.View(), "whsec_generated") {
+		t.Fatal("generated secret was not shown")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
+	if m.Reveal == nil || m.Confirming() {
+		t.Fatal("keys other than enter must not dismiss the secret")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.Reveal != nil || strings.Contains(m.View(), "whsec_generated") {
+		t.Fatal("secret should be gone once dismissed")
+	}
+}
+
+func TestWebhookFormPicksTheSessionToWake(t *testing.T) {
+	m := loadedWebhooksPage(t)
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	if m.Form.Chosen != "s" || !strings.Contains(ansi.Strip(m.View()), "session    this session · infra bot · /srv/infra") {
+		t.Fatalf("the form should default to the session it was opened from:\n%s", ansi.Strip(m.View()))
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	for _, r := range "release" {
+		m, _ = m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	if m.Form.Chosen != "t" {
+		t.Fatalf("filtering should choose the matching session, got %q", m.Form.Chosen)
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
+	m.Form.Inputs[hookFieldSession].SetValue("")
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	if m.Form.Chosen != "s" {
+		t.Fatalf("← should step back to the first session, got %q", m.Form.Chosen)
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	m.Form.Inputs[hookFieldName].SetValue("notes")
+	steps, notice, err := m.Form.steps()
+	if err != nil || steps[0] != (daemon.WebhookRequest{Action: daemon.WebhookCreate, SessionID: "t", Name: "notes", Header: "x-albedo-signature", Prefix: "sha256="}) || !strings.Contains(notice, "release notes") {
+		t.Fatalf("steps = %v, %q, %v", steps, notice, err)
+	}
+}
+
+// A failed extension read cannot establish that deliveries are mounted.
+func TestWebhookLoadSurfacesExtensionFailure(t *testing.T) {
+	requests := 0
+	conn := commandTestConnection(t, func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"detail":"extension load refused"}`))
+	})
+	m := NewWebhooksPageModel(conn, "session")
+	msg := m.loadCmd(m.Generation)().(webhooksLoadedMsg)
+	if msg.Err == nil || msg.Mounted || requests != 1 {
+		t.Fatalf("extension failure treated as mounted: %+v requests=%d", msg, requests)
+	}
+	m, _ = m.Update(msg)
+	if m.Loaded || m.Error == "" {
+		t.Fatal("extension failure did not surface in screen")
+	}
+}
+
+// Creation is already committed when a following signature update fails.
+func TestWebhookSaveRetainsCreatedSecretAfterLaterFailure(t *testing.T) {
+	requests := 0
+	conn := commandTestConnection(t, func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		if requests == 1 {
+			w.WriteHeader(201)
+			_, _ = w.Write([]byte(`{"resource":{"url":"/extensions/webhooks/hooks/created?view=configuration","etag":"\"created-a\"","value":{"id":"created","session_id":"session","name":"deploy","signature_header":"x-albedo-signature","signature_prefix":"sha256=","enabled":true,"revision":"a","created_at":"2026-10-03T00:00:00Z","updated_at":"2026-10-03T00:00:00Z"}},"secret":"whsec_created","notification":{"state":"not_requested","code":null,"detail":null}}`))
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"detail":"signature refused"}`))
+	})
+	m := NewWebhooksPageModel(conn, "session")
+	msg := m.save(m.Generation, "added", daemon.WebhookRequest{Action: daemon.WebhookCreate, SessionID: "session", Name: "deploy"}, daemon.WebhookRequest{Action: daemon.WebhookSignature, Header: "x-custom", Prefix: ""})().(webhooksSavedMsg)
+	if msg.Err == nil || msg.Reveal == nil || msg.Reveal.Secret != "whsec_created" || requests != 2 {
+		t.Fatalf("lost committed secret: %+v requests=%d", msg, requests)
+	}
+	if _, ok := errors.AsType[*daemon.APIError](msg.Err); !ok {
+		t.Fatalf("lost failure: %v", msg.Err)
+	}
+	m, _ = m.Update(msg)
+	if m.Reveal == nil || m.Error == "" {
+		t.Fatal("partial success did not retain reveal and error")
+	}
+}
+
+// The list filter is live and fuzzy, so a letter is a search term rather than
+// an action; the pane shows the highlighted hook without a key press.
+func TestWebhookFilterNarrowsAndDetailShowsWithoutEnter(t *testing.T) {
+	m := loadedWebhooksPage(t)
+	plain := ansi.Strip(m.View())
+	if !strings.Contains(plain, "wakes") || !strings.Contains(plain, "x-hub-signature-256") {
+		t.Fatalf("detail pane did not show the highlighted hook:\n%s", plain)
+	}
+	for _, r := range "grafana" {
+		m, _ = m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	if len(m.shown) != 1 || m.rows[m.shown[0].row].name != "grafana" {
+		t.Fatalf("filter shows %+v", m.shown)
+	}
+	if m.Confirming() || m.Form != nil {
+		t.Fatal("typing opened an action")
+	}
+}
+
+// enter toggles a hook at once and ctrl+t toggles agent access at once; neither asks.
+func TestWebhookToggleAppliesWithoutAsking(t *testing.T) {
+	m := loadedWebhooksPage(t)
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil || !m.Saving || m.Confirming() {
+		t.Fatal("enter did not toggle the hook directly")
+	}
+	m = loadedWebhooksPage(t)
+	m, cmd = m.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+	if cmd == nil || !m.Saving || m.Confirming() {
+		t.Fatal("ctrl+t did not toggle agent access directly")
+	}
+}
+
+// A new secret asks first; esc cancels, a stray key does nothing, and enter runs it.
+func TestWebhookNewSecretConfirmTakesEnterAndEscOnly(t *testing.T) {
+	m := loadedWebhooksPage(t)
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
+	if !m.Confirming() || !strings.Contains(ansi.Strip(m.View()), "Replace the secret for deploy?") {
+		t.Fatal("ctrl+g did not ask before replacing the secret")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	if !m.Confirming() || m.Saving {
+		t.Fatal("a stray key changed the secret or dismissed the question")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.Confirming() || m.Saving {
+		t.Fatal("esc did not cancel the question")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil || !m.Saving || m.Confirming() {
+		t.Fatal("enter did not confirm the new secret")
+	}
+}
+
+// Delete asks first, and its consequence stays in the question.
+func TestWebhookDeleteAsksWithItsConsequence(t *testing.T) {
+	m := loadedWebhooksPage(t)
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
+	if !m.Confirming() || !strings.Contains(ansi.Strip(m.View()), "accepted deliveries stay in the inbox") {
+		t.Fatal("ctrl+d did not ask before deleting")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.Confirming() || len(m.Hooks) != 2 {
+		t.Fatal("esc did not cancel the deletion")
+	}
+}

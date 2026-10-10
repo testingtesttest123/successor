@@ -1,0 +1,18 @@
+-module(albedo_session).
+-export([kill/1, discard/1, collect/0, collect_over/1, decode_submission/1, new_generation/0]).
+kill(Pid) -> exit(Pid,kill), nil.
+%% Monotonic: idle time must not move when the wall clock does.
+discard(Path) -> file:delete(Path), nil.
+collect() -> erlang:garbage_collect(), nil.
+%% Collects only when the heap has grown past Words, so a steady stream of small
+%% messages never pays for a collection.
+collect_over(Words) ->
+    case erlang:process_info(self(), total_heap_size) of
+        {total_heap_size, Size} when Size > Words -> erlang:garbage_collect(), nil;
+        _ -> nil
+    end.
+
+decode_submission(Payload) -> binary_to_term(Payload, [safe]).
+
+new_generation() ->
+    base64:encode(crypto:strong_rand_bytes(16), #{mode => urlsafe, padding => false}).

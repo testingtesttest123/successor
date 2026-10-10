@@ -1,0 +1,31 @@
+repos:
+  - repo: local
+    hooks:
+      - id: gleam-format
+        name: gleam format
+        entry: gleam format
+        language: system
+        files: ^(src|test)/.*\.gleam$
+      - id: gleam-lint
+        name: Gleam lint
+        entry: test/gleam-lint.sh
+        language: system
+        pass_filenames: false
+        files: ^((src|test)/.*\.gleam$|gleam\.toml$|test/gleam-lint\.sh$|flake/.*\.nix$|flake\.(nix|lock)$)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.10
+    hooks:
+      - id: ruff-check
+        pass_filenames: false
+        files: ^((priv/python|test)/.*\.py$|pyproject\.toml$)
+      - id: ruff-format
+        files: ^(priv/python|test)/.*\.py$
+  - repo: local
+    hooks:
+      - id: ty
+        name: ty check
+        entry: ty check
+        language: python
+        additional_dependencies: [ty==0.0.85]
+        pass_filenames: false
+        files: ^((priv/python|test)/.*\.py$|pyproject\.toml$)

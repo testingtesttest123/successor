@@ -1,0 +1,629 @@
+//// Albedo chat history into Anthropic Messages. Replay preserves Claude's
+//// signed thinking blocks; foreign-model turns replay as text and tool calls.
+
+import albedo/harness/extensions/claude/schema
+import albedo/harness/rotation
+import albedo/openai_api
+import albedo/openai_api/decoding
+import albedo/openai_api/replay
+import albedo/openai_api/types
+import gleam/bit_array
+import gleam/bool
+import gleam/crypto.{Sha256}
+import gleam/dict.{type Dict}
+import gleam/dynamic/decode
+import gleam/json.{type Json}
+import gleam/list
+import gleam/option.{type Option, None, Some}
+import gleam/result
+import gleam/string
+
+type Message {
+  Message(role: String, blocks: List(Json))
+}
+
+type Files {
+  Files(home: String, account: String)
+}
+
+type History {
+  History(messages: List(Message), calls: Dict(String, String))
+}
+
+pub const blocks_detail = "claude.blocks"
+
+const claude_code_version = "2.1.283"
+
+/// How requests authenticate. A subscription token only serves requests that
+/// pass as Claude Code; a Console API key is billed per token, so it skips the
+/// billing block, metadata and Claude Code headers.
+pub type Auth {
+  Subscription(access: String, account: String, device: String, session: String)
+  ApiKey(key: String)
+}
+
+/// The credential header, shared by Messages and the Files API.
+pub fn auth_header(auth: Auth) -> #(String, String) {
+  case auth {
+    Subscription(access:, ..) -> #("authorization", "Bearer " <> access)
+    ApiKey(key) -> #("x-api-key", key)
+  }
+}
+
+/// The non-secret owner of requests and uploaded files: the OAuth account
+/// UUID, or a key's hash label.
+pub fn owner(auth: Auth) -> String {
+  case auth {
+    Subscription(account:, ..) -> account
+    ApiKey(key) -> rotation.key_label(key)
+  }
+}
+
+pub fn encode(
+  home: String,
+  auth: Auth,
+  request: types.Request,
+) -> Result(openai_api.Exchange, types.Error) {
+  encode_with(home, auth, request, [])
+}
+
+/// `encode`, with `hosted` server tools, such as web search, after the
+/// request's own.
+pub fn encode_with(
+  home: String,
+  auth: Auth,
+  request: types.Request,
+  hosted: List(Json),
+) -> Result(openai_api.Exchange, types.Error) {
+  let #(_, secret) = auth_header(auth)
+  use <- bool.guard(
+    secret == ""
+      || string.contains(secret, "\r")
+      || string.contains(secret, "\n"),
+    Error(types.InvalidRequest("invalid Claude credential")),
+  )
+  let files = Files(home, owner(auth))
+  use history <- result.try(
+    list.try_fold(
+      mark_last(request.input, fn(input, last) { #(input, last) }),
+      History([], dict.new()),
+      fn(history, pair) { add(history, pair.0, request.model, files, pair.1) },
+    ),
+  )
+  let messages =
+    history.messages
+    |> list.reverse
+    |> list.map(fn(message) {
+      json.object([
+        #("role", json.string(message.role)),
+        #("content", json.preprocessed_array(message.blocks)),
+      ])
+    })
+  let first_user =
+    request.input
+    |> list.find_map(fn(input) {
+      case input {
+        types.User(text) | types.UserImage(text, _) -> Ok(text)
+        _ -> Error(Nil)
+      }
+    })
+    |> result.unwrap("")
+  let metadata = case auth {
+    Subscription(account:, device:, session:, ..) -> [
+      #(
+        "metadata",
+        json.object([
+          #(
+            "user_id",
+            json.string(
+              json.to_string(
+                json.object([
+                  #("device_id", json.string(device)),
+                  #("account_uuid", json.string(account)),
+                  #("session_id", json.string(session)),
+                ]),
+              ),
+            ),
+          ),
+        ]),
+      ),
+    ]
+    ApiKey(_) -> []
+  }
+  let context_management =
+    json.object([
+      #(
+        "edits",
+        json.preprocessed_array([
+          json.object([
+            #("type", json.string("clear_thinking_20251015")),
+            #("keep", json.string("all")),
+          ]),
+        ]),
+      ),
+    ])
+  let fields =
+    list.flatten([
+      [
+        #("model", json.string(request.model)),
+        #("messages", json.preprocessed_array(messages)),
+        #(
+          "max_tokens",
+          json.int(option.unwrap(request.max_output_tokens, 8192)),
+        ),
+        #("stream", json.bool(True)),
+      ],
+      metadata,
+      [
+        #("context_management", context_management),
+        #(
+          "system",
+          json.preprocessed_array(system_blocks(auth, request, first_user)),
+        ),
+      ],
+    ])
+  let fields = case request.tools, hosted {
+    [], [] -> fields
+    tools, _ -> [
+      #(
+        "tools",
+        json.preprocessed_array(list.append(
+          mark_last(tools, fn(tool, last) { tool_block(tool, last) }),
+          hosted,
+        )),
+      ),
+      ..fields
+    ]
+  }
+  let fields = case request.options.tool_choice {
+    Some(types.NoTool) -> [
+      #("tool_choice", json.object([#("type", json.string("none"))])),
+      ..fields
+    ]
+    Some(types.AnyTool) -> [
+      #("tool_choice", json.object([#("type", json.string("any"))])),
+      ..fields
+    ]
+    Some(types.NamedTool(name)) -> [
+      #(
+        "tool_choice",
+        json.object([
+          #("type", json.string("tool")),
+          #("name", json.string(claude_name(name))),
+        ]),
+      ),
+      ..fields
+    ]
+    _ -> fields
+  }
+  // Haiku 4.5 rejects effort under its alias and its dated id alike.
+  let effort = case string.starts_with(request.model, "claude-haiku-4-5") {
+    True -> None
+    False -> request.options.effort
+  }
+  let fields = case effort {
+    Some(effort) -> [
+      // Newer models omit thinking text unless asked for a summary.
+      #(
+        "thinking",
+        json.object([
+          #("type", json.string("adaptive")),
+          #("display", json.string("summarized")),
+        ]),
+      ),
+      #("output_config", json.object([#("effort", json.string(effort))])),
+      ..fields
+    ]
+    _ -> fields
+  }
+  let #(identity_betas, identity_headers) = case auth {
+    Subscription(session:, ..) -> #(
+      ["claude-code-20250219", "oauth-2025-04-20"],
+      [
+        #(
+          "user-agent",
+          "claude-cli/" <> claude_code_version <> " (external, cli)",
+        ),
+        #("x-app", "cli"),
+        #("x-stainless-lang", "js"),
+        #("x-stainless-runtime", "node"),
+        #("x-stainless-package-version", "0.112.1"),
+        #("x-stainless-retry-count", "0"),
+        #("x-stainless-timeout", "600"),
+        #("x-stainless-arch", "arm64"),
+        #("x-stainless-os", "MacOS"),
+        #("x-stainless-runtime-version", "v26.3.0"),
+        #("x-claude-code-session-id", session),
+        #("anthropic-dangerous-direct-browser-access", "true"),
+      ],
+    )
+    ApiKey(_) -> #([], [])
+  }
+  let betas =
+    list.flatten([
+      identity_betas,
+      [
+        "interleaved-thinking-2025-05-14", "thinking-token-count-2026-05-13",
+        "context-management-2025-06-27", "prompt-caching-scope-2026-01-05",
+      ],
+      case request.model {
+        "claude-haiku-4-5" -> []
+        "claude-sonnet-5" -> ["mid-conversation-system-2026-04-07"]
+        "claude-opus-5-5" | "claude-fable-5-1" -> [
+          "mid-conversation-system-2026-04-07",
+          "per-turn-control-2026-07-01",
+          "mid-conversation-tool-changes-2026-07-01",
+        ]
+        _ -> [
+          "mid-conversation-system-2026-04-07",
+          "mid-conversation-tool-changes-2026-07-01",
+        ]
+      },
+      case effort {
+        Some(_) -> ["effort-2025-11-24"]
+        None -> []
+      },
+      ["extended-cache-ttl-2025-04-11"],
+    ])
+  use <- bool.guard(
+    request.model == "" || request.max_output_tokens == Some(0),
+    Error(types.InvalidRequest("invalid Claude model or output token limit")),
+  )
+  Ok(openai_api.Exchange(
+    "https://api.anthropic.com/v1/messages",
+    list.flatten([
+      [
+        auth_header(auth),
+        #("anthropic-version", "2023-06-01"),
+        #("anthropic-beta", string.join(betas, ",")),
+      ],
+      identity_headers,
+      [#("content-type", "application/json"), #("accept", "application/json")],
+    ]),
+    json.to_string_tree(json.object(fields)),
+    120_000,
+    8 * 1024 * 1024,
+    True,
+  ))
+}
+
+fn add(
+  history: History,
+  input: types.Input,
+  model: String,
+  files: Files,
+  last: Bool,
+) -> Result(History, types.Error) {
+  case input {
+    types.User(text) -> Ok(push(history, "user", [text_block(text, last)]))
+    types.Assistant(text) ->
+      Ok(push(history, "assistant", [text_block(text, last)]))
+    types.UserImage(text, images) -> {
+      // An empty text carries no block: compaction frames follow the archive
+      // prompt as bare images in one user message.
+      let count = list.length(images)
+      let images =
+        list.index_map(images, fn(image, index) {
+          image_block(files, image, last && index == count - 1)
+        })
+      let blocks = case text {
+        "" -> images
+        _ -> [text_block(text, False), ..images]
+      }
+      Ok(push(history, "user", blocks))
+    }
+    types.ToolOutput(id, text, images) -> {
+      use _ <- result.try(
+        dict.get(history.calls, id)
+        |> result.replace_error(types.InvalidRequest(
+          "tool output without preceding Claude tool call: " <> id,
+        )),
+      )
+      let content = case images {
+        [] -> json.string(text)
+        images ->
+          json.preprocessed_array([
+            text_block(text, False),
+            ..list.map(images, image_block(files, _, False))
+          ])
+      }
+      Ok(
+        push(history, "user", [
+          json.object([
+            #("type", json.string("tool_result")),
+            #("tool_use_id", json.string(id)),
+            #("content", content),
+            ..cache_field(last)
+          ]),
+        ]),
+      )
+    }
+    types.Replay(item) -> {
+      use message <- result.try(
+        types.inspect_item(item, replay_decoder())
+        |> result.map_error(fn(error) {
+          types.InvalidRequest(
+            "invalid assistant replay message: "
+            <> decoding.decode_errors(error),
+          )
+        }),
+      )
+      let blocks = case
+        message.original_model == model,
+        message.original_blocks
+      {
+        True, Some(blocks) -> blocks
+        _, _ -> portable_blocks(message)
+      }
+      let calls =
+        list.fold(message.calls, history.calls, fn(calls, call) {
+          dict.insert(calls, call.id, call.name)
+        })
+      Ok(push(History(..history, calls: calls), "assistant", blocks))
+    }
+  }
+}
+
+type Replay {
+  Replay(
+    text: String,
+    thinking: String,
+    calls: List(types.ToolCall),
+    original_model: String,
+    original_blocks: Option(List(Json)),
+  )
+}
+
+fn replay_decoder() -> decode.Decoder(Replay) {
+  let detail = {
+    use kind <- decode.field("type", decode.string)
+    use model <- decode.optional_field("model", "", decode.string)
+    use blocks <- decode.optional_field(
+      "blocks",
+      [],
+      decode.list(decode.dynamic),
+    )
+    decode.success(case kind == blocks_detail {
+      True -> Some(#(model, list.map(blocks, types.encode_value)))
+      False -> None
+    })
+  }
+  use message <- decode.then(replay.message_decoder(detail))
+  use thinking <- decode.optional_field("reasoning_content", "", decode.string)
+  let #(model, blocks) = case list.first(message.details) {
+    Ok(#(model, blocks)) -> #(model, Some(blocks))
+    _ -> #("", None)
+  }
+  decode.success(Replay(message.text, thinking, message.calls, model, blocks))
+}
+
+pub fn tool_use_block(id: String, name: String, arguments: String) -> Json {
+  let input =
+    json.parse(arguments, decode.dynamic)
+    |> result.map(types.encode_value)
+    |> result.unwrap(json.object([]))
+  json.object([
+    #("type", json.string("tool_use")),
+    #("id", json.string(id)),
+    #("name", json.string(claude_name(name))),
+    #("input", input),
+  ])
+}
+
+fn portable_blocks(message: Replay) -> List(Json) {
+  let text =
+    list.filter_map(
+      [
+        case message.thinking {
+          "" -> ""
+          thinking -> "[Reasoning summary]\n" <> thinking
+        },
+        message.text,
+      ],
+      fn(text) {
+        case text {
+          "" -> Error(Nil)
+          _ -> Ok(text_block(text, False))
+        }
+      },
+    )
+  list.append(
+    text,
+    list.map(message.calls, fn(call) {
+      tool_use_block(call.id, call.name, call.arguments)
+    }),
+  )
+}
+
+/// Merge adjacent roles; Anthropic requires alternating user/assistant turns.
+fn push(history: History, role: String, blocks: List(Json)) -> History {
+  case history.messages {
+    [Message(last, previous), ..rest] if last == role ->
+      History(..history, messages: [
+        Message(role, list.append(previous, blocks)),
+        ..rest
+      ])
+    messages ->
+      History(..history, messages: [Message(role, blocks), ..messages])
+  }
+}
+
+/// Premium models answer a headerless 429 unless the identity leads the
+/// system prompt, Console keys included; only subscriptions carry billing.
+fn system_blocks(
+  auth: Auth,
+  request: types.Request,
+  first_user: String,
+) -> List(Json) {
+  let identity = "You are Claude Code, Anthropic's official CLI for Claude."
+  let billing = case auth {
+    Subscription(..) -> [billing_block(claude_code_version, first_user)]
+    ApiKey(_) -> []
+  }
+  list.append(billing, case request.instructions {
+    Some(text) -> [text_block(identity, False), cached_text_block(text)]
+    None -> [cached_text_block(identity)]
+  })
+}
+
+fn cached_text_block(text: String) -> Json {
+  json.object([
+    #("type", json.string("text")),
+    #("text", json.string(text)),
+    head_cache(),
+  ])
+}
+
+fn cache_field(cache: Bool) -> List(#(String, Json)) {
+  case cache {
+    True -> [tail_cache()]
+    False -> []
+  }
+}
+
+fn text_block(text: String, cache: Bool) -> Json {
+  json.object([
+    #("type", json.string("text")),
+    #("text", json.string(text)),
+    ..cache_field(cache)
+  ])
+}
+
+fn tool_block(tool: types.Tool, last: Bool) -> Json {
+  json.object([
+    #("name", json.string(claude_name(tool.name))),
+    #("description", json.string(tool.description)),
+    #("input_schema", schema.normalize(tool.parameters)),
+    ..case last {
+      True -> [head_cache()]
+      False -> []
+    }
+  ])
+}
+
+fn image_block(files: Files, image: types.Image, cache: Bool) -> Json {
+  let #(mime, _, _, _) = types.image_meta(image)
+  json.object([
+    #("type", json.string("image")),
+    #(
+      "source",
+      case file_source(files.home, files.account, types.image_data(image)) {
+        Ok(source) -> source
+        Error(Nil) ->
+          json.object([
+            #("type", json.string("base64")),
+            #("media_type", json.string(mime)),
+            #("data", types.base64_string(types.image_data(image))),
+          ])
+      },
+    ),
+    ..cache_field(cache)
+  ])
+}
+
+/// The stable head (tools, system) is cached for an hour; the moving tail
+/// takes Anthropic's default five minutes.
+const head_ttl_seconds = 3600
+
+const tail_ttl_seconds = 300
+
+/// The prefixes `encode` marks for caching: through the last tool, through
+/// the system prompt, and through the last input unless it is a replayed
+/// assistant turn, which carries no mark.
+pub fn cache_marks(request: types.Request) -> List(types.CacheMark) {
+  let tools = case request.tools {
+    [] -> []
+    _ -> [types.CacheMark(types.ToolsSpan, head_ttl_seconds)]
+  }
+  let tail = case list.last(request.input) {
+    Ok(types.Replay(_)) | Error(Nil) -> []
+    Ok(_) -> [
+      types.CacheMark(
+        types.InputSpan(list.length(request.input) - 1),
+        tail_ttl_seconds,
+      ),
+    ]
+  }
+  list.flatten([
+    tools,
+    [types.CacheMark(types.SystemSpan, head_ttl_seconds)],
+    tail,
+  ])
+}
+
+fn head_cache() -> #(String, Json) {
+  #(
+    "cache_control",
+    json.object([
+      #("type", json.string("ephemeral")),
+      #("ttl", json.string("1h")),
+    ]),
+  )
+}
+
+/// Maps a list, telling the mapper when it is holding the final item.
+fn mark_last(items: List(a), mapper: fn(a, Bool) -> b) -> List(b) {
+  case items {
+    [] -> []
+    [last] -> [mapper(last, True)]
+    [first, ..rest] -> [mapper(first, False), ..mark_last(rest, mapper)]
+  }
+}
+
+fn tail_cache() -> #(String, Json) {
+  #("cache_control", json.object([#("type", json.string("ephemeral"))]))
+}
+
+/// Albedo MCP tool names need Claude Code's MCP namespace on OAuth requests.
+/// Stable aliases keep historical tool references valid across turns.
+pub fn claude_name(name: String) -> String {
+  case string.starts_with(name, "mcp_") {
+    True -> {
+      let digest =
+        <<name:utf8>>
+        |> crypto.hash(Sha256, _)
+        |> bit_array.base16_encode
+        |> string.lowercase
+        |> string.slice(0, 16)
+      "mcp__albedo__" <> string.slice(name, 4, 24) <> "_" <> digest
+    }
+    False -> canonical_name(name)
+  }
+}
+
+fn canonical_name(name: String) -> String {
+  let known = [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Grep",
+    "Glob",
+    "AskUserQuestion",
+    "EnterPlanMode",
+    "ExitPlanMode",
+    "KillShell",
+    "NotebookEdit",
+    "Skill",
+    "Task",
+    "TaskOutput",
+    "TodoWrite",
+    "WebFetch",
+    "WebSearch",
+  ]
+  known
+  |> list.find(fn(canonical) {
+    string.lowercase(canonical) == string.lowercase(name)
+  })
+  |> result.unwrap(name)
+}
+
+@external(erlang, "albedo_claude_billing", "billing_block")
+fn billing_block(version: String, first_user: String) -> Json
+
+@external(erlang, "albedo_claude_files", "file_source")
+fn file_source(
+  home: String,
+  account: String,
+  data: types.ImageData,
+) -> Result(Json, Nil)
