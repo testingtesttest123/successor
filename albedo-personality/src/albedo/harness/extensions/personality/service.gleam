@@ -7,6 +7,7 @@ import albedo/harness/command
 import albedo/harness/extension
 import albedo/harness/extensions/personality/domain
 import albedo/harness/extensions/personality/ledger
+import albedo/harness/extensions/personality/sources
 import albedo/harness/extensions/personality/types as p
 import gleam/dynamic/decode
 import gleam/http.{type Method, Delete, Get, Post}
@@ -39,6 +40,10 @@ fn failure(error: p.DomainError) -> api.Failure {
   case error {
     p.Invalid(detail) -> api.invalid(detail)
     p.Conflict(detail) -> api.Failure(409, "personality_conflict", detail)
+    p.RecordConflict(_, _) ->
+      api.Failure(409, "conflict", ledger.message(error))
+    p.SourceUnavailable(detail) ->
+      api.Failure(409, "source_unavailable", detail)
     p.RevisionConflict(_) -> api.Failure(409, "conflict", ledger.message(error))
     p.Forbidden(detail) -> api.Failure(403, "forbidden", detail)
     p.OperationIdReused ->
@@ -74,9 +79,18 @@ fn dispatch(
   req: request.Request(BitArray),
 ) -> Result(response.Response(mist.ResponseData), api.Failure) {
   use _ <- result.try(api.accepts_json(req))
-  use _ <- result.try(api.parameters(req, []))
+  use parameters <- result.try(
+    api.parameters(req, case path {
+      ["sessions", _, "memories"] | ["sessions", _, "memories", _] -> [
+        "history",
+        "cursor",
+      ]
+      ["sessions", _, "sources", _] -> ["cursor"]
+      _ -> []
+    }),
+  )
   case req.method, path {
-    Post, ["sessions", id, "identity"] -> {
+    Post, ["sessions", id, "identity"] | Post, ["sessions", id, "memories"] -> {
       use mutation <- result.try(api.body(
         req,
         domain.mutation_fields,
@@ -99,6 +113,22 @@ fn dispatch(
                 ]),
               ),
             ]
+            p.RecordConflict(record, revision) -> [
+              #(
+                "current_heads",
+                json.object([
+                  #(
+                    "records",
+                    json.array([#(record, revision)], fn(head) {
+                      json.object([
+                        #("id", json.string(head.0)),
+                        #("revision", json.int(head.1)),
+                      ])
+                    }),
+                  ),
+                ]),
+              ),
+            ]
             _ -> []
           }
           Ok(
@@ -110,6 +140,35 @@ fn dispatch(
           )
         }
       }
+    }
+    Get, ["sessions", id, "memories"] | Get, ["sessions", id, "memories", _] -> {
+      use _ <- result.try(api.empty_body(req))
+      let record = case path {
+        ["sessions", _, "memories", record] -> record
+        _ -> ""
+      }
+      use history <- result.try(api.boolean_parameter(parameters, "history"))
+      let cursor = list.key_find(parameters, "cursor") |> option.from_result
+      use page <- result.try(
+        domain.inspect(
+          daemon.ledger,
+          id,
+          record,
+          option.unwrap(history, False),
+          cursor,
+        )
+        |> result.map_error(failure),
+      )
+      Ok(api.reply(200, ledger.page_json(page)))
+    }
+    Get, ["sessions", id, "sources", source] -> {
+      use _ <- result.try(api.empty_body(req))
+      let cursor = list.key_find(parameters, "cursor") |> option.from_result
+      use page <- result.try(
+        sources.expand(daemon.ledger, id, source, cursor)
+        |> result.map_error(failure),
+      )
+      Ok(api.reply(200, sources.page_json(page)))
     }
     Get, ["sessions", id, "receipts", operation] -> {
       use _ <- result.try(api.empty_body(req))

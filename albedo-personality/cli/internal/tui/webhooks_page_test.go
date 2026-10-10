@@ -54,8 +54,8 @@ func TestWebhookEditOnlySendsWhatChanged(t *testing.T) {
 func TestGeneratedSecretIsShownUntilDismissed(t *testing.T) {
 	m := loadedWebhooksPage(t)
 	m.Saving = true
-	m, _ = m.Update(webhooksSavedMsg{Gen: m.Generation, Notice: "added ci", Reveal: &webhookSecret{Hook: "ci", Secret: "whsec_generated"}})
-	if !strings.Contains(m.View(), "whsec_generated") {
+	m, _ = m.Update(webhooksSavedMsg{Gen: m.Generation, Notice: "added ci", Reveal: &webhookSecret{Hook: "ci", Secret: "fake-webhook-fixture-secret-1"}})
+	if !strings.Contains(m.View(), "fake-webhook-fixture-secret-1") {
 		t.Fatal("generated secret was not shown")
 	}
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
@@ -63,7 +63,7 @@ func TestGeneratedSecretIsShownUntilDismissed(t *testing.T) {
 		t.Fatal("keys other than enter must not dismiss the secret")
 	}
 	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	if m.Reveal != nil || strings.Contains(m.View(), "whsec_generated") {
+	if m.Reveal != nil || strings.Contains(m.View(), "fake-webhook-fixture-secret-1") {
 		t.Fatal("secret should be gone once dismissed")
 	}
 }
@@ -121,7 +121,7 @@ func TestWebhookSaveRetainsCreatedSecretAfterLaterFailure(t *testing.T) {
 		requests++
 		if requests == 1 {
 			w.WriteHeader(201)
-			_, _ = w.Write([]byte(`{"resource":{"url":"/extensions/webhooks/hooks/created?view=configuration","etag":"\"created-a\"","value":{"id":"created","session_id":"session","name":"deploy","signature_header":"x-albedo-signature","signature_prefix":"sha256=","enabled":true,"revision":"a","created_at":"2026-10-03T00:00:00Z","updated_at":"2026-10-03T00:00:00Z"}},"secret":"whsec_created","notification":{"state":"not_requested","code":null,"detail":null}}`))
+			_, _ = w.Write([]byte(`{"resource":{"url":"/extensions/webhooks/hooks/created?view=configuration","etag":"\"created-a\"","value":{"id":"created","session_id":"session","name":"deploy","signature_header":"x-albedo-signature","signature_prefix":"sha256=","enabled":true,"revision":"a","created_at":"2026-10-03T00:00:00Z","updated_at":"2026-10-03T00:00:00Z"}},"secret":"fake-webhook-fixture-secret-2","notification":{"state":"not_requested","code":null,"detail":null}}`))
 			return
 		}
 		w.WriteHeader(http.StatusBadRequest)
@@ -129,7 +129,7 @@ func TestWebhookSaveRetainsCreatedSecretAfterLaterFailure(t *testing.T) {
 	})
 	m := NewWebhooksPageModel(conn, "session")
 	msg := m.save(m.Generation, "added", daemon.WebhookRequest{Action: daemon.WebhookCreate, SessionID: "session", Name: "deploy"}, daemon.WebhookRequest{Action: daemon.WebhookSignature, Header: "x-custom", Prefix: ""})().(webhooksSavedMsg)
-	if msg.Err == nil || msg.Reveal == nil || msg.Reveal.Secret != "whsec_created" || requests != 2 {
+	if msg.Err == nil || msg.Reveal == nil || msg.Reveal.Secret != "fake-webhook-fixture-secret-2" || requests != 2 {
 		t.Fatalf("lost committed secret: %+v requests=%d", msg, requests)
 	}
 	if _, ok := errors.AsType[*daemon.APIError](msg.Err); !ok {

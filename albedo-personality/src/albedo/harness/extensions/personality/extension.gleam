@@ -7,6 +7,8 @@ import albedo/harness/extensions/personality/migrations/schema
 import albedo/harness/extensions/personality/projection
 import albedo/harness/extensions/personality/service
 import albedo/harness/extensions/personality/tools
+import gleam/result
+import sqlight
 
 pub fn extension() -> extension.Extension {
   extension.Extension(
@@ -30,6 +32,13 @@ pub fn extension() -> extension.Extension {
       extension.ClientPlugin(service.clients()),
       extension.RequestContextPlugin(projection.prepare),
       extension.CleanPlugin(fn(db, session) {
+        use _ <- result.try(
+          store.run(
+            db,
+            "UPDATE personality_source SET availability='unavailable' WHERE session=?",
+            [sqlight.text(session)],
+          ),
+        )
         store.forget_session(db, ["personality_session"], session)
       }),
     ],

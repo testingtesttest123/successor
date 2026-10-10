@@ -73,12 +73,12 @@ func init() {
 		shotState{"form-edit", webhooksShot(nil, ctrl('e'))},
 		shotState{"reveal", func(w, h int) string {
 			m := webhooksModel(w, h, nil)
-			m.Reveal = &webhookSecret{Hook: "deploy", Session: "s", Secret: "whsec_9fQ2xLr7Tq1mZ0vBcW4yHs8dNe3KpA6u"}
+			m.Reveal = &webhookSecret{Hook: "deploy", Session: "s", Secret: "fake-webhook-fixture-secret-1"}
 			return m.View()
 		}},
 		shotState{"reveal-copied", func(w, h int) string {
 			m := webhooksModel(w, h, nil)
-			m.Reveal = &webhookSecret{Hook: "deploy", Session: "s", Secret: "whsec_9fQ2xLr7Tq1mZ0vBcW4yHs8dNe3KpA6u"}
+			m.Reveal = &webhookSecret{Hook: "deploy", Session: "s", Secret: "fake-webhook-fixture-secret-1"}
 			m, _ = m.Update(ctrl('l'))
 			return m.View()
 		}},

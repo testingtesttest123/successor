@@ -43,6 +43,14 @@ response at the wire boundary.
 
 `model_callable: False` keeps a command user-only (`/login`-class commands). a `user_turn: True` command submits its outcome as one user turn when a user invokes it and returns data when the model invokes it — one run, two callers, only the delivery differs. dispatch refuses a model invocation of a user-only command and refuses any turn submission from the model.
 
+`command.Note` is supplied host material, even though its model input is a
+`User` wrapper. `session_submission` writes its trusted display origin with the
+transcript row through the existing submission metadata transaction. Anonymous
+notes use a host-owned `host-note:` identity; anonymous chat uses `host-chat:`.
+Those identities do not create input admission receipts. A note origin named
+`chat` or `mail` remains a host note. Wrapper text is presentation, never source
+authority; missing legacy User-origin metadata is unknown, not certified chat.
+
 ## python bindings
 
 the `commands` extension exposes the async `commands` object. at kernel boot the catalog mints one typed method per model-callable command: `commands.model("gpt-5")`, `commands.demo("the args")`. each method's docstring and signature come from the declaration, so `help(commands.<method>)` is the command's help text. `commands.catalog()` returns the current catalog, so a session `/reload` reaches it without a kernel restart; `commands.invoke(name, arguments)` runs any model-callable command by slash name with raw text or a dict. a command whose method name is reserved (`catalog`, `invoke`, `help`), invalid, taken, or added after the kernel booted stays callable through `invoke()`.

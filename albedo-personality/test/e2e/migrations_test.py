@@ -437,6 +437,13 @@ class MigrationsTest(unittest.TestCase):
                         "SELECT * FROM lcm_compaction_node WHERE session=?", (session,)
                     ).fetchall()
                     for table in (
+                        "personality_memory_source",
+                        "personality_memory_revision",
+                        "personality_memory",
+                        "personality_source",
+                        "personality_tool_receipt",
+                        "personality_capacity",
+                        "personality_controls",
                         "personality_session",
                         "personality_event",
                         "personality_operation",
@@ -489,6 +496,13 @@ class MigrationsTest(unittest.TestCase):
                         (session,),
                     )
                     for table in (
+                        "personality_memory_source",
+                        "personality_memory_revision",
+                        "personality_memory",
+                        "personality_source",
+                        "personality_tool_receipt",
+                        "personality_capacity",
+                        "personality_controls",
                         "personality_session",
                         "personality_event",
                         "personality_operation",
@@ -602,7 +616,11 @@ class MigrationsTest(unittest.TestCase):
                 "personality_event": "id,persona_id,operation_id,actor,origin_session,event_type,base_revision,head_revision,reason,created_at",
                 "personality_operation": "operation_id,request,result,created_at",
                 "personality_controls": "persona_id,field_locks",
-                "personality_capacity": "persona_id,ordinary_bytes,corrective_bytes,ordinary_limit,corrective_limit",
+                "personality_capacity": "persona_id,ordinary_bytes,corrective_bytes,ordinary_limit,corrective_limit,memory_bytes,record_limit",
+                "personality_memory": "id,persona_id,revision,lifecycle,importance,tags,temporal_scope,unresolved",
+                "personality_memory_revision": "persona_id,memory_id,revision,text,provenance,uncertainty,author,origin_session,event_id,reason,lifecycle,importance,tags,temporal_scope,unresolved",
+                "personality_source": "id,persona_id,session,first_seq,last_seq,digest,actors,origin,binding_revision,pre_binding_through,lcm_hint,availability",
+                "personality_memory_source": "persona_id,memory_id,revision,source_id,relation",
                 "personality_tool_receipt": "persona_id,session,call_id,operation_key,result",
             }
             cases = [
@@ -636,6 +654,10 @@ class MigrationsTest(unittest.TestCase):
                     def malformed(_app):
                         with sqlite3.connect(database) as db:
                             for owned in (
+                                "personality_memory_source",
+                                "personality_memory_revision",
+                                "personality_memory",
+                                "personality_source",
                                 "personality_tool_receipt",
                                 "personality_capacity",
                                 "personality_controls",

@@ -16,6 +16,19 @@ pub fn apply(db: sqlight.Connection) -> Result(Nil, String) {
       db,
       "CREATE TABLE IF NOT EXISTS personality_controls(persona_id TEXT PRIMARY KEY REFERENCES personality_persona(id),field_locks TEXT NOT NULL); CREATE TABLE IF NOT EXISTS personality_capacity(persona_id TEXT PRIMARY KEY REFERENCES personality_persona(id),ordinary_bytes INTEGER NOT NULL DEFAULT 0 CHECK(ordinary_bytes>=0),corrective_bytes INTEGER NOT NULL DEFAULT 0 CHECK(corrective_bytes>=0),ordinary_limit INTEGER NOT NULL DEFAULT 104857600 CHECK(ordinary_limit>=0),corrective_limit INTEGER NOT NULL DEFAULT 10485760 CHECK(corrective_limit>=0)); CREATE TABLE IF NOT EXISTS personality_tool_receipt(persona_id TEXT NOT NULL REFERENCES personality_persona(id),session TEXT NOT NULL,call_id TEXT NOT NULL,operation_key TEXT NOT NULL REFERENCES personality_operation(operation_id),result TEXT NOT NULL,PRIMARY KEY(persona_id,session,call_id)); CREATE INDEX IF NOT EXISTS personality_event_persona ON personality_event(persona_id);",
     ))
+    use _ <- result.try(store.exec(
+      db,
+      "CREATE TABLE IF NOT EXISTS personality_memory(id TEXT PRIMARY KEY,persona_id TEXT NOT NULL REFERENCES personality_persona(id),revision INTEGER NOT NULL CHECK(revision>0),lifecycle TEXT NOT NULL CHECK(lifecycle IN ('active','retracted')),importance INTEGER NOT NULL CHECK(importance BETWEEN 0 AND 3),tags TEXT NOT NULL,temporal_scope TEXT NOT NULL,unresolved INTEGER NOT NULL CHECK(unresolved IN (0,1))); CREATE INDEX IF NOT EXISTS personality_memory_scope ON personality_memory(persona_id,lifecycle,id); CREATE TABLE IF NOT EXISTS personality_memory_revision(persona_id TEXT NOT NULL REFERENCES personality_persona(id),memory_id TEXT NOT NULL REFERENCES personality_memory(id),revision INTEGER NOT NULL,text TEXT NOT NULL,provenance TEXT NOT NULL,uncertainty TEXT NOT NULL,author TEXT NOT NULL,origin_session TEXT NOT NULL,event_id INTEGER NOT NULL REFERENCES personality_event(id),reason TEXT NOT NULL,lifecycle TEXT NOT NULL,importance INTEGER NOT NULL,tags TEXT NOT NULL,temporal_scope TEXT NOT NULL,unresolved INTEGER NOT NULL,PRIMARY KEY(persona_id,memory_id,revision)); CREATE TABLE IF NOT EXISTS personality_source(id TEXT PRIMARY KEY,persona_id TEXT NOT NULL REFERENCES personality_persona(id),session TEXT NOT NULL,first_seq INTEGER NOT NULL,last_seq INTEGER NOT NULL,digest TEXT NOT NULL,actors TEXT NOT NULL,origin TEXT NOT NULL,binding_revision INTEGER NOT NULL,pre_binding_through INTEGER NOT NULL,lcm_hint TEXT,availability TEXT NOT NULL DEFAULT 'available' CHECK(availability IN ('available','unavailable'))); CREATE INDEX IF NOT EXISTS personality_source_scope ON personality_source(persona_id,id); CREATE TABLE IF NOT EXISTS personality_memory_source(persona_id TEXT NOT NULL,memory_id TEXT NOT NULL,revision INTEGER NOT NULL,source_id TEXT NOT NULL REFERENCES personality_source(id),relation TEXT NOT NULL CHECK(relation IN ('supports','contradicts','corrects')),PRIMARY KEY(persona_id,memory_id,revision,source_id,relation),FOREIGN KEY(persona_id,memory_id,revision) REFERENCES personality_memory_revision(persona_id,memory_id,revision));",
+    ))
+    use _ <- result.try(
+      store.add_columns(db, "personality_capacity", [
+        #("memory_bytes", "INTEGER NOT NULL DEFAULT 0 CHECK(memory_bytes>=0)"),
+        #(
+          "record_limit",
+          "INTEGER NOT NULL DEFAULT 10000 CHECK(record_limit>=0)",
+        ),
+      ]),
+    )
     // CREATE IF NOT EXISTS may leave an existing malformed relation untouched.
     // Check the real main-schema tables and every used column before committing
     // any new schema. Failure preserves existing data and quarantines the bundle.
@@ -39,11 +52,27 @@ pub fn apply(db: sqlight.Connection) -> Result(Nil, String) {
             "personality_event",
             "id,persona_id,operation_id,actor,origin_session,event_type,base_revision,head_revision,reason,created_at",
           ),
+          #(
+            "personality_memory",
+            "id,persona_id,revision,lifecycle,importance,tags,temporal_scope,unresolved",
+          ),
+          #(
+            "personality_memory_revision",
+            "persona_id,memory_id,revision,text,provenance,uncertainty,author,origin_session,event_id,reason,lifecycle,importance,tags,temporal_scope,unresolved",
+          ),
+          #(
+            "personality_source",
+            "id,persona_id,session,first_seq,last_seq,digest,actors,origin,binding_revision,pre_binding_through,lcm_hint,availability",
+          ),
+          #(
+            "personality_memory_source",
+            "persona_id,memory_id,revision,source_id,relation",
+          ),
           #("personality_operation", "operation_id,request,result,created_at"),
           #("personality_controls", "persona_id,field_locks"),
           #(
             "personality_capacity",
-            "persona_id,ordinary_bytes,corrective_bytes,ordinary_limit,corrective_limit",
+            "persona_id,ordinary_bytes,corrective_bytes,ordinary_limit,corrective_limit,memory_bytes,record_limit",
           ),
           #(
             "personality_tool_receipt",
@@ -88,7 +117,7 @@ pub fn capacity(
 ) -> Result(Nil, String) {
   store.run(
     db,
-    "INSERT INTO personality_capacity(persona_id,ordinary_bytes) SELECT ?,COALESCE((SELECT SUM(length(CAST(self_description||values_text||communication||instructions||author||reason AS BLOB))) FROM personality_revision WHERE persona_id=? AND revision=1),0)+COALESCE((SELECT SUM(length(CAST(persona_id||operation_id||actor||COALESCE(origin_session,'')||event_type||base_revision||head_revision||reason||created_at AS BLOB))) FROM personality_event WHERE persona_id=? AND event_type NOT IN ('identity_edited','controls_edited')),0)+COALESCE((SELECT SUM(length(CAST(request||result AS BLOB))) FROM personality_operation WHERE operation_id IN (SELECT operation_id FROM personality_event WHERE persona_id=? AND event_type NOT IN ('identity_edited','controls_edited'))),0) ON CONFLICT(persona_id) DO NOTHING",
+    "INSERT INTO personality_capacity(persona_id,ordinary_bytes) SELECT ?,COALESCE((SELECT SUM(length(CAST(self_description||values_text||communication||instructions||author||reason AS BLOB))) FROM personality_revision WHERE persona_id=? AND revision=1),0)+COALESCE((SELECT SUM(length(CAST(persona_id||operation_id||actor||COALESCE(origin_session,'')||event_type||base_revision||head_revision||reason||created_at AS BLOB))) FROM personality_event WHERE persona_id=? AND event_type NOT IN ('identity_edited','controls_edited','memory_edited')),0)+COALESCE((SELECT SUM(length(CAST(request||result AS BLOB))) FROM personality_operation WHERE operation_id IN (SELECT operation_id FROM personality_event WHERE persona_id=? AND event_type NOT IN ('identity_edited','controls_edited','memory_edited'))),0) ON CONFLICT(persona_id) DO NOTHING",
     [
       sqlight.text(persona),
       sqlight.text(persona),

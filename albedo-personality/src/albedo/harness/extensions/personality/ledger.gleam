@@ -4,8 +4,11 @@ import albedo/clock
 import albedo/daemon/session_requirements
 import albedo/daemon/store
 import albedo/harness/extensions/personality/migrations/schema
+import albedo/harness/extensions/personality/sources
 import albedo/harness/extensions/personality/types as p
+import albedo/text_scalars
 import gleam/dynamic/decode
+import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
@@ -20,11 +23,14 @@ pub fn initialise(ledger: store.Store) -> Result(Nil, String) {
 pub fn message(error: p.DomainError) -> String {
   case error {
     p.Invalid(detail) | p.Conflict(detail) | p.Storage(detail) -> detail
-    p.RevisionConflict(_) -> "identity heads changed; inspect before retrying"
+    p.RevisionConflict(_) -> "persona heads changed; inspect before retrying"
+    p.RecordConflict(id, revision) ->
+      "memory " <> id <> " head changed to " <> int.to_string(revision)
+    p.SourceUnavailable(detail) -> detail
     p.Forbidden(detail) -> detail
     p.OperationIdReused -> "operation_id_reused"
     p.CapacityExceeded ->
-      "corrective reserve exhausted; user must raise capacity or export and authorize maintenance"
+      "persona capacity reached; user must raise capacity or export and authorize maintenance"
     p.NotFound -> "persona or session not found"
     p.SetupRequired ->
       "personality setup required: explicitly bind an existing identity"
@@ -744,7 +750,8 @@ pub fn select_default(
 pub fn error_json(error: p.DomainError) -> json.Json {
   let code = case error {
     p.Invalid(_) -> "invalid_request"
-    p.Conflict(_) | p.RevisionConflict(_) -> "conflict"
+    p.Conflict(_) | p.RevisionConflict(_) | p.RecordConflict(_, _) -> "conflict"
+    p.SourceUnavailable(_) -> "source_unavailable"
     p.Forbidden(_) -> "forbidden"
     p.OperationIdReused -> "operation_id_reused"
     p.CapacityExceeded -> "capacity_exceeded"
@@ -765,6 +772,22 @@ pub fn error_json(error: p.DomainError) -> json.Json {
           ]),
         ),
       ]
+      p.RecordConflict(id, revision) -> [
+        #(
+          "current_heads",
+          json.object([
+            #(
+              "records",
+              json.array([#(id, revision)], fn(record) {
+                json.object([
+                  #("id", json.string(record.0)),
+                  #("revision", json.int(record.1)),
+                ])
+              }),
+            ),
+          ]),
+        ),
+      ]
       _ -> []
     }
   ])
@@ -777,14 +800,32 @@ fn read_error(encoded: String) -> p.DomainError {
       use detail <- decode.field("detail", decode.string)
       case code {
         "conflict" -> {
-          use heads <- decode.field("current_heads", {
-            use revision <- decode.field("revision", decode.int)
-            use identity <- decode.field("identity_revision", decode.int)
-            decode.success(p.Heads(revision, identity))
+          use record <- decode.optional_field("current_heads", None, {
+            use records <- decode.optional_field(
+              "records",
+              [],
+              decode.list({
+                use id <- decode.field("id", decode.string)
+                use revision <- decode.field("revision", decode.int)
+                decode.success(#(id, revision))
+              }),
+            )
+            decode.success(list.first(records) |> option.from_result)
           })
-          decode.success(p.RevisionConflict(heads))
+          case record {
+            Some(record) -> decode.success(p.RecordConflict(record.0, record.1))
+            None -> {
+              use heads <- decode.field("current_heads", {
+                use revision <- decode.field("revision", decode.int)
+                use identity <- decode.field("identity_revision", decode.int)
+                decode.success(p.Heads(revision, identity))
+              })
+              decode.success(p.RevisionConflict(heads))
+            }
+          }
         }
         "invalid_request" -> decode.success(p.Invalid(detail))
+        "source_unavailable" -> decode.success(p.SourceUnavailable(detail))
         "forbidden" -> decode.success(p.Forbidden(detail))
         "operation_id_reused" -> decode.success(p.OperationIdReused)
         "capacity_exceeded" -> decode.success(p.CapacityExceeded)
@@ -817,6 +858,20 @@ pub fn receipt_json(receipt: p.Receipt) -> json.Json {
     #("revision", json.int(receipt.revision)),
     #("identity_revision", json.int(receipt.identity_revision)),
     #("payload_hash", json.string(receipt.payload_hash)),
+    ..case receipt.records {
+      [] -> []
+      _ -> [
+        #(
+          "records",
+          json.array(receipt.records, fn(record) {
+            json.object([
+              #("id", json.string(record.0)),
+              #("revision", json.int(record.1)),
+            ])
+          }),
+        ),
+      ]
+    }
   ])
 }
 
@@ -830,6 +885,15 @@ fn receipt_decoder() -> decode.Decoder(p.Receipt) {
   use revision <- decode.field("revision", decode.int)
   use identity <- decode.field("identity_revision", decode.int)
   use hash <- decode.field("payload_hash", decode.string)
+  use records <- decode.optional_field(
+    "records",
+    [],
+    decode.list({
+      use id <- decode.field("id", decode.string)
+      use revision <- decode.field("revision", decode.int)
+      decode.success(#(id, revision))
+    }),
+  )
   decode.success(p.Receipt(
     operation,
     persona,
@@ -840,6 +904,7 @@ fn receipt_decoder() -> decode.Decoder(p.Receipt) {
     revision,
     identity,
     hash,
+    records,
   ))
 }
 
@@ -936,12 +1001,28 @@ fn editing_in(
     )
     |> result.map_error(p.Storage),
   )
+  use memory_capacity <- result.try(
+    store.one(
+      db,
+      "SELECT (SELECT COUNT(*) FROM personality_memory WHERE persona_id=?),record_limit FROM personality_capacity WHERE persona_id=?",
+      [sqlight.text(persona.id), sqlight.text(persona.id)],
+      {
+        use count <- decode.field(0, decode.int)
+        use limit <- decode.field(1, decode.int)
+        decode.success(#(count, limit))
+      },
+      "memory capacity unavailable",
+    )
+    |> result.map_error(p.Storage),
+  )
   Ok(p.Editing(
     p.Controls(locks, persona.agent_identity_edits, persona.agent_memory_edits),
     bytes.0,
     bytes.1,
     bytes.2,
     bytes.3,
+    memory_capacity.0,
+    memory_capacity.1,
   ))
 }
 
@@ -961,6 +1042,12 @@ pub fn editing_json(editing: p.Editing) -> json.Json {
     #("ordinary_bytes", json.int(editing.ordinary_bytes)),
     #("corrective_bytes", json.int(editing.corrective_bytes)),
     #("ordinary_limit", json.int(editing.ordinary_limit)),
+    #(
+      "ordinary_headroom",
+      json.int(editing.ordinary_limit - editing.ordinary_bytes),
+    ),
+    #("current_records", json.int(editing.current_records)),
+    #("record_limit", json.int(editing.record_limit)),
     #("corrective_limit", json.int(editing.corrective_limit)),
     #(
       "corrective_headroom",
@@ -1045,9 +1132,32 @@ pub fn edit(
   payload_hash: String,
   prepare: fn(p.Persona, p.Controls) -> Result(p.Edit, p.DomainError),
 ) -> Result(p.Receipt, p.DomainError) {
+  // Replay needs no available source, and prevalidation never holds a write lock.
+  use captured <- result.try(
+    store.query(ledger, fn(db) {
+      use snapshot <- result.try(bound_in(db, session))
+      use saved <- result.try(saved_in(
+        db,
+        receipt_key(snapshot.persona.id, session, mutation.operation_id),
+      ))
+      Ok(#(snapshot.binding, saved))
+    }),
+  )
+  let refs =
+    list.flat_map(mutation.memories, fn(change) {
+      list.map(change.sources, fn(link) { link.source })
+    })
+  use resolved <- result.try(case captured.1 {
+    Some(_) -> Ok([])
+    None -> sources.resolve(ledger, captured.0, refs)
+  })
   store.query(ledger, fn(db) {
     transaction(db, fn() {
       use snapshot <- result.try(bound_in(db, session))
+      use _ <- result.try(case snapshot.binding == captured.0 {
+        True -> Ok(Nil)
+        False -> Error(p.Conflict("binding changed during memory validation"))
+      })
       let persona = snapshot.persona
       let key = receipt_key(persona.id, session, mutation.operation_id)
       use saved <- result.try(saved_in(db, key))
@@ -1056,7 +1166,15 @@ pub fn edit(
         Some(#(_, receipt)) -> {
           // A replay is already known committed. Reserve exhaustion may prevent
           // a new call alias, but must never turn a receipt read into a failure.
-          case map_call_in(db, actor, key, receipt) {
+          case
+            map_call_budget_in(
+              db,
+              actor,
+              key,
+              receipt,
+              !list.any(mutation.memories, fn(change) { change.id == "" }),
+            )
+          {
             Ok(_) | Error(p.CapacityExceeded) -> Ok(receipt)
             Error(error) -> Error(error)
           }
@@ -1078,6 +1196,18 @@ pub fn edit(
                 )
             },
           )
+          use checked <- result.try(sources.resolve_in(
+            db,
+            snapshot.binding,
+            refs,
+          ))
+          use _ <- result.try(case checked == resolved {
+            True -> Ok(Nil)
+            False ->
+              Error(p.SourceUnavailable(
+                "source changed during memory validation",
+              ))
+          })
           use editing <- result.try(editing_in(db, persona))
           use edit <- result.try(prepare(persona, editing.controls))
           use receipt <- result.try(commit_in(
@@ -1089,6 +1219,16 @@ pub fn edit(
             edit,
             payload_hash,
           ))
+          use records <- result.try(commit_memories_in(
+            db,
+            persona,
+            session,
+            actor,
+            mutation,
+            resolved,
+            receipt.event_id,
+          ))
+          let receipt = p.Receipt(..receipt, records: records)
           let encoded = json.to_string(receipt_json(receipt))
           use _ <- result.try(
             store.run(
@@ -1124,14 +1264,30 @@ pub fn edit(
                 #("receipt", receipt_json(receipt)),
               ]),
             )
-          use _ <- result.try(charge_in(
+          use memory_payload <- result.try(memory_payload_in(
             db,
             persona.id,
+            records,
+          ))
+          use _ <- result.try(charge_payload_in(
+            db,
+            persona.id,
+            !list.any(mutation.memories, fn(change) { change.id == "" }),
             string.byte_size(request)
               + string.byte_size(encoded)
-              + string.byte_size(payload),
+              + string.byte_size(payload)
+              + string.byte_size(memory_payload)
+              + string.byte_size(
+              json.to_string(json.array(resolved, sources.json)),
+            ),
           ))
-          use _ <- result.try(map_call_in(db, actor, key, receipt))
+          use _ <- result.try(map_call_budget_in(
+            db,
+            actor,
+            key,
+            receipt,
+            !list.any(mutation.memories, fn(change) { change.id == "" }),
+          ))
           Ok(receipt)
         }
       }
@@ -1160,11 +1316,12 @@ fn charge_in(
   }
 }
 
-fn map_call_in(
+fn map_call_budget_in(
   db: sqlight.Connection,
   actor: p.Actor,
   key: String,
   receipt: p.Receipt,
+  corrective: Bool,
 ) -> Result(Nil, p.DomainError) {
   case actor {
     p.User -> Ok(Nil)
@@ -1192,9 +1349,10 @@ fn map_call_in(
               [receipt.persona_id, receipt.origin_session, call, key, encoded],
               json.string,
             ))
-          use _ <- result.try(charge_in(
+          use _ <- result.try(charge_payload_in(
             db,
             receipt.persona_id,
+            corrective,
             string.byte_size(mapping),
           ))
           store.run(
@@ -1293,7 +1451,11 @@ fn commit_in(
         sqlight.text(session),
         sqlight.text(case edit.identity_changed {
           True -> "identity_edited"
-          False -> "controls_edited"
+          False ->
+            case mutation.memories {
+              [] -> "controls_edited"
+              _ -> "memory_edited"
+            }
         }),
         sqlight.int(persona.revision),
         sqlight.int(persona.revision + 1),
@@ -1305,20 +1467,23 @@ fn commit_in(
     )
     |> result.map_error(p.Storage),
   )
-  Ok(p.Receipt(
-    mutation.operation_id,
-    persona.id,
-    author,
-    session,
-    case actor {
-      p.User -> None
-      p.OwnerAgent(call) -> Some(call)
-    },
-    event,
-    persona.revision + 1,
-    identity_revision,
-    payload_hash,
-  ))
+  Ok(
+    p.Receipt(
+      mutation.operation_id,
+      persona.id,
+      author,
+      session,
+      case actor {
+        p.User -> None
+        p.OwnerAgent(call) -> Some(call)
+      },
+      event,
+      persona.revision + 1,
+      identity_revision,
+      payload_hash,
+      [],
+    ),
+  )
 }
 
 fn refresh_ordinary_in(
@@ -1335,7 +1500,7 @@ fn refresh_ordinary_in(
     use _ <- result.try(schema.capacity(db, persona))
     store.run(
       db,
-      "UPDATE personality_capacity SET ordinary_bytes=COALESCE((SELECT SUM(length(CAST(self_description||values_text||communication||instructions||author||reason AS BLOB))) FROM personality_revision WHERE persona_id=? AND revision=1),0)+COALESCE((SELECT SUM(length(CAST(persona_id||operation_id||actor||COALESCE(origin_session,'')||event_type||base_revision||head_revision||reason||created_at AS BLOB))) FROM personality_event WHERE persona_id=? AND event_type NOT IN ('identity_edited','controls_edited')),0)+COALESCE((SELECT SUM(length(CAST(request||result AS BLOB))) FROM personality_operation WHERE operation_id IN (SELECT operation_id FROM personality_event WHERE persona_id=? AND event_type NOT IN ('identity_edited','controls_edited'))),0) WHERE persona_id=?",
+      "UPDATE personality_capacity SET ordinary_bytes=memory_bytes+COALESCE((SELECT SUM(length(CAST(self_description||values_text||communication||instructions||author||reason AS BLOB))) FROM personality_revision WHERE persona_id=? AND revision=1),0)+COALESCE((SELECT SUM(length(CAST(persona_id||operation_id||actor||COALESCE(origin_session,'')||event_type||base_revision||head_revision||reason||created_at AS BLOB))) FROM personality_event WHERE persona_id=? AND event_type NOT IN ('identity_edited','controls_edited','memory_edited')),0)+COALESCE((SELECT SUM(length(CAST(request||result AS BLOB))) FROM personality_operation WHERE operation_id IN (SELECT operation_id FROM personality_event WHERE persona_id=? AND event_type NOT IN ('identity_edited','controls_edited','memory_edited'))),0) WHERE persona_id=?",
       [
         sqlight.text(persona),
         sqlight.text(persona),
@@ -1356,4 +1521,618 @@ pub fn identity(
     use editing <- result.try(editing_in(connection, snapshot.persona))
     Ok(#(snapshot, editing))
   })
+}
+
+fn charge_payload_in(
+  db: sqlight.Connection,
+  persona: String,
+  corrective: Bool,
+  bytes: Int,
+) -> Result(Nil, p.DomainError) {
+  case corrective {
+    True -> charge_in(db, persona, bytes)
+    False -> {
+      use changed <- result.try(
+        store.rows(
+          db,
+          "UPDATE personality_capacity SET ordinary_bytes=ordinary_bytes+?,memory_bytes=memory_bytes+? WHERE persona_id=? AND ordinary_bytes+?<=ordinary_limit RETURNING persona_id",
+          [
+            sqlight.int(bytes),
+            sqlight.int(bytes),
+            sqlight.text(persona),
+            sqlight.int(bytes),
+          ],
+          decode.field(0, decode.string, decode.success),
+        )
+        |> result.map_error(p.Storage),
+      )
+      case changed {
+        [_] -> Ok(Nil)
+        [] -> Error(p.CapacityExceeded)
+        _ -> Error(p.Storage("capacity row not unique"))
+      }
+    }
+  }
+}
+
+fn evidence_in(
+  db: sqlight.Connection,
+  persona: String,
+  id: String,
+  revision: Int,
+) -> Result(List(p.Evidence), p.DomainError) {
+  use links <- result.try(
+    store.rows(
+      db,
+      "SELECT source_id,relation FROM personality_memory_source WHERE persona_id=? AND memory_id=? AND revision=? ORDER BY source_id,relation",
+      [sqlight.text(persona), sqlight.text(id), sqlight.int(revision)],
+      {
+        use source <- decode.field(0, decode.string)
+        use relation <- decode.field(1, decode.string)
+        decode.success(#(source, relation))
+      },
+    )
+    |> result.map_error(p.Storage),
+  )
+  list.try_map(links, fn(link) {
+    sources.find_in(db, persona, link.0)
+    |> result.map(fn(source) { p.Evidence(link.1, source) })
+  })
+}
+
+fn ceiling(requested: String, links: List(p.Evidence)) -> String {
+  let origins = list.map(links, fn(link) { link.source.origin })
+  case list.contains(origins, "imported") {
+    True -> "imported"
+    False ->
+      case list.contains(origins, "reported") {
+        True -> "reported"
+        False ->
+          case requested {
+            "inferred" | "reported" | "imported" | "inherited" -> requested
+            _ -> "experienced"
+          }
+      }
+  }
+}
+
+fn commit_memories_in(
+  db: sqlight.Connection,
+  persona: p.Persona,
+  session: String,
+  actor: p.Actor,
+  mutation: p.Mutation,
+  resolved: List(p.SourceRef),
+  event: Int,
+) -> Result(List(#(String, Int)), p.DomainError) {
+  let #(_, changes) =
+    list.map_fold(mutation.memories, resolved, fn(refs, change) {
+      let count = list.length(change.sources)
+      let links =
+        list.map2(change.sources, list.take(refs, count), fn(link, source) {
+          p.Evidence(link.relation, source)
+        })
+      #(list.drop(refs, count), p.MemoryChange(..change, sources: links))
+    })
+  use capacity <- result.try(
+    store.one(
+      db,
+      "SELECT (SELECT COUNT(*) FROM personality_memory WHERE persona_id=?),record_limit FROM personality_capacity WHERE persona_id=?",
+      [sqlight.text(persona.id), sqlight.text(persona.id)],
+      {
+        use count <- decode.field(0, decode.int)
+        use limit <- decode.field(1, decode.int)
+        decode.success(#(count, limit))
+      },
+      "memory capacity unavailable",
+    )
+    |> result.map_error(p.Storage),
+  )
+  use _ <- result.try(
+    case
+      list.all(changes, fn(change) { change.id != "" })
+      || capacity.0
+      + list.length(list.filter(changes, fn(change) { change.id == "" }))
+      <= capacity.1
+    {
+      True -> Ok(Nil)
+      False -> Error(p.CapacityExceeded)
+    },
+  )
+  list.try_map(changes, fn(change) {
+    let id = case change.id {
+      "" -> new_id()
+      id -> id
+    }
+    use previous <- result.try(case change.id {
+      "" -> Ok([])
+      _ -> {
+        use head <- result.try(
+          store.one(
+            db,
+            "SELECT revision FROM personality_memory WHERE persona_id=? AND id=?",
+            [sqlight.text(persona.id), sqlight.text(id)],
+            decode.field(0, decode.int, decode.success),
+            "memory_not_found",
+          )
+          |> result.map_error(fn(error) {
+            case error {
+              "memory_not_found" -> p.NotFound
+              _ -> p.Storage(error)
+            }
+          }),
+        )
+        use _ <- result.try(case head == change.expected_revision {
+          True -> Ok(Nil)
+          False -> Error(p.RecordConflict(id, head))
+        })
+        evidence_in(db, persona.id, id, head)
+      }
+    })
+    let old =
+      list.map(previous, fn(link) {
+        p.Evidence(
+          case change.action {
+            "contradict" -> link.relation
+            _ -> "corrects"
+          },
+          link.source,
+        )
+      })
+    let links = list.unique(list.append(change.sources, old))
+    use _ <- result.try(case list.length(links) <= 16 {
+      True -> Ok(Nil)
+      False -> Error(p.Invalid("revision exceeds 16 retained evidence links"))
+    })
+    let revision = change.expected_revision + 1
+    let state = case change.action {
+      "retract" -> "retracted"
+      _ -> "active"
+    }
+    let unresolved =
+      change.action == "contradict"
+      || list.any(links, fn(link) { link.relation == "contradicts" })
+    let author = case actor {
+      p.User -> "user"
+      p.OwnerAgent(_) -> "owner_agent"
+    }
+    let tags = json.to_string(json.array(change.tags, json.string))
+    use _ <- result.try(
+      store.run(
+        db,
+        "INSERT INTO personality_memory(id,persona_id,revision,lifecycle,importance,tags,temporal_scope,unresolved) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,lifecycle=excluded.lifecycle,importance=excluded.importance,tags=excluded.tags,temporal_scope=excluded.temporal_scope,unresolved=excluded.unresolved",
+        [
+          sqlight.text(id),
+          sqlight.text(persona.id),
+          sqlight.int(revision),
+          sqlight.text(state),
+          sqlight.int(change.importance),
+          sqlight.text(tags),
+          sqlight.text(change.temporal_scope),
+          sqlight.bool(unresolved),
+        ],
+      )
+      |> result.map_error(p.Storage),
+    )
+    use _ <- result.try(
+      store.run(
+        db,
+        "INSERT INTO personality_memory_revision(persona_id,memory_id,revision,text,provenance,uncertainty,author,origin_session,event_id,reason,lifecycle,importance,tags,temporal_scope,unresolved) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [
+          sqlight.text(persona.id),
+          sqlight.text(id),
+          sqlight.int(revision),
+          sqlight.text(change.text),
+          sqlight.text(ceiling(change.provenance, links)),
+          sqlight.text(change.uncertainty),
+          sqlight.text(author),
+          sqlight.text(session),
+          sqlight.int(event),
+          sqlight.text(mutation.reason),
+          sqlight.text(state),
+          sqlight.int(change.importance),
+          sqlight.text(tags),
+          sqlight.text(change.temporal_scope),
+          sqlight.bool(unresolved),
+        ],
+      )
+      |> result.map_error(p.Storage),
+    )
+    use _ <- result.try(
+      list.try_each(links, fn(link) {
+        use _ <- result.try(sources.persist_in(db, persona.id, link.source))
+        store.run(
+          db,
+          "INSERT INTO personality_memory_source(persona_id,memory_id,revision,source_id,relation) VALUES(?,?,?,?,?)",
+          [
+            sqlight.text(persona.id),
+            sqlight.text(id),
+            sqlight.int(revision),
+            sqlight.text(link.source.id),
+            sqlight.text(link.relation),
+          ],
+        )
+        |> result.map_error(p.Storage)
+      }),
+    )
+    Ok(#(id, revision))
+  })
+}
+
+fn memory_decoder() -> decode.Decoder(p.Memory) {
+  use id <- decode.field(0, decode.string)
+  use revision <- decode.field(1, decode.int)
+  use state <- decode.field(2, decode.string)
+  use text <- decode.field(3, decode.string)
+  use provenance <- decode.field(4, decode.string)
+  use uncertainty <- decode.field(5, decode.string)
+  use importance <- decode.field(6, decode.int)
+  use tags <- decode.field(7, decode.string)
+  use scope <- decode.field(8, decode.string)
+  use author <- decode.field(9, decode.string)
+  use session <- decode.field(10, decode.string)
+  use event <- decode.field(11, decode.int)
+  use reason <- decode.field(12, decode.string)
+  use unresolved <- decode.field(13, sqlight.decode_bool())
+  case json.parse(tags, decode.list(decode.string)) {
+    Ok(tags) ->
+      decode.success(p.Memory(
+        id,
+        revision,
+        state,
+        text,
+        provenance,
+        uncertainty,
+        importance,
+        tags,
+        scope,
+        author,
+        session,
+        event,
+        reason,
+        unresolved,
+        [],
+        p.ClaimAttribution([], [], []),
+      ))
+    Error(_) ->
+      decode.failure(
+        p.Memory(
+          "",
+          0,
+          "",
+          "",
+          "",
+          "",
+          0,
+          [],
+          "",
+          "",
+          "",
+          0,
+          "",
+          False,
+          [],
+          p.ClaimAttribution([], [], []),
+        ),
+        "memory tags",
+      )
+  }
+}
+
+pub fn memory_json(memory: p.Memory) -> json.Json {
+  json.object([
+    #("id", json.string(memory.id)),
+    #("revision", json.int(memory.revision)),
+    #("lifecycle", json.string(memory.lifecycle)),
+    #("text", json.string(memory.text)),
+    #("provenance", json.string(memory.provenance)),
+    #("uncertainty", json.string(memory.uncertainty)),
+    #("truth_status", json.string("unverified_claim")),
+    #(
+      "attribution",
+      json.string(
+        case list.contains(memory.claim.actor_kinds, "user_assertion") {
+          True -> "being_told"
+          False -> "source_backed_claim"
+        },
+      ),
+    ),
+    #("source_origins", json.array(memory.claim.origins, json.string)),
+    #("source_actor_kinds", json.array(memory.claim.actor_kinds, json.string)),
+    #("evidence_source_ids", json.array(memory.claim.source_ids, json.string)),
+    #("evidence_details", json.string("separately_paged_exact_labels")),
+    #("importance", json.int(memory.importance)),
+    #("tags", json.array(memory.tags, json.string)),
+    #("temporal_scope", json.string(memory.temporal_scope)),
+    #("author", json.string(memory.author)),
+    #("origin_session", json.string(memory.origin_session)),
+    #("event_id", json.int(memory.event_id)),
+    #("reason", json.string(memory.reason)),
+    #("unresolved", json.bool(memory.unresolved)),
+    #(
+      "sources",
+      json.array(memory.sources, fn(link) {
+        json.object([
+          #("relation", json.string(link.relation)),
+          #("source", sources.json(link.source)),
+        ])
+      }),
+    ),
+  ])
+}
+
+fn actor_kind(actor: String) -> String {
+  case actor {
+    "system_note:" <> _ -> "system_note"
+    "agent_report:" <> _ -> "agent_report"
+    "external_report:" <> _ -> "external_report"
+    "user_assertion" | "owner_agent" | "tool_report" -> actor
+    _ -> "unknown_origin"
+  }
+}
+
+fn with_evidence(memory: p.Memory, evidence: List(p.Evidence)) -> p.Memory {
+  p.Memory(
+    ..memory,
+    sources: evidence,
+    claim: p.ClaimAttribution(
+      list.map(evidence, fn(link) { link.source.origin }) |> list.unique,
+      list.flat_map(evidence, fn(link) {
+        list.map(link.source.actors, actor_kind)
+      })
+        |> list.unique,
+      list.map(evidence, fn(link) { link.source.id }) |> list.unique,
+    ),
+  )
+}
+
+pub fn page_json(page: p.Page) -> json.Json {
+  json.object([
+    #("records", json.array(page.records, memory_json)),
+    #("fragment", json.int(page.fragment)),
+    #("next_cursor", json.nullable(page.next, json.string)),
+    #("bytes", json.int(page.bytes)),
+  ])
+}
+
+fn fragments(memory: p.Memory) -> List(p.Memory) {
+  // One evidence link and tag per fragment keeps their complete labels bounded.
+  let text_parts = int.max(1, { text_scalars.length(memory.text) + 127 } / 128)
+  let reason_parts =
+    int.max(1, { text_scalars.length(memory.reason) + 127 } / 128)
+  let count =
+    int.max(
+      int.max(text_parts, reason_parts),
+      int.max(list.length(memory.sources), list.length(memory.tags)),
+    )
+  list.repeat(Nil, count)
+  |> list.index_map(fn(_, index) {
+    p.Memory(
+      ..memory,
+      text: text_scalars.drop(memory.text, index * 128)
+        |> text_scalars.take(128),
+      reason: text_scalars.drop(memory.reason, index * 128)
+        |> text_scalars.take(128),
+      sources: list.drop(memory.sources, index) |> list.take(1),
+      tags: list.drop(memory.tags, index) |> list.take(1),
+    )
+  })
+}
+
+pub fn memories(
+  db: store.Store,
+  session: String,
+  record_id: String,
+  history: Bool,
+  cursor: option.Option(String),
+) -> Result(p.Page, p.DomainError) {
+  use _ <- result.try(
+    case
+      string.byte_size(record_id) <= 128
+      && string.byte_size(option.unwrap(cursor, "")) <= 2048
+    {
+      True -> Ok(Nil)
+      False -> Error(p.Invalid("memory ID or cursor exceeds its limit"))
+    },
+  )
+  use captured <- result.try(
+    store.query(db, fn(connection) {
+      use snapshot <- result.try(bound_in(connection, session))
+      let scope =
+        json.to_string(json.array(
+          [
+            snapshot.persona.id,
+            session,
+            int.to_string(snapshot.binding.revision),
+            int.to_string(snapshot.persona.revision),
+            record_id,
+            case history {
+              True -> "history"
+              False -> "current"
+            },
+          ],
+          json.string,
+        ))
+      use position <- result.try(case cursor {
+        None -> Ok(#("", 0, 0))
+        Some(cursor) -> {
+          use parts <- result.try(
+            json.parse(cursor, decode.list(decode.string))
+            |> result.replace_error(p.Invalid("invalid memory cursor")),
+          )
+          case parts {
+            [binding, id, revision, fragment] if binding == scope -> {
+              use revision <- result.try(
+                int.parse(revision)
+                |> result.replace_error(p.Invalid(
+                  "invalid memory cursor revision",
+                )),
+              )
+              use fragment <- result.try(
+                int.parse(fragment)
+                |> result.replace_error(p.Invalid(
+                  "invalid memory cursor fragment",
+                )),
+              )
+              case revision >= 0 && fragment >= 0 {
+                True -> Ok(#(id, revision, fragment))
+                False -> Error(p.Invalid("invalid memory cursor"))
+              }
+            }
+            _ -> Error(p.Conflict("memory cursor scope or head changed"))
+          }
+        }
+      })
+      let #(after_id, after_revision, fragment) = position
+      let predicate = case history {
+        True -> ""
+        False -> " AND r.revision=m.revision AND m.lifecycle='active'"
+      }
+      use rows <- result.try(
+        store.rows(
+          connection,
+          "SELECT r.memory_id,r.revision,CASE WHEN r.revision<m.revision AND r.lifecycle='active' THEN 'superseded' ELSE r.lifecycle END,r.text,r.provenance,r.uncertainty,r.importance,r.tags,r.temporal_scope,r.author,r.origin_session,r.event_id,r.reason,r.unresolved FROM personality_memory_revision r JOIN personality_memory m ON m.id=r.memory_id AND m.persona_id=r.persona_id WHERE r.persona_id=? AND (?='' OR r.memory_id=?) AND (r.memory_id>? OR (r.memory_id=? AND r.revision>=?))"
+            <> predicate
+            <> " ORDER BY r.memory_id,r.revision LIMIT 2",
+          [
+            sqlight.text(snapshot.persona.id),
+            sqlight.text(record_id),
+            sqlight.text(record_id),
+            sqlight.text(after_id),
+            sqlight.text(after_id),
+            sqlight.int(after_revision),
+          ],
+          memory_decoder(),
+        )
+        |> result.map_error(p.Storage),
+      )
+      use rows <- result.try(
+        list.try_map(rows, fn(memory) {
+          use evidence <- result.try(evidence_in(
+            connection,
+            snapshot.persona.id,
+            memory.id,
+            memory.revision,
+          ))
+          Ok(with_evidence(memory, evidence))
+        }),
+      )
+      Ok(#(scope, rows, fragment))
+    }),
+  )
+  let #(scope, rows, fragment) = captured
+  case rows {
+    [] ->
+      case cursor {
+        None -> {
+          let page = p.Page([], 0, None, 0)
+          let bytes = page_json(page) |> json.to_string |> string.byte_size
+          Ok(
+            p.Page(
+              ..page,
+              bytes: bytes + string.byte_size(int.to_string(bytes)) - 1,
+            ),
+          )
+        }
+        Some(_) -> Error(p.Invalid("memory cursor outside current records"))
+      }
+    [memory, ..rest] -> {
+      let parts = fragments(memory)
+      use part <- result.try(
+        list.drop(parts, fragment)
+        |> list.first
+        |> result.replace_error(p.Invalid("memory fragment outside revision")),
+      )
+      let next = case fragment + 1 < list.length(parts), rest {
+        True, _ ->
+          Some(
+            json.to_string(json.array(
+              [
+                scope,
+                memory.id,
+                int.to_string(memory.revision),
+                int.to_string(fragment + 1),
+              ],
+              json.string,
+            )),
+          )
+        False, [following, ..] ->
+          Some(
+            json.to_string(json.array(
+              [scope, following.id, int.to_string(following.revision), "0"],
+              json.string,
+            )),
+          )
+        False, [] -> None
+      }
+      let page = p.Page([part], fragment, next, 0)
+      let bytes = page_json(page) |> json.to_string |> string.byte_size
+      let page =
+        p.Page(
+          ..page,
+          bytes: bytes + string.byte_size(int.to_string(bytes)) - 1,
+        )
+      case page_json(page) |> json.to_string |> string.byte_size <= 8192 {
+        True -> Ok(page)
+        False -> Error(p.Invalid("memory page exceeds 8 KiB rendered bytes"))
+      }
+    }
+  }
+}
+
+fn memory_payload_in(
+  db: sqlight.Connection,
+  persona: String,
+  records: List(#(String, Int)),
+) -> Result(String, p.DomainError) {
+  use payloads <- result.try(
+    list.try_map(records, fn(record) {
+      use memory <- result.try(
+        store.one(
+          db,
+          "SELECT memory_id,revision,lifecycle,text,provenance,uncertainty,importance,tags,temporal_scope,author,origin_session,event_id,reason,unresolved FROM personality_memory_revision WHERE persona_id=? AND memory_id=? AND revision=?",
+          [sqlight.text(persona), sqlight.text(record.0), sqlight.int(record.1)],
+          memory_decoder(),
+          "committed memory payload missing",
+        )
+        |> result.map_error(p.Storage),
+      )
+      use evidence <- result.try(evidence_in(db, persona, record.0, record.1))
+      let memory = with_evidence(memory, evidence)
+      Ok(
+        json.object([
+          #("revision", memory_json(memory)),
+          #(
+            "current",
+            json.object([
+              #("persona_id", json.string(persona)),
+              #("id", json.string(memory.id)),
+              #("revision", json.int(memory.revision)),
+              #("lifecycle", json.string(memory.lifecycle)),
+              #("importance", json.int(memory.importance)),
+              #("tags", json.array(memory.tags, json.string)),
+              #("temporal_scope", json.string(memory.temporal_scope)),
+              #("unresolved", json.bool(memory.unresolved)),
+            ]),
+          ),
+          #(
+            "links",
+            json.array(evidence, fn(link) {
+              json.array(
+                [
+                  persona,
+                  memory.id,
+                  int.to_string(memory.revision),
+                  link.source.id,
+                  link.relation,
+                ],
+                json.string,
+              )
+            }),
+          ),
+        ]),
+      )
+    }),
+  )
+  Ok(json.to_string(json.array(payloads, fn(value) { value })))
 }

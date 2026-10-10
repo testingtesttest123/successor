@@ -1,6 +1,7 @@
 //// One submission's model input and its durable user-visible event.
 
 import albedo/daemon/events as view
+import albedo/daemon/mail
 import albedo/daemon/note
 import albedo/daemon/operations
 import albedo/daemon/session_state
@@ -96,6 +97,25 @@ pub fn commits(
           case submission.source, submission.submission_id {
             turn.Mail(id, _), _ | turn.JobWake, Some(id) -> [
               operations.Commit(id, position, display(submission)),
+              ..acc.1
+            ]
+            // Anonymous host notes still need durable, host-owned source
+            // kind metadata. The namespaced identity commits with the row,
+            // independently of client admission receipts or wrapper text.
+            turn.Note(_), id -> [
+              operations.Commit(
+                "host-note:" <> option.unwrap(id, mail.new_id()),
+                position,
+                display(submission),
+              ),
+              ..acc.1
+            ]
+            turn.Chat, id -> [
+              operations.Commit(
+                "host-chat:" <> option.unwrap(id, mail.new_id()),
+                position,
+                display(submission),
+              ),
               ..acc.1
             ]
             _, _ -> acc.1

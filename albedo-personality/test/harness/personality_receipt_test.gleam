@@ -41,6 +41,7 @@ fn mutation(
     [#("values", value)],
     "foreground edit",
     None,
+    [],
   )
 }
 
@@ -140,6 +141,7 @@ pub fn canonical_payload_ignores_object_and_lock_order_without_ignoring_actor_te
       [#("values", "é"), #("instructions", "data")],
       "reason",
       Some(p.ControlChange(Some(["values", "instructions"]), None, None)),
+      [],
     )
   let reordered =
     p.Mutation(
@@ -169,6 +171,7 @@ pub fn agent_controls_and_locked_fields_are_refused_but_user_corrections_commit_
       [],
       "user field lock",
       Some(p.ControlChange(Some(["values"]), None, None)),
+      [],
     )
   let assert Ok(configured) = domain.mutate(db, "owner", p.User, configuration)
   configured.identity_revision |> should.equal(persona.identity_revision)
@@ -201,6 +204,7 @@ pub fn agent_controls_and_locked_fields_are_refused_but_user_corrections_commit_
       [],
       "disable agent edits",
       Some(p.ControlChange(None, Some(False), None)),
+      [],
     )
   domain.mutate(db, "owner", p.User, disable) |> should.be_ok
   let assert Ok(disabled) = ledger.capture(db, "owner", "")

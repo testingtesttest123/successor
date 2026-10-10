@@ -9,8 +9,9 @@ binding continues to behave as before.
 This first setup layer persists empty identities, human configuration, explicit
 owner bindings, operation receipts and audit events. It validates admission on
 each request. Revisioned identity edits and native inspect/edit tools use the
-same domain transaction as authenticated human edits. Dynamic identity
-projection, memory and delegate working-context APIs remain separate additions. No new background model call,
+same domain transaction as authenticated human edits. Dynamic identity projection
+and source-backed curated memories are available. Automatic recall and delegate
+working-context APIs remain separate additions. No new background model call,
 worker or scheduler is started.
 
 ## Human setup
@@ -79,7 +80,7 @@ The extension owns `personality_persona`, `personality_revision`,
 `personality_default`, `personality_session`, `personality_event`, and
 `personality_operation`, plus identity controls, capacity and trusted call
 receipt tables. Its schema migration is one transaction and validates
-the real table identity and every used column of all nine tables before
+the real table identity and every used column of all thirteen tables before
 installation succeeds. A failure quarantines the whole bundle, including its
 service and commands. Neither migration nor reload copies identity state or
 touches transcript and LCM storage.
@@ -98,8 +99,9 @@ restore the database rather than silently repairing authority state.
 The personality request-context callback captures its binding and current
 identity together on the store owner and validates an active owner binding.
 Missing binding storage is a preparation error. Current identity fields are
-validated at 4 KiB UTF-8 each and 12 KiB total. Its initial contribution is empty
-apart from snapshot identity; later projection owns prompt text and budgets.
+validated at 4 KiB UTF-8 each and 12 KiB total. Request-time projection renders
+the one captured identity snapshot within the shared prompt budget. Curated
+memory inspection does not automatically add claims to request context.
 Normal preparation, explicit compaction/project inspection and managed background
 request admission all use the generic loaded-composition guard. No provider or
 network work runs inside capture, transactions, or observers.
@@ -125,9 +127,9 @@ unique editable-field names), `agent_identity_edits`, and `agent_memory_edits`.
 Controls are revisioned domain mutations. Control-only changes advance the
 aggregate head and leave the identity revision unchanged. Users can correct a
 locked field; owner agents cannot. There is no model permission-setting API.
-The first slice still has no memory mutation API.
+The same mutation may include curated memory changes, described below.
 
-Two native tools are available only through the selected personality bundle:
+Native tools are available only through the selected personality bundle:
 
 - `persona_inspect`: optional integer `cursor`, initially zero. Each page contains
   current aggregate/identity heads, binding revision, edit controls, usage and
@@ -186,12 +188,12 @@ Python or filesystem access.
 The additive extension tables `personality_controls`, `personality_capacity`,
 and `personality_tool_receipt` persist locks, usage/reserve configuration and
 trusted call receipts. Schema installation validates every used column of all
-nine extension tables in the same transaction and backfills capacity rows for
+thirteen extension tables in the same transaction and backfills capacity rows for
 existing identities without rewriting their identity, history or setup receipts.
 New human creation initializes capacity on its existing transaction. Inspection
 and recovery never initialize or change persistent state.
 
-The current identity-edit slice exposes ordinary setup payload usage and the
+The ledger exposes ordinary setup/memory payload usage and the
 100 MiB ordinary limit separately from corrective payload usage and its further
 10 MiB reserve. All identity edits/control changes and their complete canonical
 request, event/revision metadata, operation receipt and trusted-call mapping
@@ -200,6 +202,161 @@ logical payload accounting, not a measurement of SQLite pages. Identity edits
 remain available when ordinary admission is full and consume no new curated
 record slots. Reserve exhaustion returns `capacity_exceeded` with an actionable
 user-maintenance diagnostic; it retains readable history and never silently
-expires data. Capacity settings have no model mutation surface. General record,
-source/import accounting and the current-record admission guard belong to the
-later record-domain slice.
+expires data. Capacity settings have no model mutation surface. Curated record
+and source payloads use the ordinary admission guard described below; bulk
+import and delegate handback remain separate additions.
+
+
+## Source-backed curated memories
+
+Curated formation is deliberate foreground work through `persona_edit` or the
+human API. If no memory operation runs, no curated claim is created. There is
+no extraction worker, background model call, automatic recall/ranking, or changed
+LCM summarization policy in this layer. Persona/source text is inert evidence,
+never a grant of tool authority or independently verified truth.
+
+Both `POST /extensions/personality/sessions/{id}/memories` and the existing
+`.../identity` route accept the shared mutation envelope: `operation_id`,
+`expected_revision`, `expected_identity_revision`, `reason`, optional identity
+`changes`, optional human-only `controls`, and optional `memories`. The native
+`persona_edit` accepts the same envelope except controls. There are at most 32
+total changes and 64 KiB per request. Agent identity and memory edit controls
+are enforced independently. Native writes retain the same trusted call mapping,
+operation receipt, atomic rollback and recovery semantics as identity edits.
+
+Each memory change accepts:
+
+- `text` (nonempty, at most 4 KiB UTF-8), `provenance` and `uncertainty`
+  (nonempty, at most 128 bytes). Provenance is one of experienced, imported,
+  inferred, reported or inherited. It is capped by actual source/binding origin;
+  a requested label cannot raise supplied or reported material to experience.
+- Optional `importance` (0–3), at most 16 distinct `tags` (128 bytes each), and
+  `temporal_scope` (128 bytes). Temporal scope is an explicit assertion, not a
+  parsed or invented date.
+- `sources`: at most 16 evidence links. A link's `relation` is supports,
+  contradicts or corrects. For new evidence, give inclusive `first_seq` and
+  `last_seq` in the trusted current owner session, optional expected `digest`,
+  and optional `lcm_hint` (128 bytes). No session, persona, actor or origin can
+  be supplied. Alternatively give only an already-authorized `source_id` and
+  optional expected digest; its exact saved range and lineage cannot be changed.
+- New records omit `id`, use action `remember` (the default), expected revision
+  zero, and require evidence. Existing records require their stable `id`, exact
+  `expected_revision`, and action `correct`, `contradict` or `retract`.
+
+A correction appends a new revision at the same stable ID, retains every old
+origin with corrects links, and replaces the current claim. An explicit
+contradiction preserves previous supports/contradicts and marks the new current
+revision unresolved. A later correction converts previous links to corrects;
+only newly supplied contradictions keep that correction unresolved. A retraction
+appends a retracted head, with its evidence and reason retained. No old revision
+is rewritten or erased. Active/current inspection excludes superseded and
+retracted claims; explicit history inspection preserves their audit trail.
+The 16-link bound includes retained evidence, so an oversized correction fails
+atomically rather than dropping origins. Revisions record user/owner-agent
+actor, origin session, event, reason, uncertainty and current metadata.
+
+Source resolution validates the actual endpoint rows and ordered payloads, not
+numeric guesses. It captures trusted durable submission origins where available:
+chat assertions, owner-agent output, tool reports, persisted mail sender/kind,
+and host notes. Text that resembles mail or a host note cannot choose its actor.
+Actual anonymous Note/Chat submissions persist display metadata in their existing
+transcript commit. Namespaced host-note identity distinguishes supplied notes
+even when an origin happens to be named chat or mail. Legacy User rows without
+trusted submission metadata have `unknown_origin` and imported provenance; a
+wrapper or saved User role alone cannot certify the original submitter.
+A user assertion is labeled as being told and an unverified claim; its contents
+are never certified merely by persistence. Pre-binding rows remain imported
+supplied history. A range crossing the disclosed boundary must be split.
+Tool/mail reports are capped as reported, and administrative host notes as
+supplied/imported. Mixed revisions retain all source actors and origins.
+
+Canonical integrity is SHA-256 of compact JSON triples in row order:
+`[actual_seq, lowercase_hex_of_saved_payload, trusted_actor_label]`.
+Source IDs additionally bind persona, session, exact boundaries, digest, origin
+and binding revision. The source row retains that exact range, actors, binding
+revision/boundary and optional LCM hint. An LCM hint is never authority; missing
+or reorganized hints use the canonical transcript range. Changed/reordered rows,
+changed actor metadata, invalid endpoints or unreadable rows return
+`source_unavailable`; no different row is substituted.
+
+Bounded metadata prevalidation runs without a write transaction. Unique exact
+ranges in one mutation have a combined limit of 256 rows and 256 KiB of packed
+transcript/submission metadata. Each range is materialized/digested once per
+validation; repeated links do not multiply body reads. Complete actor labels
+have a 1-KiB rendered metadata limit. Wider evidence must be split into narrower
+operations/ranges; labels are never clipped. The short final transaction checks
+the binding, persona/identity/record heads, source ranges and digests again before
+committing revisions, links, sources, head/event, usage and exact receipts.
+
+## Memory and source inspection
+
+Human reads use `GET .../sessions/{id}/memories`, or append a stable record ID.
+`history=true` explicitly includes old revisions; default false reads only active
+heads. `cursor` is an opaque scoped continuation. Native `persona_inspect` adds
+`view="memories"`, optional `record_id`, `history=false`, and `memory_cursor`.
+The existing default identity view retains its integer cursor contract.
+
+Memory pages contain one complete labeled fragment, so are always below the
+50-record cap, and at most 8 KiB rendered UTF-8 including the JSON envelope.
+They return `records`, `fragment`, `next_cursor` and exact rendered `bytes`.
+Concatenate `text` and `reason` for each ID/revision in fragment order; collect
+its tags/evidence links across fragments. Text/reason chunks contain at most 128
+Unicode scalars, with at most one full tag and evidence link per fragment.
+Every fragment carries the same complete-revision `attribution`, `source_origins`,
+`source_actor_kinds` and `evidence_source_ids`, computed before fragmentation.
+`being_told` therefore never changes on later parts of a user-sourced claim.
+Actor kinds preserve user/owner/tool/system-note/agent-report/external-report/
+unknown distinctions. `evidence_details="separately_paged_exact_labels"` explicitly
+locates full origin names, reporter labels and exact range metadata in the
+evidence fragments identified by those source IDs. Collect these full labels
+across pages; they are never clipped. This compact stable envelope adds no new
+mutation admission cap and preserves all sixteen evidence links.
+Cursors bind current persona, owner session, binding revision, aggregate head,
+record filter and history choice. A changed head or different scope is an explicit
+conflict; it never silently continues into another persona/history.
+
+Native `persona_source(source_id, cursor)` and human
+`GET .../sessions/{id}/sources/{source_id}?cursor=...` accept only a previously
+persisted source authorized for the currently bound owner persona. There is no
+free session or persona search parameter. They return text, full source metadata,
+next cursor and exact rendered bytes, capped at 8 KiB. Text chunks are at most
+768 Unicode scalars, with actual row/actor labels. Cursors bind the exact source
+ID and digest. Sources can span different deliberately bound owner sessions,
+without granting access to any other range or identity. Temporary child contexts
+have no owner source/read/write authority in this layer.
+
+The existing extension cleanup marks that deleted session's surviving source
+references unavailable before removing its binding. Records, receipts, source
+metadata and revisions remain; no hidden copy of transcript text is kept.
+Expansion reports deleted or invalid evidence unavailable. Recreating unrelated
+rows cannot revive a source retired by cleanup.
+
+## Memory capacity and migration
+
+The existing extension-owned atomic schema migration now validates thirteen
+real tables, including `personality_memory`, `personality_memory_revision`,
+`personality_source` and `personality_memory_source`, with persona-scoped indexes.
+It adds memory payload accounting and a default 10,000-record limit to the
+existing capacity table; existing setup/identity rows and receipt format remain
+compatible. Identity-only canonical requests keep their prior representation,
+so existing receipts replay after this additive upgrade. No core schema,
+transcript, LCM row or required-capability policy is changed.
+
+New records, including mixed requests that also correct existing records, charge
+the ordinary 100-MiB budget. Corrections/retractions and identity/control-only
+writes use the separate 10-MiB corrective reserve and add no record slots.
+Accounting includes complete canonical requests, current/revision/link/source
+metadata, events, receipts and native call mappings, conservatively including
+serialization overhead. Later setup accounting preserves all memory charges.
+Usage inspection includes both headrooms, current retained record count and
+record limit. Retracted stable IDs retain their slots and audit history; no age
+expiry or silent forgetting is performed. Exhaustion rolls back every write and
+returns `capacity_exceeded`. Existing records/receipts remain readable.
+Increasing persistent capacity does not enlarge per-operation or page budgets.
+
+Real HTTP scenarios live in `test/e2e/personality_memory_test.py`. Its separate
+provider class retains both protocol native-tool/kernel lifecycle assertions;
+under the documented restricted executor those remain unverified. Socket-free
+native transaction/publication invariants live in
+`test/harness/personality_memory_test.gleam`. A passing adapter test is not a
+claim that the unavailable provider/kernel lane passed.

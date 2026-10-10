@@ -6,6 +6,8 @@ pub type DomainError {
   Invalid(String)
   Conflict(String)
   RevisionConflict(Heads)
+  RecordConflict(String, Int)
+  SourceUnavailable(String)
   Forbidden(String)
   OperationIdReused
   CapacityExceeded
@@ -114,6 +116,7 @@ pub type Mutation {
     changes: List(#(String, String)),
     reason: String,
     controls: Option(ControlChange),
+    memories: List(MemoryChange),
   )
 }
 
@@ -132,6 +135,7 @@ pub type Receipt {
     revision: Int,
     identity_revision: Int,
     payload_hash: String,
+    records: List(#(String, Int)),
   )
 }
 
@@ -142,5 +146,83 @@ pub type Editing {
     corrective_bytes: Int,
     ordinary_limit: Int,
     corrective_limit: Int,
+    current_records: Int,
+    record_limit: Int,
   )
+}
+
+/// Input refs have empty trusted fields. Resolution derives all attribution.
+pub type SourceRef {
+  SourceRef(
+    id: String,
+    session: String,
+    first_seq: Int,
+    last_seq: Int,
+    digest: String,
+    actors: List(String),
+    origin: String,
+    binding_revision: Int,
+    pre_binding_through: Int,
+    lcm_hint: Option(String),
+    availability: String,
+  )
+}
+
+pub type Evidence {
+  Evidence(relation: String, source: SourceRef)
+}
+
+pub type MemoryChange {
+  MemoryChange(
+    id: String,
+    expected_revision: Int,
+    action: String,
+    text: String,
+    provenance: String,
+    uncertainty: String,
+    importance: Int,
+    tags: List(String),
+    temporal_scope: String,
+    sources: List(Evidence),
+  )
+}
+
+pub type Memory {
+  Memory(
+    id: String,
+    revision: Int,
+    lifecycle: String,
+    text: String,
+    provenance: String,
+    uncertainty: String,
+    importance: Int,
+    tags: List(String),
+    temporal_scope: String,
+    author: String,
+    origin_session: String,
+    event_id: Int,
+    reason: String,
+    unresolved: Bool,
+    sources: List(Evidence),
+    claim: ClaimAttribution,
+  )
+}
+
+/// Whole-revision labels survive evidence fragmentation. Exact actor names
+/// remain in separately paged evidence, identified here without truncation.
+pub type ClaimAttribution {
+  ClaimAttribution(
+    origins: List(String),
+    actor_kinds: List(String),
+    source_ids: List(String),
+  )
+}
+
+/// Inspection fragments preserve labels and exact pointers, never clip origins.
+pub type Page {
+  Page(records: List(Memory), fragment: Int, next: Option(String), bytes: Int)
+}
+
+pub type SourcePage {
+  SourcePage(text: String, source: SourceRef, next: Option(String), bytes: Int)
 }

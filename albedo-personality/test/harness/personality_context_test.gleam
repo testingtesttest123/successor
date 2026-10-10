@@ -136,6 +136,7 @@ pub fn personality_callback_returns_one_current_identity_block_test() -> Nil {
       [#("values", "candid curiosity")],
       "change",
       None,
+      [],
     ),
   )
   |> should.be_ok
@@ -983,6 +984,7 @@ fn inspect_multibyte_identity_pages(field: String) -> Nil {
       ],
       "valid multibyte identity",
       None,
+      [],
     ),
   )
   |> should.be_ok
