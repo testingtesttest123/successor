@@ -50,6 +50,8 @@ pub type Loop {
     /// Appends image fit rows ahead of the request that needs them.
     commit_fits: fn(List(transcript.ImageFit)) -> Result(Nil, String),
     record_context: fn(types.Request, compaction.Prepared, Bool) -> Nil,
+    /// Captured native attempts, independent of ordinary request admission.
+    record_summary_context: fn(request_context.Prepared) -> Nil,
     record_usage: fn(usage.Metadata) -> Result(Nil, String),
     drain_steering: fn() -> Result(List(types.Input), String),
     /// Reports the pin's compaction baseline (`Some`) or that compaction
@@ -418,7 +420,7 @@ fn prepare(
   original: List(types.Input),
   force: Bool,
 ) -> Result(compaction.Prepared, String) {
-  runtime.prepare_view_scoped(
+  runtime.prepare_view_observed_scoped(
     state.host,
     state.kernel,
     state.model,
@@ -429,6 +431,7 @@ fn prepare(
     original,
     force,
     state.upstream.images,
+    state.record_summary_context,
   )
 }
 
@@ -866,42 +869,19 @@ fn summarize(
   state: Loop,
   request: compaction.SummaryRequest,
 ) -> Result(String, String) {
-  let compaction.SummaryRequest(
-    model,
-    previous,
-    evicted,
-    max_output_tokens,
-    instructions,
-  ) = request
-  let previous = option.unwrap(previous, "(none)")
-  let transcript =
-    evicted
-    |> compaction.without_superseded
-    |> list.map(render_summary_input)
-    |> list.filter(fn(line) { line != "" })
-    |> string.join("\n")
-  let prompt =
-    "<previous-summary>\n"
-    <> previous
-    <> "\n</previous-summary>\n<newly-evicted-history>\n"
-    <> transcript
-    <> "\n</newly-evicted-history>"
-  let summary_request =
-    types.Request(
-      model,
-      Some(instructions),
-      [types.User(prompt)],
-      [],
-      Some(max_output_tokens),
-      types.defaults,
-    )
+  use summary_request <- result.try(summarizer_request(request))
+  let instructions = option.unwrap(summary_request.instructions, "")
   use #(_, turn, _, _) <- result.try(
     call(
       call_context(state),
       requests.Summarizer,
       summary_request,
       // The summarizer's history is exactly what it says; nothing replaced.
-      requests.direct_prefix(instructions, [], [types.User(prompt)]),
+      case request.evidence {
+        compaction.NoEvidence ->
+          requests.direct_prefix(instructions, [], summary_request.input)
+        _ -> requests.summary_prefix(instructions, summary_request.input)
+      },
       state.publish,
       fn(_) { types.Continue },
       fn(_, _) { types.Continue },
@@ -923,6 +903,45 @@ fn summarize(
     "" -> Error("summarizer provider returned no text")
     value -> Ok(value)
   }
+}
+
+/// Pure native provider boundary, shared by the actual call and socket-free
+/// adapter tests. No tools, recall contribution, ledger lookup or mutation.
+pub fn summarizer_request(
+  request: compaction.SummaryRequest,
+) -> Result(types.Request, String) {
+  let compaction.SummaryRequest(
+    model,
+    previous,
+    evicted,
+    max_output_tokens,
+    instructions,
+    _,
+    _,
+  ) = request
+  let previous = option.unwrap(previous, "(none)")
+  let transcript =
+    evicted
+    |> compaction.without_superseded
+    |> list.map(render_summary_input)
+    |> list.filter(fn(line) { line != "" })
+    |> string.join("\n")
+  use envelope <- result.try(compaction.summary_envelope(request))
+  let prompt =
+    envelope
+    <> "<previous-summary>\n"
+    <> previous
+    <> "\n</previous-summary>\n<newly-evicted-history>\n"
+    <> transcript
+    <> "\n</newly-evicted-history>"
+  Ok(types.Request(
+    model,
+    Some(instructions),
+    [types.User(prompt)],
+    [],
+    Some(max_output_tokens),
+    types.defaults,
+  ))
 }
 
 /// One evicted item as the summarizer reads it: image payloads never reach it.

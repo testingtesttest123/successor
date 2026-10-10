@@ -4,10 +4,12 @@
 import albedo/daemon/conversation
 import albedo/daemon/store
 import albedo/daemon/transcript
+import albedo/daemon/transcript_attribution
 import albedo/harness/compaction
 import albedo/harness/extension as harness_extension
 import albedo/harness/extensions/lcm/graph
 import albedo/harness/extensions/rolling/extension as rolling
+import albedo/harness/request_context
 import albedo/harness/settings
 import albedo/openai_api/types
 import gleam/dynamic/decode
@@ -372,16 +374,38 @@ fn summarize_leaves(
   eligible: List(transcript.SourcedEntry),
   summary_limit: Int,
 ) -> Result(List(graph.Leaf), String) {
-  let chunks = rolling.chunk_units(source_units(eligible), leaf_budget)
+  // Reserve the complete instruction head and the maximum bounded evidence
+  // envelope before chunking. As before, never split an oversized whole unit.
+  let overhead = case context.summary_policy {
+    None -> 0
+    Some(_) ->
+      compaction.estimate_pinned(summary_instructions(context), []) + 1056
+  }
+  let chunks =
+    rolling.chunk_units(
+      source_units(eligible),
+      int.max(1, leaf_budget - overhead),
+    )
   use chunk <- list.try_map(chunks)
   case chunk {
     [] -> Error("cannot summarize an empty source chunk")
     [first, ..rest] -> {
       let last = list.fold(rest, first, fn(_, item) { item })
       let inputs = list.map(chunk, fn(item) { item.entry.input })
+      let evidence = case context.summary_policy {
+        None -> compaction.NoEvidence
+        Some(policy) ->
+          compaction.Leaves(
+            context.session,
+            [#(first.source.seq, last.source.seq)],
+            Some(policy.lineage),
+            leaf_attributions(context, chunk, Some(policy.lineage)),
+          )
+      }
       use summary <- result.try(summarize_bounded(
         context,
         inputs,
+        evidence,
         summary_limit,
       ))
       Ok(graph.Leaf(first.source.seq, last.source.seq, summary))
@@ -436,9 +460,29 @@ fn condense_until_fit(
   let estimated = context.pinned_tokens + compaction.estimate_inputs(view)
   case estimated < capacity || attempts >= 16, frontier {
     False, [_, _, ..] -> {
-      let group = list.take(frontier, 4)
+      let group = case context.summary_policy {
+        None -> list.take(frontier, 4)
+        Some(_) -> condensation_group(context, frontier)
+      }
       let input = list.map(group, node_input)
-      use summary <- result.try(summarize_bounded(context, input, summary_limit))
+      let evidence = case context.summary_policy {
+        None -> compaction.NoEvidence
+        Some(policy) ->
+          compaction.Nodes(
+            context.session,
+            list.map(group, fn(node) {
+              #(node.id, node.first_seq, node.last_seq)
+            }),
+            Some(policy.lineage),
+            [],
+          )
+      }
+      use summary <- result.try(summarize_bounded(
+        context,
+        input,
+        evidence,
+        summary_limit,
+      ))
       use _ <- result.try(graph.save_parent(
         context.store,
         context.session,
@@ -464,17 +508,18 @@ fn condense_until_fit(
 /// A provider can return a summary longer than its source. Retry with a
 /// smaller output cap, then keep a short navigable pointer if both grow.
 /// Source rows and child nodes remain intact in every case.
-fn summarize_bounded(
+pub fn summarize_bounded(
   context: compaction.Context,
   inputs: List(types.Input),
+  evidence: compaction.SummaryEvidence,
   limit: Int,
 ) -> Result(String, String) {
   let original = compaction.estimate_inputs(inputs)
-  use first <- result.try(attempt_summary(context, inputs, limit))
+  use first <- result.try(attempt_summary(context, inputs, evidence, limit))
   case fits_summary(first, original, limit) {
     True -> Ok(first)
     False ->
-      attempt_summary(context, inputs, int.max(32, limit / 3))
+      attempt_summary(context, inputs, evidence, int.max(32, limit / 3))
       |> result.map(fn(second) {
         case fits_summary(second, original, limit) {
           True -> second
@@ -485,9 +530,10 @@ fn summarize_bounded(
 }
 
 /// One summarizer call: trimmed, non-empty, bounded by `limit` output tokens.
-fn attempt_summary(
+pub fn attempt_summary(
   context: compaction.Context,
   inputs: List(types.Input),
+  evidence: compaction.SummaryEvidence,
   limit: Int,
 ) -> Result(String, String) {
   use summary <- result.try(
@@ -496,7 +542,12 @@ fn attempt_summary(
       None,
       inputs,
       limit,
-      compaction.summary_instructions,
+      summary_instructions(context),
+      case context.summary_policy {
+        None -> compaction.NoEvidence
+        Some(_) -> evidence
+      },
+      context.summary_policy,
     )),
   )
   let summary = string.trim(summary)
@@ -510,4 +561,100 @@ fn attempt_summary(
 fn fits_summary(summary: String, original: Int, limit: Int) -> Bool {
   let tokens = compaction.estimate_inputs([types.User(summary)])
   tokens < original && tokens <= limit
+}
+
+fn summary_instructions(context: compaction.Context) -> String {
+  option.map(context.summary_policy, fn(policy) { policy.instructions })
+  |> option.unwrap(compaction.summary_instructions)
+}
+
+/// Sequence/actor facts come only from retained rows and host metadata. No
+/// guessed parent mapping and no caller-chosen actor or authority is accepted.
+fn leaf_attributions(
+  context: compaction.Context,
+  rows: List(transcript.SourcedEntry),
+  lineage: Option(request_context.Lineage),
+) -> List(compaction.Attribution) {
+  case lineage {
+    None -> []
+    Some(lineage) -> {
+      case transcript_attribution.sourced(context.store, rows) {
+        Error(_) -> []
+        Ok(actors) -> {
+          let intervals =
+            list.map(actors, fn(row) {
+              let origin = case row.0 <= lineage.supplied_through {
+                True -> "imported"
+                False ->
+                  case row.1 {
+                    "unknown_origin" -> "imported"
+                    "tool_report"
+                    | "agent_report:" <> _
+                    | "external_report:" <> _ -> "reported"
+                    "system_note:" <> _ -> "imported"
+                    _ ->
+                      case lineage.role {
+                        "owner" -> "experienced"
+                        "delegate" -> "delegate_work"
+                        _ -> "unknown"
+                      }
+                  }
+              }
+              let actor = case row.1, lineage.role {
+                "owner_agent", "delegate" if row.0 > lineage.supplied_through ->
+                  "delegate_agent:" <> context.session
+                _, _ -> row.1
+              }
+              compaction.Attribution(row.0, row.0, origin, Some(actor))
+            })
+          list.fold(intervals, [], fn(acc: List(compaction.Attribution), next) {
+            case acc {
+              [previous, ..rest]
+                if previous.last_seq + 1 == next.first_seq
+                && previous.origin == next.origin
+                && previous.actor == next.actor
+              -> [
+                compaction.Attribution(..previous, last_seq: next.last_seq),
+                ..rest
+              ]
+              _ -> [next, ..acc]
+            }
+          })
+          |> list.reverse
+        }
+      }
+    }
+  }
+}
+
+/// Count the instruction head and full bounded envelope before combining nodes.
+/// Two whole nodes are the minimum useful condensation, including oversized
+/// historical nodes; their immutable child boundaries are never split.
+fn condensation_group(
+  context: compaction.Context,
+  frontier: List(graph.Node),
+) -> List(graph.Node) {
+  let budget =
+    int.max(
+      1,
+      leaf_budget
+        - compaction.estimate_pinned(summary_instructions(context), [])
+        - 1056,
+    )
+  let candidates = list.take(frontier, 4)
+  let chunks =
+    rolling.chunk_units(
+      list.map(candidates, fn(node) {
+        #([node], compaction.estimate_input(node_input(node)))
+      }),
+      budget,
+    )
+  case chunks {
+    [first, ..] ->
+      case list.length(first) >= 2 {
+        True -> first
+        False -> list.take(candidates, 2)
+      }
+    _ -> list.take(candidates, 2)
+  }
 }

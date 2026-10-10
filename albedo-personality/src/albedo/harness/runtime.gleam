@@ -1298,6 +1298,36 @@ pub fn prepare_view_scoped(
   force: Bool,
   images: types.ImageLimits,
 ) -> Result(compaction.Prepared, String) {
+  prepare_view_observed_scoped(
+    runtime,
+    session,
+    model,
+    source,
+    endpoint,
+    instructions,
+    summarize,
+    history,
+    force,
+    images,
+    fn(_) { Nil },
+  )
+}
+
+/// Bounded captured native-summary attempts can be retained even when a later
+/// provider/preparation/admission stage fails. Observation does no model work.
+pub fn prepare_view_observed_scoped(
+  runtime: Runtime,
+  session: Session,
+  model: String,
+  source: String,
+  endpoint: Option(String),
+  instructions: String,
+  summarize: fn(compaction.SummaryRequest) -> Result(String, String),
+  history: List(types.Input),
+  force: Bool,
+  images: types.ImageLimits,
+  observe: fn(request_context.Prepared) -> Nil,
+) -> Result(compaction.Prepared, String) {
   view_scoped(
     runtime,
     session,
@@ -1309,6 +1339,7 @@ pub fn prepare_view_scoped(
     history,
     force,
     images,
+    observe,
     compaction.prepare,
   )
 }
@@ -1337,6 +1368,7 @@ pub fn project_view_scoped(
     history,
     False,
     images,
+    fn(_) { Nil },
     compaction.project,
   )
 }
@@ -1352,6 +1384,7 @@ fn view_scoped(
   history: List(types.Input),
   force: Bool,
   images: types.ImageLimits,
+  observe: fn(request_context.Prepared) -> Nil,
   view: fn(compaction.Resolved, compaction.Context, List(types.Input)) ->
     Result(compaction.Prepared, String),
 ) -> Result(compaction.Prepared, String) {
@@ -1389,7 +1422,36 @@ fn view_scoped(
     ),
   ))
   let pinned_tokens = static_tokens + captured.estimated_tokens
-  use prepared <- result.map(case resolved {
+  // The strategy owns serial summary generation. A bounded slot records the
+  // exact captured instructions/envelope for every attempt, including shrink.
+  let summary_calls = process.new_subject()
+  process.send(summary_calls, #(0, []))
+  let summarize = fn(request: compaction.SummaryRequest) {
+    use envelope <- result.try(compaction.summary_envelope(request))
+    let assert Ok(#(count, calls)) = process.receive(summary_calls, 0)
+    let calls = case count < 32 {
+      True -> [
+        request_context.SummaryCall(
+          request.instructions,
+          envelope,
+          request.max_output_tokens,
+        ),
+        ..calls
+      ]
+      False -> calls
+    }
+    process.send(summary_calls, #(count + 1, calls))
+    let observed =
+      request_context.Prepared(
+        ..captured,
+        summary_calls: list.reverse(calls),
+        summary_calls_omitted: int.max(0, count + 1 - 32),
+      )
+    // Inspection cannot fail the provider request or change its original error.
+    let _ = protect.attempt(fn() { observe(observed) })
+    summarize(request)
+  }
+  let outcome = case resolved {
     None if force -> Error("no compaction strategy is enabled")
     None ->
       Ok(compaction.Prepared(
@@ -1431,6 +1493,7 @@ fn view_scoped(
           ),
           reader(info),
           images,
+          request_context.summary_policy(captured),
         )
       // A strategy that raises fails the turn the way one returning an error
       // does, naming itself, rather than killing the turn's process.
@@ -1445,8 +1508,17 @@ fn view_scoped(
       })
       |> result.map_error(fn(error) { "compaction " <> name <> ": " <> error })
     }
+  }
+  let assert Ok(#(count, calls)) = process.receive(summary_calls, 0)
+  let captured =
+    request_context.Prepared(
+      ..captured,
+      summary_calls: list.reverse(calls),
+      summary_calls_omitted: int.max(0, count - 32),
+    )
+  result.map(outcome, fn(prepared) {
+    compaction.Prepared(..prepared, request_context: captured, capacity: window)
   })
-  compaction.Prepared(..prepared, request_context: captured, capacity: window)
 }
 
 pub fn inventory(host: Runtime) -> session_catalog.Inventory {

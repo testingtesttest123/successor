@@ -624,6 +624,8 @@ pub fn inspector_reports_selection_reasons_and_complete_exclusion_counts_test() 
     context_snapshot.request_context_json(request_context.Prepared(
       [contribution],
       0,
+      [],
+      0,
     ))
     |> json.to_string
   let assert Ok([diagnostics]) =

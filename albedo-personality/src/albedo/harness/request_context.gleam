@@ -51,6 +51,7 @@ pub type SummaryPolicy {
   SummaryPolicy(
     id: String,
     revision: String,
+    identity_revision: Int,
     instructions: String,
     lineage: Lineage,
   )
@@ -69,8 +70,17 @@ pub type Contribution {
   )
 }
 
+pub type SummaryCall {
+  SummaryCall(instructions: String, envelope: String, max_output_tokens: Int)
+}
+
 pub type Prepared {
-  Prepared(contributions: List(Contribution), estimated_tokens: Int)
+  Prepared(
+    contributions: List(Contribution),
+    estimated_tokens: Int,
+    summary_calls: List(SummaryCall),
+    summary_calls_omitted: Int,
+  )
 }
 
 pub fn empty(snapshot_id: String) -> Contribution {
@@ -79,7 +89,7 @@ pub fn empty(snapshot_id: String) -> Contribution {
 
 /// Default for every history-only strategy constructor.
 pub fn no_context() -> Prepared {
-  Prepared([], 0)
+  Prepared([], 0, [], 0)
 }
 
 /// The recent user/steering excerpt. UTF-8 codepoints are retained whole;
@@ -197,7 +207,7 @@ pub fn prepare(
       )
     _ -> Ok(Nil)
   })
-  Ok(Prepared(captured, total))
+  Ok(Prepared(captured, total, [], 0))
 }
 
 fn text_tokens(text: String) -> Int {
@@ -228,4 +238,13 @@ pub fn assemble(request: types.Request, prepared: Prepared) -> types.Request {
     },
     input: list.append(data, request.input),
   )
+}
+
+/// Already captured, never calls contributors again.
+pub fn summary_policy(prepared: Prepared) -> Option(SummaryPolicy) {
+  prepared.contributions
+  |> list.find_map(fn(contribution) {
+    option.to_result(contribution.summary_policy, Nil)
+  })
+  |> option.from_result
 }

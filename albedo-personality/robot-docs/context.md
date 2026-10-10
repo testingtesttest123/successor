@@ -67,3 +67,26 @@ snapcompact retains its existing catalog-first visual policy and resolved rollin
 text fallback. The captured known capacity on `compaction.Prepared` remains
 separate from a strategy's temporary estimated window for forced unknown-model
 compaction. Such estimates never become a known final request admission limit.
+
+## Native summarizer inspection
+
+An already prepared snapshot includes `summary_policy` metadata for each request
+contribution and up to 32 captured native summary-attempt entries. Each entry names a
+`summary-N` section, records its output cap and instruction/evidence byte counts,
+and reconstructs the exact captured instruction head and bounded trusted
+source envelope through UTF-8-safe section pages of at most 8 KiB. Both original
+and shrink attempts are shown. `summary_calls_omitted` reports additional calls;
+the inspector never implies complete coverage when collection was bounded.
+These are read-only observations from preparation, not later ledger rereads or
+claims that historical LCM nodes were generated under the current policy.
+
+A generic preparation observer retains the bounded capture before each native
+summarizer invocation, independently of eventual provider, strategy or final
+ordinary-request admission failure. Both ordinary and forced runs retain these
+summary-only snapshots on failure; successful ordinary preparation replaces
+that provisional view with its actual final request. The summary-only source
+explicitly says the ordinary request was not admitted, and each call's
+`status="attempted"` is not proof of network transmission or provider completion.
+Durable provider-attempt records remain the completion/error authority. An
+unrenderable envelope refuses before invocation and creates no attempted-call
+observation. Inspection never rereads identity or performs provider work.

@@ -193,6 +193,8 @@ fn write_notes(
         chunk,
         config.budget_tokens * 5 / 4,
         instructions(config.budget_tokens),
+        compaction.NoEvidence,
+        None,
       ))
       |> result.map(string.trim)
       |> result.try(fn(text) {

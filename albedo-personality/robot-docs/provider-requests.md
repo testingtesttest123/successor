@@ -63,3 +63,15 @@ Claude and Antigravity event and replay decoding preserve JSON error categories 
 `albedo/clock` distinguishes wall timestamps from monotonic deadlines; shared-helper rules live in [runtime](runtime.md#clocks). Request records, quota reset times, and persisted expiry values use system time. Session, family, deletion, and transport deadlines use monotonic time rather than durable timestamps. Codex model-cache freshness retains its OS-clock source through `os_system_ms`.
 
 SSE framing keeps native binary search (a single-byte search each for LF and CR), sub-binary compaction, and native UTF-8 validation of each completed line; `bit_array.to_string` would walk one codepoint per call. Gleam owns field splitting and uses a line that arrived whole without copying it. The events most of a stream is (Responses text, reasoning, and argument deltas; a chat chunk of text, reasoning text, or tool call fragments; Claude's content block deltas; a Vertex or Cloud Code Assist chunk of text and thought parts) are read with the field readers in `openai_api/fields.gleam` instead of `gleam/dynamic/decode`, which re-validates every string and builds field paths even on success; any other shape falls back to the decoder, which owns error messages. Avoid two-byte `binary:match` patterns and `string:trim` on hot paths: both compile a pattern per call. `gleam run -m manual/stream_benchmark` times framing, reduction, and request encoding offline; `gleam run -m manual/stream_rate_benchmark` streams Responses, Chat Completions, Claude, Vertex, and Cloud Code Assist from `test/manual/mock_openai_server.py` through the real transport and reducers, optionally with tool-call arguments and several streams at once, and reports CPU, reductions, and latency per token.
+
+Native LCM summarizer calls with a captured persona policy also record a `projectionHash` of their
+complete actually rendered input, including the bounded trusted evidence
+envelope and history. Their `replaced` remains null: no transcript projection
+was replaced by this request. The actual captured persona policy and identity
+revision are part of the instruction `headHash`; the native context inspector
+provides bounded instruction/evidence sections without persisting request bodies.
+Unbound LCM, rolling/notes and ordinary direct/background request accounting
+remain unchanged. Captured inspector entries are marked attempted; the durable
+provider records determine actual provider invocation outcome and usage.
+Provider-measured usage continues to describe the complete call, including all
+instructions and evidence; local estimates are never labeled measured usage.

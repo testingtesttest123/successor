@@ -332,6 +332,7 @@ pub fn from_prepared(
         |> list.filter_map(option.to_result(_, Nil)),
       [tools_section(protocol, request.tools)]
         |> list.filter_map(option.to_result(_, Nil)),
+      summary_sections(captured),
     ])
   case
     from_request(
@@ -347,6 +348,58 @@ pub fn from_prepared(
       Ready(..snapshot, sections:, request_context: captured)
     pending -> pending
   }
+}
+
+/// A captured attempt is not proof of provider completion or ordinary-request
+/// admission. Retain this view across later failure without rebuilding policy.
+pub fn from_summaries(
+  captured_at: Option(Int),
+  provider: String,
+  protocol_name: String,
+  model: String,
+  captured: request_context.Prepared,
+) -> Snapshot {
+  let snapshot =
+    ready(
+      captured_at,
+      Some(provider),
+      model,
+      Some(protocol_name),
+      None,
+      compaction(
+        None,
+        Unknown,
+        Some(
+          "captured native summarizer attempts; ordinary request not admitted",
+        ),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+      ),
+      summary_sections(captured),
+    )
+  let assert Ready(..) = snapshot
+  Ready(..snapshot, request_context: captured)
+}
+
+fn summary_sections(captured: request_context.Prepared) -> List(Section) {
+  list.index_map(captured.summary_calls, fn(call, index) {
+    let content = call.instructions <> "\n\n" <> call.envelope
+    Section(
+      "summary-" <> int.to_string(index),
+      "Captured summarizer instructions and evidence",
+      Other,
+      "captured native summarizer attempt",
+      1,
+      string.byte_size(content),
+      fn() { content },
+      None,
+      Some(dynamic_page_bytes),
+    )
+  })
 }
 
 fn dynamic_section(
@@ -613,6 +666,31 @@ pub fn summary(snapshot: Snapshot) -> json.Json {
             #("compaction", compaction_json(compacted)),
             #("sections", json.array(sections, section_json)),
             #("request_context", request_context_json(captured)),
+            #(
+              "summary_calls",
+              json.array(
+                list.index_map(captured.summary_calls, fn(call, index) {
+                  json.object([
+                    #(
+                      "section_id",
+                      json.string("summary-" <> int.to_string(index)),
+                    ),
+                    #("status", json.string("attempted")),
+                    #("max_output_tokens", json.int(call.max_output_tokens)),
+                    #(
+                      "evidence_bytes",
+                      json.int(string.byte_size(call.envelope)),
+                    ),
+                    #(
+                      "instruction_bytes",
+                      json.int(string.byte_size(call.instructions)),
+                    ),
+                  ])
+                }),
+                fn(value) { value },
+              ),
+            ),
+            #("summary_calls_omitted", json.int(captured.summary_calls_omitted)),
           ],
         ]),
       )
@@ -641,6 +719,17 @@ fn contribution_json(contribution: request_context.Contribution) -> json.Json {
     #("selected_ids", json.array(contribution.selected_ids, json.string)),
     #("excluded_count", json.int(contribution.excluded_count)),
     #("diagnostics", json.array(contribution.diagnostics, json.string)),
+    #(
+      "summary_policy",
+      option.map(contribution.summary_policy, fn(policy) {
+        json.object([
+          #("id", json.string(policy.id)),
+          #("revision", json.string(policy.revision)),
+          #("identity_revision", json.int(policy.identity_revision)),
+        ])
+      })
+        |> option.unwrap(json.null()),
+    ),
   ])
 }
 

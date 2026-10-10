@@ -20,7 +20,34 @@ pub type SummaryRequest {
     evicted: List(types.Input),
     max_output_tokens: Int,
     instructions: String,
+    evidence: SummaryEvidence,
+    policy: Option(request_context.SummaryPolicy),
   )
+}
+
+pub type Attribution {
+  Attribution(
+    first_seq: Int,
+    last_seq: Int,
+    origin: String,
+    actor: Option(String),
+  )
+}
+
+pub type SummaryEvidence {
+  Leaves(
+    session: String,
+    ranges: List(#(Int, Int)),
+    lineage: Option(request_context.Lineage),
+    attributions: List(Attribution),
+  )
+  Nodes(
+    session: String,
+    nodes: List(#(Int, Int, Int)),
+    lineage: Option(request_context.Lineage),
+    attributions: List(Attribution),
+  )
+  NoEvidence
 }
 
 /// What a compaction summary asks of the summarizer: fold the previous
@@ -52,6 +79,7 @@ pub type Context {
     /// The images the provider carrying the request accepts, so a strategy
     /// that renders any makes them fit rather than be refused.
     images: types.ImageLimits,
+    summary_policy: Option(request_context.SummaryPolicy),
   )
 }
 
@@ -632,3 +660,183 @@ fn suffix_length(a: List(types.Input), b: List(types.Input), n: Int) -> Int {
 
 @external(erlang, "albedo_compaction", "fingerprint")
 pub fn fingerprint(value: a) -> String
+
+/// Typed trusted metadata is delimited as data. Never parse transcript prose
+/// for provenance. Mandatory exact local identities are retained on fallback.
+pub fn summary_envelope(request: SummaryRequest) -> Result(String, String) {
+  case request.evidence {
+    NoEvidence -> Ok("")
+    evidence -> {
+      let detailed =
+        encode_evidence(evidence, request.policy, False) |> json.to_string
+      let intervals = case evidence {
+        Leaves(_, ranges, lineage, attributions) ->
+          list.length(ranges)
+          + list.length(attributions)
+          + grant_intervals(lineage)
+        Nodes(_, nodes, lineage, attributions) ->
+          list.length(nodes)
+          + list.length(attributions)
+          + grant_intervals(lineage)
+        NoEvidence -> 0
+      }
+      let content = case
+        string.byte_size(detailed) + 41 <= 4096 && intervals <= 32
+      {
+        True -> detailed
+        False ->
+          encode_evidence(evidence, request.policy, True) |> json.to_string
+      }
+      let required = case evidence {
+        Leaves(_, ranges, _, _) -> list.length(ranges)
+        Nodes(_, nodes, _, _) -> list.length(nodes)
+        NoEvidence -> 0
+      }
+      use _ <- result.try(require(
+        string.byte_size(content) + 41 <= 4096 && required <= 32,
+        "LCM exact source identity exceeds bounded evidence envelope",
+      ))
+      Ok("<summary-evidence>\n" <> content <> "\n</summary-evidence>\n")
+    }
+  }
+}
+
+fn grant_intervals(lineage: Option(request_context.Lineage)) -> Int {
+  option.map(lineage, fn(value) { list.length(value.grants) })
+  |> option.unwrap(0)
+}
+
+fn encode_evidence(
+  evidence: SummaryEvidence,
+  policy: Option(request_context.SummaryPolicy),
+  unknown: Bool,
+) -> json.Json {
+  let #(session, ranges, nodes, lineage, attributions) = case evidence {
+    Leaves(session, ranges, lineage, attributions) -> #(
+      session,
+      ranges,
+      [],
+      lineage,
+      attributions,
+    )
+    Nodes(session, nodes, lineage, attributions) -> #(
+      session,
+      [],
+      nodes,
+      lineage,
+      attributions,
+    )
+    NoEvidence -> #("", [], [], None, [])
+  }
+  json.object([
+    #("session", json.string(session)),
+    #(
+      "source_ranges",
+      json.array(ranges, fn(range) { json.array([range.0, range.1], json.int) }),
+    ),
+    #(
+      "nodes",
+      json.array(nodes, fn(node) {
+        json.array([node.0, node.1, node.2], json.int)
+      }),
+    ),
+    #(
+      "policy_id",
+      option.map(policy, fn(value) { json.string(value.id) })
+        |> option.unwrap(json.null()),
+    ),
+    #(
+      "policy_revision",
+      option.map(policy, fn(value) { json.string(value.revision) })
+        |> option.unwrap(json.null()),
+    ),
+    #(
+      "identity_revision",
+      option.map(policy, fn(value) { json.int(value.identity_revision) })
+        |> option.unwrap(json.null()),
+    ),
+    #("lineage", case unknown {
+      True -> json.null()
+      False -> option.map(lineage, lineage_json) |> option.unwrap(json.null())
+    }),
+    #(
+      "attribution",
+      json.string(case unknown || attributions == [] {
+        True -> "unknown"
+        False -> "trusted_host_metadata"
+      }),
+    ),
+    #(
+      "requires_source_expansion",
+      json.bool(
+        unknown
+        || attributions == []
+        || list.any(attributions, fn(value) {
+          value.origin == "unknown"
+          || value.actor == None
+          || value.actor == Some("unknown_origin")
+        }),
+      ),
+    ),
+    #(
+      "attributions",
+      json.array(
+        case unknown {
+          True -> []
+          False -> attributions
+        },
+        fn(value) {
+          json.object([
+            #("first_seq", json.int(value.first_seq)),
+            #("last_seq", json.int(value.last_seq)),
+            #("origin", json.string(value.origin)),
+            #(
+              "actor",
+              option.map(value.actor, json.string) |> option.unwrap(json.null()),
+            ),
+          ])
+        },
+      ),
+    ),
+    #("derived_fallible_evidence", json.bool(True)),
+  ])
+}
+
+fn lineage_json(value: request_context.Lineage) -> json.Json {
+  json.object([
+    #("persona_id", json.string(value.subject)),
+    #("binding_revision", json.int(value.binding_revision)),
+    #("role", json.string(value.role)),
+    #("supplied_through", json.int(value.supplied_through)),
+    #(
+      "context_id",
+      option.map(value.context_id, json.string) |> option.unwrap(json.null()),
+    ),
+    #(
+      "grants",
+      json.array(value.grants, fn(grant) {
+        json.object([
+          #("session", json.string(grant.session)),
+          #("first_seq", json.int(grant.first_seq)),
+          #("last_seq", json.int(grant.last_seq)),
+          #("digest", json.string(grant.digest)),
+        ])
+      }),
+    ),
+  ])
+}
+
+/// Includes the instruction head and bounded evidence wrapper in the leaf or
+/// condensation input allowance, rather than pretending metadata is free.
+pub fn summary_overhead(request: SummaryRequest) -> Result(Int, String) {
+  use envelope <- result.try(summary_envelope(request))
+  Ok(
+    estimate_pinned(request.instructions, [])
+    + estimate_inputs([
+      types.User(
+        envelope
+        <> "<previous-summary>\n(none)\n</previous-summary>\n<newly-evicted-history>\n\n</newly-evicted-history>",
+      ),
+    ]),
+  )
+}

@@ -129,6 +129,21 @@ pub fn direct_prefix(
   )
 }
 
+/// A native summarizer's complete input identity includes its trusted envelope
+/// and rendered history. No transcript rows are replaced and no body is stored.
+pub fn summary_prefix(
+  instructions: String,
+  inputs: List(types.Input),
+) -> Prefix {
+  Prefix(
+    head_hash(instructions, []),
+    list.length(inputs),
+    None,
+    Some(inputs_hash(inputs)),
+    None,
+  )
+}
+
 /// The hash of a request head: its instructions and the tools it offers.
 fn head_hash(instructions: String, tools: List(types.Tool)) -> String {
   json.object([

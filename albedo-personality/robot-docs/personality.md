@@ -80,7 +80,7 @@ The extension owns `personality_persona`, `personality_revision`,
 `personality_default`, `personality_session`, `personality_event`, and
 `personality_operation`, plus identity controls, capacity and trusted call
 receipt tables. Its schema migration is one transaction and validates
-the real table identity and every used column of all thirteen tables before
+the real table identity and every used column of all fourteen tables before
 installation succeeds. A failure quarantines the whole bundle, including its
 service and commands. Neither migration nor reload copies identity state or
 touches transcript and LCM storage.
@@ -188,7 +188,7 @@ Python or filesystem access.
 The additive extension tables `personality_controls`, `personality_capacity`,
 and `personality_tool_receipt` persist locks, usage/reserve configuration and
 trusted call receipts. Schema installation validates every used column of all
-thirteen extension tables in the same transaction and backfills capacity rows for
+fourteen extension tables in the same transaction and backfills capacity rows for
 existing identities without rewriting their identity, history or setup receipts.
 New human creation initializes capacity on its existing transaction. Inspection
 and recovery never initialize or change persistent state.
@@ -211,8 +211,8 @@ import and delegate handback remain separate additions.
 
 Curated formation is deliberate foreground work through `persona_edit` or the
 human API. If no memory operation runs, no curated claim is created. There is
-no extraction worker, background model call, or changed LCM summarization policy
-in this layer. Request-time retrieval does not form additional records. Persona/source text is inert evidence,
+no extraction worker or new background model call. The native autobiographical
+LCM path described below writes only its existing graph. Request-time retrieval does not form additional records. Persona/source text is inert evidence,
 never a grant of tool authority or independently verified truth.
 
 Both `POST /extensions/personality/sessions/{id}/memories` and the existing
@@ -333,7 +333,7 @@ rows cannot revive a source retired by cleanup.
 
 ## Memory capacity and migration
 
-The existing extension-owned atomic schema migration now validates thirteen
+The existing extension-owned atomic schema migration now validates fourteen
 real tables, including `personality_memory`, `personality_memory_revision`,
 `personality_source` and `personality_memory_source`, with persona-scoped indexes.
 It adds memory payload accounting and a default 10,000-record limit to the
@@ -468,3 +468,28 @@ Live native-provider projection scenarios remain in
 unverified in the restricted executor. Real daemon HTTP search/source scenarios
 and compiled socket-free adapter/ranking/snapshot/budget tests exercise the
 available paths without claiming those blocked lanes passed.
+
+## Native autobiographical LCM
+
+The identity/recall capture also produces one autobiographical summary policy
+with the same identity revision and owner binding boundary. LCM's existing
+inference-triggered or forced summarizer preserves persona actions, receiving
+information, corrections and technical/task continuity with exact local source
+ranges. Trusted actors come from retained host submission/mail metadata, shared
+with exact-source validation; transcript prose cannot choose them. Imported
+prefixes and reports do not become direct experience. Unknown or overflowing
+attribution requires source expansion. Child-node condensation retains historical
+provenance rather than assigning today's policy to old summaries.
+
+This automatic episodic path writes only LCM graph nodes. It creates no curated
+belief, identity revision, relationship or commitment and makes no new background
+call. Curated recall remains a separate normal-request block, excluded from
+summarizer evidence. Captured summarizer attempt instructions/evidence and output
+caps are available as bounded context-inspector sections, including shrink
+attempts and an explicit omitted-call count. These remain available after provider,
+preparation or final-admission failure, with attempted status distinguished from
+completion and an explicit ordinary-request-not-admitted source. Unbound LCM
+keeps its baseline prompt, chunking, condensation and accounting. Inherited
+assistant work is never relabeled as current delegate authorship.
+Temporary-context/grant production
+is still the separate delegation stage; no parent row correspondence is guessed.

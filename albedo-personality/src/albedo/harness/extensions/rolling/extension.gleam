@@ -408,6 +408,8 @@ fn summarize_chunks(
         chunk,
         max_output_tokens,
         compaction.summary_instructions,
+        compaction.NoEvidence,
+        None,
       ))
       |> result.map(string.trim)
       |> result.try(fn(value) {

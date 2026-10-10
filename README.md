@@ -128,7 +128,7 @@ rules, corpus/schema validation, and fresh-reference execution gate. The local
 protocol tests above only check adapter plumbing; they do not replace that gate.
 
 
-## Albedo personality experiment: reviewed stages 1-6 checkpoint
+## Albedo personality experiment: reviewed stages 1-7 checkpoint
 
 The separate [`albedo-personality/`](albedo-personality/) subtree contains an
 Albedo-derived personal experiment. Existing Successor runtime and entrypoints
@@ -139,19 +139,23 @@ and [staged plan](docs/experiments/albedo-personality-plan.md) describe the goal
 - Albedo source: [okami.mom/albedo](https://tangled.org/okami.mom/albedo), pinned
   baseline `47735ec493f3e3a6ac73b619495098437759e0c0`.
 - Exact independently reviewed publication checkpoint:
-  `46046bcccfa46be7d7aeb947ccbb5061bf662568`, tracked tree
-  `993ef6bf735209dfd25be60a5ee96a7548a0abd3`. Complete tracked source, tests,
+  `94edf26046e832e6940fc27a526ed43a3e9272fb`, tracked tree
+  `53822f55a18b734dd8f8caeb3c8fd8134cd6bc3b`. Complete tracked source, tests,
   required assets, license and third-party/vendored notices are exported.
   No Albedo Git history, runtime homes or active uncommitted work is imported.
-- Reviewed through stage 6: identity binding/admission and revisioned edits,
+- Reviewed through stage 7: identity binding/admission and revisioned edits,
   immutable request-time identity context, source-backed memory correction and
-  inspection, bounded current-record recall and canonical episodic expansion.
-  Recall keeps the candidate/record/rendered-byte bounds, revalidates authority
-  and evidence, and authenticates exact episodic references and paging state.
-  Generated local signing state lives only in the application database; it is
-  not part of this source export. LCM persona attribution (stage 7), typed
-  relationships/commitments (stage 8), delegation (stage 9) and imports are future
-  work, not completed features of this checkpoint.
+  inspection, bounded current-record recall and canonical episodic expansion,
+  and persona-aware native LCM compaction. Captured identity policy and trusted
+  transcript attribution accompany exact leaf ranges and selected child nodes;
+  unknown/historical attribution requires source expansion. Unbound native LCM
+  retains its generic prompt, chunking and accounting. Bounded inspection keeps
+  attempted summary captures even when later preparation fails; it does not
+  assert provider completion. Generated summaries remain derived and fallible.
+  Recall revalidates authority and evidence and authenticates exact references
+  and paging state. Generated local signing state lives only in the application
+  database; it is not part of this source export. Typed relationships/commitments
+  (stage 8), production delegation/grants (stage 9) and imports are future work.
 - Reviewed OAuth sanitization and generic webhook fixture cleanup are retained.
   Antigravity sign-in/refresh and Colab sign-in require explicit runtime config;
   tokens considered fresh by Albedo remain usable without it. See
@@ -159,12 +163,15 @@ and [staged plan](docs/experiments/albedo-personality-plan.md) describe the goal
   The historical GitHub fixture alert remains unresolved: this cleanup does not
   dismiss alerts, validate/rotate credentials or rewrite earlier Successor
   commits. Scoped scans are not a comprehensive security guarantee.
-- Recorded final stage-6 checks: 135 compiled covering cases, 23 memory/recall
-  human-HTTP daemon cases plus four migration/identity HTTP cases, and successful
-  static/generated-contract/API-doc checks. The hardened read-key restart test
-  was also rechecked. Prior unchanged Rust/Go and sanitization/fixture results
-  remain recorded evidence, not newly rerun full-suite passes.
-- Full `./test.sh`, full `gleam test`, kernel/provider-turn E2E and Chrome remain
+- Recorded final stage-7 checks: 67 selected socket-free native cases, 23
+  human-HTTP daemon memory/recall cases, two API-doc cases, and successful static
+  checks and CLI build. The last isolated notes-fixture correction received
+  static/configuration checks and independent review; native/HTTP suites were
+  not rerun for that test-only change. Prior stage-6 and unchanged Rust/Go and
+  sanitization/fixture results remain recorded evidence, not new full-suite
+  passes. Native provider encoding checks are not live provider transport tests.
+- One initial live LCM attempt failed at AF_UNIX setup before provider semantics.
+  Full `./test.sh`, full `gleam test`, kernel/provider-turn E2E and Chrome remain
   unverified under the approved AF_UNIX/Chrome exception. The inherited setup
   capacity gap remains assigned to stage 11; overall capacity compliance is not
   established. This is WIP, not the stage-12 release. Publication verifies exact

@@ -4,6 +4,7 @@
 import albedo/daemon/http_api as api
 import albedo/daemon/operations
 import albedo/daemon/store
+import albedo/daemon/transcript_attribution
 import albedo/harness/extensions/personality/read_tokens
 import albedo/harness/extensions/personality/types as p
 import albedo/harness/protect
@@ -241,84 +242,31 @@ fn rows_in(
       Ok(#(row.0, row.1, input, display, row.3))
     }),
   )
-  let mail_ids =
-    list.filter_map(decoded, fn(row) {
-      case row.3, row.4 {
-        Some(display), Some(id)
-          if display.source == "mail" || display.source == "webhook"
-        -> Ok(id)
-        _, _ -> Error(Nil)
+  use actors <- result.try(
+    transcript_attribution.actors_in(
+      db,
+      session,
+      list.map(decoded, fn(row) {
+        transcript_attribution.Row(row.0, row.2, row.3, row.4)
+      }),
+    )
+    |> result.map_error(fn(error) {
+      case error {
+        transcript_attribution.Storage(message) -> p.Storage(message)
+        transcript_attribution.Unavailable(message) ->
+          p.SourceUnavailable(message)
       }
-    })
-  use senders <- result.try(case mail_ids {
-    [] -> Ok([])
-    _ ->
-      store.rows(
-        db,
-        "SELECT id,sender,CASE WHEN length(CAST(sender_name AS BLOB))<=128 THEN sender_name ELSE NULL END,kind FROM mail WHERE recipient=? AND id IN ("
-          <> string.join(list.map(mail_ids, fn(_) { "?" }), ",")
-          <> ")",
-        [sqlight.text(session), ..list.map(mail_ids, sqlight.text)],
-        {
-          use id <- decode.field(0, decode.string)
-          use sender <- decode.field(1, decode.optional(decode.string))
-          use name <- decode.field(2, decode.optional(decode.string))
-          use kind <- decode.field(3, decode.string)
-          decode.success(#(id, sender, name, kind))
-        },
-      )
-      |> result.map_error(p.Storage)
-  })
-  list.try_map(decoded, fn(row) {
-    use actor <- result.try(case row.3 {
-      None ->
-        Ok(case row.2 {
-          types.User(_) | types.UserImage(_, _) -> "unknown_origin"
-          _ -> actor(row.2)
-        })
-      Some(display) ->
-        case display.operation_id, row.4 {
-          None, Some("host-note:" <> _) -> note_actor(display.source)
-          _, _ ->
-            case display.source {
-              "chat" -> Ok(actor(row.2))
-              "mail" | "webhook" ->
-                case
-                  list.find(senders, fn(sender) { Some(sender.0) == row.4 })
-                {
-                  Ok(#(_, Some(sender), _, kind)) ->
-                    Ok("agent_report:" <> sender <> ":" <> kind)
-                  Ok(#(_, None, Some(name), kind)) ->
-                    Ok("external_report:" <> name <> ":" <> kind)
-                  _ ->
-                    Error(p.SourceUnavailable(
-                      "source reporter metadata unavailable",
-                    ))
-                }
-              source -> note_actor(source)
-            }
-        }
-    })
-    Ok(Row(row.0, row.1, row.2, actor))
-  })
-}
-
-fn note_actor(origin: String) -> Result(String, p.DomainError) {
-  case string.byte_size(origin) <= 128 {
-    True -> Ok("system_note:" <> origin)
-    False ->
-      Error(p.SourceUnavailable(
-        "source actor label exceeds its bounded metadata budget",
-      ))
-  }
-}
-
-fn actor(input: types.Input) -> String {
-  case input {
-    types.User(_) | types.UserImage(_, _) -> "user_assertion"
-    types.Assistant(_) | types.Replay(_) -> "owner_agent"
-    types.ToolOutput(_, _, _) -> "tool_report"
-  }
+    }),
+  )
+  Ok(
+    list.map(decoded, fn(row) {
+      let actor =
+        list.find(actors, fn(item) { item.0 == row.0 })
+        |> result.map(fn(item) { item.1 })
+        |> result.unwrap("unknown_origin")
+      Row(row.0, row.1, row.2, actor)
+    }),
+  )
 }
 
 fn digest(rows: List(Row)) -> String {

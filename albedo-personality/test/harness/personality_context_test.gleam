@@ -430,6 +430,7 @@ pub fn callback_errors_crashes_and_conflicting_summary_policies_stop_preparation
     request_context.SummaryPolicy(
       "policy",
       "revision",
+      1,
       "later policy",
       request_context.Lineage("identity", 1, "owner", 0, None, []),
     )
@@ -730,6 +731,7 @@ fn observed_loop(
     fn(_, _, _) { Error("unexpected commit") },
     fn(_) { Ok(Nil) },
     fn(_, _, _) { process.send(calls, "record") },
+    fn(_) { Nil },
     fn(_) { Ok(Nil) },
     fn() { Ok([]) },
     fn(_) { Nil },

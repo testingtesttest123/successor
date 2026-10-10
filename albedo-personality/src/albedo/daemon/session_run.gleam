@@ -351,6 +351,7 @@ pub fn start(
   // the loaded transcript.
   let provider = state.info.provider
   let protocol = state.info.protocol
+  let kernel_model = state.info.model
   let worker =
     loop.Loop(
       state.info.model,
@@ -380,6 +381,20 @@ pub fn start(
         // Inspection and post-compaction cleanup must not kill the turn if
         // the session actor stalls; leave the message queued after the bound.
         report(owner, messages.context(run_id, snapshot, compacted, _))
+      },
+      fn(captured) {
+        report(owner, messages.context(
+          run_id,
+          context_snapshot.from_summaries(
+            Some(usage.now()),
+            provider,
+            conversation.protocol(protocol),
+            kernel_model,
+            captured,
+          ),
+          False,
+          _,
+        ))
       },
       usage_fn(owner, run_id, messages, waiting: 10_000),
       drain_fn(owner, run_id, messages, waiting: 10_000),

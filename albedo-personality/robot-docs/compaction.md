@@ -158,3 +158,36 @@ Image bytes are never copied into the recap or the summarizer prompt; a recent i
 ## inspect
 
 `/context` shows the prepared request: its sections in order, their sources, and compaction status. After a provider completes that request, it shows the provider's measured input tokens (and cached tokens when reported); until then, or when usage is omitted, the strategy's local estimate is shown instead. The JSON retains `estimated_input_tokens` separately from `provider_input_tokens` so neither is mistaken for the other. A manual `/compact` sends no ordinary provider request, so its snapshot has only an estimate. See [the context inspector](context.md).
+
+### Captured personality policy and LCM evidence
+
+Bound-session LCM uses the request contribution's captured identity revision and
+summary policy. Forced compaction uses that same preparation boundary. A persona
+edit during generation affects the next preparation; transport and shrink
+retries keep their original instructions, lineage and evidence. Unbound LCM
+keeps its complete baseline path: a 6,000-token source-chunk allowance, four-child
+condensation, the generic coding summary without a persona evidence envelope,
+and generic request accounting. Rolling/notes retain their own policies.
+
+Leaf evidence retains the exact branch-local `SourcedEntry` first/last rows.
+Host submission/mail metadata assigns actors; pre-binding or supplied prefix
+rows are imported context. A supplied assistant keeps its trusted source actor
+ceiling; only supported local rows after the supplied boundary can be attributed
+to the current temporary delegate. No original parent actor mapping is invented.
+Legacy user rows have unknown origin and cannot be
+promoted to user authority. Condensation identifies each actual child node and
+range, with historical attribution requiring expansion rather than relabeling
+old nodes under today's identity. Original parent references appear only in an
+independently validated captured grant; this stage creates none.
+
+The native renderer delimits typed evidence as data, bounded to 4 KiB and
+32 intervals including exact local ranges/nodes, attribution intervals and every
+source-grant range actually rendered in lineage.
+Overflow retains exact local identities and captured policy/revision while
+marking attribution unknown and requiring raw-source expansion. If mandatory
+identities themselves cannot fit, preparation refuses rather than substituting
+sources. With a captured persona policy, leaf and condensation chunk allowances
+reserve the entire instruction head and bounded evidence envelope. Whole oversized units/nodes remain intact;
+condensation combines at least two whole children. Existing output/shrink
+limits, immutable rows, graph transactions and fork algorithms stay in charge.
+Summaries write only the LCM graph. Request-only recall is never summary evidence.
