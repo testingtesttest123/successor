@@ -64,8 +64,14 @@ fixed setup without weakening any assertion; full104 then passed. The initial
 red log is retained. The historical76/77 gates are not the publication gate.
 
 The workflow runs the integrated Gleam, all80 Python,4 conformance and format
-checks, installs ripgrep, and uses OTP29/Gleam1.19. Exact-head PR CI still pending;
-no remote green/merge claim is made until that result is observed.
+checks, installs ripgrep, and uses OTP29/Gleam1.19. GitHub Actions run
+[38012691359](https://github.com/testingtesttest123/successor/actions/runs/38012691359)
+completed **SUCCESS** for the exact integrated source commit
+`76cc3f848700094e212e77041b54afb2b46c7af7` on2026-10-10. All workflow steps passed.
+The subsequent documentation-only revision leaves the60-entry tested code
+manifest unchanged. Any later PR head is also gated on its own CI before merge;
+[PR2 checks](https://github.com/testingtesttest123/successor/pull/2/checks) are the
+public authority for that final-head result.
 
 Trusted local operator/library tier only: no sandbox, automatic process
 reconciliation/GC, full Home parity, live credentials/providers, inference tool
