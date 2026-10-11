@@ -492,6 +492,16 @@ pub fn index_entry_in(
   position: Int,
   input: types.Input,
 ) -> Result(Nil, String) {
+  use _ <- result.try(index_entry_metadata_in(db, session, position, input))
+  context_source.refresh_appended_in(db, session, position, position)
+}
+
+fn index_entry_metadata_in(
+  db: sqlight.Connection,
+  session: String,
+  position: Int,
+  input: types.Input,
+) -> Result(Nil, String) {
   use _ <- result.try(
     events.calls(input)
     |> list.index_map(fn(call, index) { #(call, index) })
@@ -514,7 +524,7 @@ pub fn index_entry_in(
     }),
   )
   use _ <- result.try(index_preview_in(db, session, position, input))
-  context_source.index_entry_in(db, session, position, input)
+  context_source.index_entry_metadata_in(db, session, position, input)
 }
 
 fn index_preview_in(
@@ -2412,7 +2422,7 @@ fn commit_with_letters(
             decode.field(0, decode.int, decode.success),
             "committed row sequence",
           ))
-          use _ <- result.try(index_entry_in(db, id, position, input))
+          use _ <- result.try(index_entry_metadata_in(db, id, position, input))
           case linked, is_assistant_row(input) {
             None, True -> Ok(Some(position))
             _, _ -> Ok(linked)
@@ -2425,6 +2435,12 @@ fn commit_with_letters(
         [sqlight.text(id)],
         decode.field(0, decode.int, decode.success),
         "committed input sequence",
+      ))
+      use _ <- result.try(context_source.refresh_appended_in(
+        db,
+        id,
+        previous_seq + 1,
+        seq,
       ))
       use _ <- result.try(operations.committed(
         db,

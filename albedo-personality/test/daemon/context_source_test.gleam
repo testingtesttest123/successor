@@ -16,6 +16,7 @@ import gleam/erlang/process
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/result
 import gleeunit/should
 import sqlight
 
@@ -71,6 +72,104 @@ fn inventory(
 fn replay(raw: String) -> types.Input {
   let assert Ok(item) = json.parse(raw, types.replay_decoder(types.Responses))
   types.Replay(item)
+}
+
+pub fn moving_source_row_invalidates_and_repairs_both_session_units_test() -> Nil {
+  list.each([1, 2], check_source_move)
+}
+
+fn check_source_move(position: Int) -> Nil {
+  let #(host, ledger) = started()
+  let assert Ok(_) =
+    conversation.create(
+      ledger,
+      conversation.Info(
+        "destination",
+        "test",
+        "/tmp",
+        "provider",
+        "model",
+        types.Responses,
+        conversation.Idle,
+        None,
+        None,
+      ),
+    )
+  let assert Ok(_) =
+    conversation.commit(
+      ledger,
+      "source",
+      [types.User("u"), types.Assistant("answer"), types.User("tail")],
+      conversation.Idle,
+    )
+  let assert Ok([before, _]) =
+    inventory(ledger, profile("provider", types.Responses))
+  let assert Ok(_) =
+    store.query(ledger, fn(db) {
+      store.run(
+        db,
+        "UPDATE transcript SET session='destination' WHERE session='source' AND seq=?",
+        [sqlight.int(position)],
+      )
+    })
+  inventory(ledger, profile("provider", types.Responses)) |> should.be_error
+  let assert Ok(_) =
+    store.query(ledger, fn(db) {
+      use _ <- result.try(context_source.reindex_in(db, "source"))
+      context_source.reindex_in(db, "destination")
+    })
+  let assert Ok([after, _]) =
+    inventory(ledger, profile("provider", types.Responses))
+  let #(remaining, transferred) = case position {
+    1 -> #(types.Assistant("answer"), types.User("u"))
+    _ -> #(types.User("u"), types.Assistant("answer"))
+  }
+  should.equal(after.tokens, context_cost.estimate_input(remaining))
+  should.be_true(after.content_identity != before.content_identity)
+  let assert Ok([moved]) =
+    store.query(ledger, fn(db) {
+      let assert Ok(scope) = context_source.bound_in(db, "destination")
+      context_source.inventory_in(
+        db,
+        scope,
+        profile("provider", types.Responses),
+      )
+    })
+  should.equal(moved.tokens, context_cost.estimate_input(transferred))
+  runtime.stop(host)
+}
+
+pub fn batch_ingestion_refreshes_each_affected_unit_once_test() -> Nil {
+  let #(host, ledger) = started()
+  let assert Ok(_) =
+    store.query(ledger, fn(db) {
+      store.exec(
+        db,
+        "CREATE TABLE cost_refreshes(n INTEGER); CREATE TRIGGER count_cost_refreshes AFTER DELETE ON context_source_unit_cost BEGIN INSERT INTO cost_refreshes VALUES(1); END",
+      )
+    })
+  let assert Ok(_) =
+    conversation.commit(
+      ledger,
+      "source",
+      [types.User("large unit"), ..list.repeat(types.Assistant("status"), 300)],
+      conversation.Idle,
+    )
+  let assert Ok([refreshes]) =
+    store.read(
+      ledger,
+      "SELECT COUNT(*) FROM cost_refreshes",
+      [],
+      decode.field(0, decode.int, decode.success),
+    )
+  should.be_true(refreshes <= 3)
+  let assert Ok(entries) = conversation.load_entries(ledger, "source")
+  let assert Ok(inputs) =
+    projection.for_model(entries, "provider", types.Responses)
+  let assert Ok([unit]) =
+    inventory(ledger, profile("provider", types.Responses))
+  should.equal(unit.tokens, context_cost.estimate_inputs(inputs))
+  runtime.stop(host)
 }
 
 pub fn ingestion_indexes_complete_source_units_test() -> Nil {
@@ -368,3 +467,182 @@ pub fn provider_configuration_refreshes_metadata_in_its_transaction_test() -> Ni
 
 @external(erlang, "albedo_conversation", "pack")
 fn pack(input: types.Input) -> BitArray
+
+pub fn duplicate_call_occurrences_require_distinct_later_answers_test() -> Nil {
+  let #(host, ledger) = started()
+  let call =
+    replay(
+      "{\"type\":\"function_call\",\"id\":\"item\",\"call_id\":\"same\",\"name\":\"run\",\"arguments\":\"{}\"}",
+    )
+  let assert Ok(_) =
+    conversation.commit_from(
+      ledger,
+      "source",
+      [
+        types.User("u"),
+        call,
+        call,
+        types.ToolOutput("same", "one answer", []),
+        types.User("tail"),
+      ],
+      conversation.Idle,
+      Some("provider"),
+    )
+  let assert Ok([unit, _]) =
+    inventory(ledger, profile("provider", types.Responses))
+  should.be_false(unit.closed)
+  let assert Ok(item) =
+    json.parse(
+      "{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"same\",\"type\":\"function\",\"function\":{\"name\":\"run\",\"arguments\":\"{}\"}},{\"id\":\"same\",\"type\":\"function\",\"function\":{\"name\":\"run\",\"arguments\":\"{}\"}}]}",
+      types.replay_decoder(types.ChatCompletions),
+    )
+  let assert Ok(_) =
+    conversation.commit_from(
+      ledger,
+      "source",
+      [
+        types.Replay(item),
+        types.ToolOutput("same", "one answer", []),
+        types.User("new tail"),
+      ],
+      conversation.Idle,
+      Some("provider"),
+    )
+  let assert Ok([_, duplicate, _]) =
+    inventory(ledger, profile("provider", types.ChatCompletions))
+  should.be_false(duplicate.closed)
+  runtime.stop(host)
+}
+
+pub fn nullable_chat_calls_are_indexed_test() -> Nil {
+  let #(host, ledger) = started()
+  let assert Ok(item) =
+    json.parse(
+      "{\"role\":\"assistant\",\"content\":\"native text\",\"tool_calls\":null}",
+      types.replay_decoder(types.ChatCompletions),
+    )
+  let assert Ok(_) =
+    conversation.commit_from(
+      ledger,
+      "source",
+      [types.Replay(item), types.User("tail")],
+      conversation.Idle,
+      Some("provider"),
+    )
+  let assert Ok([unit, _]) =
+    inventory(ledger, profile("provider", types.ChatCompletions))
+  should.be_true(unit.closed)
+  runtime.stop(host)
+}
+
+pub fn provider_provenance_changes_cost_identity_test() -> Nil {
+  let #(host, ledger) = started()
+  let item =
+    replay(
+      "{\"type\":\"message\",\"id\":\"native\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"native text\"}]}",
+    )
+  let assert Ok(_) =
+    conversation.commit(
+      ledger,
+      "source",
+      [item, types.User("tail")],
+      conversation.Idle,
+    )
+  let assert Ok([before, _]) =
+    inventory(ledger, profile("provider", types.Responses))
+  let assert Ok(_) =
+    conversation.set_configuration(
+      ledger,
+      "source",
+      "other",
+      "model",
+      types.Responses,
+      None,
+    )
+  let assert Ok([after, _]) =
+    inventory(ledger, profile("provider", types.Responses))
+  should.not_equal(before.content_identity, after.content_identity)
+  should.not_equal(before.cost_key, after.cost_key)
+  let assert Ok(entries) = conversation.load_entries(ledger, "source")
+  let assert Ok(native) =
+    projection.for_model(list.take(entries, 1), "provider", types.Responses)
+  should.equal(after.tokens, context_cost.estimate_inputs(native))
+  runtime.stop(host)
+}
+
+pub fn source_metadata_version_changes_rebuild_at_startup_test() -> Nil {
+  let #(host, ledger) = started()
+  let assert Ok(_) =
+    conversation.commit(
+      ledger,
+      "source",
+      [types.User("```code```"), types.User("tail")],
+      conversation.Idle,
+    )
+  let assert Ok([before, _]) =
+    inventory(ledger, profile("provider", types.Responses))
+  let assert Ok(_) =
+    store.query(ledger, fn(db) {
+      store.exec(
+        db,
+        "UPDATE context_source_versions SET estimator=99,salience=99; UPDATE context_source_entry SET total_utf16=0,external_utf16=0; UPDATE context_source_unit_cost SET tokens=1",
+      )
+    })
+  let assert Ok(_) = conversation.initialise(ledger)
+  let assert Ok([after, _]) =
+    inventory(ledger, profile("provider", types.Responses))
+  should.equal(after.tokens, before.tokens)
+  should.equal(after.salience, before.salience)
+  runtime.stop(host)
+}
+
+pub fn rewriting_earlier_fit_replays_lineage_before_later_overrides_test() -> Nil {
+  let #(host, ledger) = started()
+  let assert Ok(a) = types.image("image/png", "AA==", 1024, 1024, 1)
+  let assert Ok(b) = types.image("image/png", "AQ==", 768, 768, 1)
+  let assert Ok(c) = types.image("image/png", "Ag==", 256, 256, 1)
+  let assert Ok(d) = types.image("image/png", "Aw==", 128, 128, 1)
+  let assert Ok(e) = types.image("image/png", "BA==", 768, 768, 1)
+  let assert Ok(_) =
+    conversation.commit(
+      ledger,
+      "source",
+      [types.UserImage("first", [a]), types.User("tail")],
+      conversation.Idle,
+    )
+  let assert Ok(_) =
+    conversation.commit_fits(
+      ledger,
+      "source",
+      [
+        transcript.ImageFit("first fit", image_fit.source(a), b),
+        transcript.ImageFit("second fit", image_fit.source(b), c),
+        transcript.ImageFit("later original fit", image_fit.source(a), d),
+      ],
+      "provider",
+    )
+  let assert Ok(_) =
+    store.query(ledger, fn(db) {
+      let assert Ok(stored) =
+        images.externalize(db, types.UserImage("replaced fit", [e]), fn(_) {
+          Error(Nil)
+        })
+      let assert types.UserImage(_, [image]) = stored
+      store.run(
+        db,
+        "UPDATE transcript SET payload=? WHERE session='source' AND seq=3",
+        [
+          sqlight.blob(pack_fit("replaced fit", image_fit.source(a), image)),
+        ],
+      )
+    })
+  let assert Ok(_) = store.query(ledger, context_source.reindex_in(_, "source"))
+  let assert Ok([unit, ..]) =
+    inventory(ledger, profile("provider", types.Responses))
+  let assert Ok([native, ..]) = conversation.load_sources(ledger, "source")
+  should.equal(unit.tokens, context_cost.estimate_input(native.entry.input))
+  runtime.stop(host)
+}
+
+@external(erlang, "albedo_conversation", "pack_fit")
+fn pack_fit(note: String, source: String, image: types.Image) -> BitArray

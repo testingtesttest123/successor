@@ -26,7 +26,14 @@ class Exposed extends Upstream {
   static score(content) { return super.computeStaticSalience({ content }); }
 }
 const results = fixtures.cases.map(test => {
-  const actual = Exposed.score(test.blocks);
+  const blocks = test.blocks.map(block => {
+    if (!Object.hasOwn(block, 'native_arguments')) return block;
+    let input;
+    try { input = JSON.parse(block.native_arguments); }
+    catch { input = block.native_arguments; }
+    return { ...block, input };
+  });
+  const actual = Exposed.score(blocks);
   if (mode === '--record') test.expected_score = actual;
   if (!Number.isFinite(test.expected_score)) throw new Error(`${test.name}: missing expected score`);
   if (Math.abs(actual - test.expected_score) > 1e-12) {

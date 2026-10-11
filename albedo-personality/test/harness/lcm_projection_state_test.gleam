@@ -14,6 +14,7 @@ import albedo/harness/runtime
 import albedo/openai_api/types
 import gleam/dynamic/decode
 import gleam/erlang/process
+import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
 import gleeunit/should
@@ -78,8 +79,13 @@ pub fn initial_receipt_has_no_validated_selection_test() -> Nil {
 }
 
 fn fixture() -> #(runtime.Runtime, store.Store) {
-  let assert Ok(host) = runtime.start(":memory:")
+  fixture_at(":memory:")
+}
+
+fn fixture_at(path: String) -> #(runtime.Runtime, store.Store) {
+  let assert Ok(host) = runtime.start(path)
   let ledger = runtime.ledger(host)
+  let assert Ok(_) = conversation.initialise(ledger)
   let assert Ok(_) =
     conversation.create(
       ledger,
@@ -294,7 +300,8 @@ pub fn same_max_rewrite_and_graph_changes_invalidate_receipts_test() -> Nil {
 }
 
 pub fn receipt_survives_reinitialisation_but_rejects_unknown_version_test() -> Nil {
-  let #(host, ledger) = fixture()
+  let path = temporary_database()
+  let #(host, ledger) = fixture_at(path)
   let before = capture(ledger)
   projection_state.commit(
     ledger,
@@ -304,6 +311,9 @@ pub fn receipt_survives_reinitialisation_but_rejects_unknown_version_test() -> N
     graph.unguarded,
   )
   |> should.equal(Ok(True))
+  runtime.stop(host)
+  let assert Ok(restarted) = runtime.start(path)
+  let ledger = runtime.ledger(restarted)
   let assert Ok(_) = conversation.initialise(ledger)
   let assert Ok(_) = graph.initialise(ledger)
   should.equal(
@@ -323,7 +333,8 @@ pub fn receipt_survives_reinitialisation_but_rejects_unknown_version_test() -> N
     rejected.previous.diagnostic,
     Some("unsupported receipt version"),
   )
-  runtime.stop(host)
+  runtime.stop(restarted)
+  cleanup_database(path)
 }
 
 pub fn fork_remaps_surviving_recall_and_resets_crossing_selection_test() -> Nil {
@@ -445,3 +456,50 @@ pub fn inventory_capture_is_coherent_test() -> Nil {
 
 @external(erlang, "albedo_conversation", "pack")
 fn pack(input: types.Input) -> BitArray
+
+@external(erlang, "albedo_runtime_test_support", "temporary_database")
+fn temporary_database() -> String
+
+@external(erlang, "albedo_runtime_test_support", "cleanup")
+fn cleanup_database(path: String) -> Nil
+
+pub fn restart_rejects_receipt_when_selected_parent_loses_actual_child_coverage_test() -> Nil {
+  let #(host, ledger) = fixture()
+  let assert Ok(_) =
+    conversation.commit(
+      ledger,
+      "receipt",
+      [types.User("new tail")],
+      conversation.Idle,
+    )
+  let assert Ok(_) =
+    graph.save_leaves(ledger, "receipt", [graph.Leaf(3, 3, "second", None)])
+  let assert Ok(children) = graph.frontier(ledger, "receipt")
+  let assert Ok(_) = graph.save_parent(ledger, "receipt", children, "parent")
+  let before = capture(ledger)
+  let assert Ok(parent) =
+    list.find(before.inventory.nodes, fn(n) { n.depth == 1 })
+  let assert Ok(tail) = list.last(before.inventory.units)
+  let assert Ok(validated) =
+    selection.validate(before, [
+      selection.Recall(parent.id, parent.cost_key),
+      selection.Raw(tail.first_seq, tail.cost_key),
+    ])
+  projection_state.commit(
+    ledger,
+    "receipt",
+    before.expected,
+    validated,
+    graph.unguarded,
+  )
+  |> should.equal(Ok(True))
+  let assert [child, ..] = children
+  let assert Ok(_) =
+    store.write(ledger, "DELETE FROM lcm_compaction_edge WHERE child=?", [
+      sqlight.int(child.id),
+    ])
+  let after = capture(ledger)
+  should.equal(after.previous.refs, [])
+  should.equal(after.previous.generation, 1)
+  runtime.stop(host)
+}

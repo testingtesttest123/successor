@@ -5,7 +5,8 @@
     "source_path": "src/strategies/autobiographical.ts",
     "source_sha256": "01a3aeea5653ad1ca77347cec7d54b5697f1bd7c07e99cf35a17bfde2017de31",
     "method_sha256": "a01d55490598cf44ccd0d0c6c58bd99c2907a53b1c2052353940f5568d02fbd3",
-    "native_adapter": "whole native source unit, concatenate canonical block streams, clamp once"
+    "native_adapter": "whole native source unit, concatenate canonical block streams, clamp once",
+    "native_argument_adapter": "raw native_arguments parsed with JavaScript JSON.parse before the pinned method; malformed arguments remain literal evidence"
   },
   "cases": [
     {
@@ -544,6 +545,114 @@
         }
       ],
       "expected_score": 0.7894736842105263
+    },
+    {
+      "name": "top_null_whitespace",
+      "native": [
+        {
+          "kind": "user",
+          "text": "ordinary conversation length"
+        },
+        {
+          "kind": "call",
+          "arguments": " null\n"
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "ordinary conversation length"
+        },
+        {
+          "type": "tool_use",
+          "id": "call",
+          "name": "run",
+          "input": {},
+          "native_arguments": " null\n"
+        }
+      ],
+      "expected_score": 0.9466666666666667
+    },
+    {
+      "name": "top_exponent_overflow",
+      "native": [
+        {
+          "kind": "user",
+          "text": "ordinary conversation length"
+        },
+        {
+          "kind": "call",
+          "arguments": "1e309"
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "ordinary conversation length"
+        },
+        {
+          "type": "tool_use",
+          "id": "call",
+          "name": "run",
+          "input": null,
+          "native_arguments": "1e309"
+        }
+      ],
+      "expected_score": 0.9
+    },
+    {
+      "name": "top_negative_overflow",
+      "native": [
+        {
+          "kind": "user",
+          "text": "ordinary conversation length"
+        },
+        {
+          "kind": "call",
+          "arguments": "-1e309"
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "ordinary conversation length"
+        },
+        {
+          "type": "tool_use",
+          "id": "call",
+          "name": "run",
+          "input": null,
+          "native_arguments": "-1e309"
+        }
+      ],
+      "expected_score": 0.9
+    },
+    {
+      "name": "top_integer_overflow",
+      "native": [
+        {
+          "kind": "user",
+          "text": "ordinary conversation length"
+        },
+        {
+          "kind": "call",
+          "arguments": "1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "ordinary conversation length"
+        },
+        {
+          "type": "tool_use",
+          "id": "call",
+          "name": "run",
+          "input": null,
+          "native_arguments": "1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "expected_score": 0.9
     }
   ]
 }

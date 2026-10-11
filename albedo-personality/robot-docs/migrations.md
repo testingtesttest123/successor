@@ -271,3 +271,30 @@ credential and operation migrations remain unchanged.
 quarantine while preserving seeded transcript/LCM bytes. Compiled native tests
 also exercise missing-table failure across runtime reconstruction, atomic receipt
 rollback, default reuse and exact historical attachment boundaries.
+
+Conversation-owned context metadata indexes whole native source units as rows are
+inserted or restored. A batch append stages scalar facts and refreshes each
+affected unit once inside the same transaction. Transferring a source row removes
+its old metadata and makes both sessions refuse stale units until recovery.
+Startup backfills128 pending transcript entries per store
+turn. Persisted scalar projection facts, original image dimensions and the
+ordered image-fit map permit pricing both protocols and restoring a removed fit
+without decoding archived source payloads. Deleted-fit recovery yields after128
+image entries. Payload/provider changes and continuation mutations advance the
+source revision; per-position change records also detect rewrites below an old
+receipt's watermark. Harmless appends preserve closed-unit content and cost keys.
+Estimator, renderer or static-salience version changes mark derived rows pending
+for bounded startup recovery. The pinned salience fixture oracle is in
+`test/tools/lcm_kv_fixture_oracle.mjs`.
+
+LCM's graph initializer maintains node render-cost/salience metadata and node/edge
+generations, backfilling128 nodes per store turn while preserving existing
+summaries, frames and formation ordinals. Its inventory reads metadata and actual
+edges in the same store turn as source/configuration and receipt stamps, without
+fetching summary bodies. The separate `lcm_projection_state` receipt uses atomic
+source/graph/profile/identity/receipt generation checks plus the caller's owner
+validator. Restart discards stale or unsupported receipts while retaining their
+generation. Fork copying remaps complete surviving references onto branch-local
+source/node keys; a crossing or incomplete selection leaves no usable prior.
+These primitives do not change the active compaction selector or provider request
+admission.

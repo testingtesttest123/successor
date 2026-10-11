@@ -81,10 +81,11 @@ pub fn capture_in(
                 decode.field(0, decode.int, decode.success),
                 "receipt scope validation unavailable",
               ))
-              use refs_valid <- result.try(references_valid_in(
+              use refs_valid <- result.try(prior_valid_in(
                 db,
                 session,
-                receipt.refs,
+                scope,
+                receipt,
               ))
               let assert Some(saved_profile) = receipt.profile
               let profile_valid =
@@ -190,9 +191,15 @@ pub fn commit(
               selection.empty_receipt(generation, None),
               current,
             )
+          use after_generation <- result.try(generation_in(db, session))
           let valid =
-            selection.validate(capture, selection.references(validated))
-            |> result.is_ok
+            actual.source == expected.source
+            && actual.graph_revision == expected.graph_revision
+            && after_generation == generation
+            && {
+              selection.validate(capture, selection.references(validated))
+              |> result.is_ok
+            }
           case allowed && valid {
             False -> Ok(False)
             True -> {
@@ -235,41 +242,42 @@ fn write_in(
   )
 }
 
-fn references_valid_in(
+/// Revalidate actual lineage too: unchanged parent text cannot conceal deleted children.
+fn prior_valid_in(
   db: sqlight.Connection,
   session: String,
-  refs: List(selection.RenderRef),
+  scope: projection_types.SourceBound,
+  receipt: selection.SelectionReceipt,
 ) -> Result(Bool, String) {
-  use valid <- result.try(
-    list.try_map(refs, fn(ref) {
-      let #(sql, id, key) = case ref {
-        selection.Raw(first, key) -> #(
-          "SELECT COUNT(*) FROM context_source_unit WHERE session=?1 AND first_seq=?2 AND content_identity=?3 AND fit_revision=?4 AND error IS NULL",
-          first,
-          key,
+  let assert Some(profile) = receipt.profile
+  case inventory.capture_in(db, session, profile) {
+    Error(_) -> Ok(False)
+    Ok(actual) -> {
+      let prefix =
+        selection.ArchiveInventory(
+          ..actual,
+          source: scope,
+          units: list.filter(actual.units, fn(u) {
+            u.last_seq <= scope.transcript_upper
+          }),
         )
-        selection.Recall(id, key) -> #(
-          "SELECT COUNT(*) FROM lcm_compaction_node n JOIN lcm_compaction_metadata m ON m.node_id=n.id WHERE n.session=?1 AND n.id=?2 AND m.content_identity=?3 AND ?4=0 AND n.inventory_indexed=1",
-          id,
-          key,
+      let expected =
+        selection.ProjectionSnapshot(
+          scope,
+          actual.graph_revision,
+          receipt.generation,
+          context_cost.profile_id(profile),
+          profile.identity,
         )
-      }
-      store.one(
-        db,
-        sql,
-        [
-          sqlight.text(session),
-          sqlight.int(id),
-          sqlight.text(key.content_identity),
-          sqlight.int(key.affected_fit_revision),
-        ],
-        decode.field(0, decode.int, decode.success),
-        "render identity validation unavailable",
-      )
-      |> result.map(fn(n) { n == 1 })
-    }),
-  )
-  Ok(list.all(valid, fn(v) { v }))
+      let capture =
+        selection.ProjectionCapture(
+          prefix,
+          selection.empty_receipt(receipt.generation, None),
+          expected,
+        )
+      Ok(selection.validate(capture, receipt.refs) |> result.is_ok)
+    }
+  }
 }
 
 fn scope_json(scope: projection_types.SourceBound) -> json.Json {
@@ -311,16 +319,12 @@ fn profile_json(profile: context_cost.CostProfile) -> json.Json {
 
 fn profile_decoder() -> decode.Decoder(context_cost.CostProfile) {
   use provider <- decode.field("provider", decode.string)
-  use protocol <- decode.field("protocol", decode.string)
+  use protocol <- decode.field("protocol", types.protocol_decoder())
   use model <- decode.field("model", decode.string)
   use edge <- decode.field("max_edge", decode.int)
   use images <- decode.field("max_images", decode.optional(decode.int))
   use subject <- decode.field("subject", decode.optional(decode.string))
   use identity <- decode.field("identity", decode.string)
-  let protocol = case protocol {
-    "responses" -> types.Responses
-    _ -> types.ChatCompletions
-  }
   decode.success(context_cost.CostProfile(
     provider,
     protocol,

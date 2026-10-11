@@ -177,6 +177,50 @@ pub fn reviewed_edges_match_executed_pinned_oracle_test() -> Nil {
       0.7894736842105263,
     ),
     // surrogate_pair
+    #(
+      [
+        types.User("ordinary conversation length"),
+        replay(
+          types.Responses,
+          "{\"type\": \"function_call\", \"id\": \"item\", \"call_id\": \"call\", \"name\": \"run\", \"arguments\": \" null\\n\"}",
+        ),
+      ],
+      0.9466666666666667,
+    ),
+    // top_null_whitespace
+    #(
+      [
+        types.User("ordinary conversation length"),
+        replay(
+          types.Responses,
+          "{\"type\": \"function_call\", \"id\": \"item\", \"call_id\": \"call\", \"name\": \"run\", \"arguments\": \"1e309\"}",
+        ),
+      ],
+      0.9,
+    ),
+    // top_exponent_overflow
+    #(
+      [
+        types.User("ordinary conversation length"),
+        replay(
+          types.Responses,
+          "{\"type\": \"function_call\", \"id\": \"item\", \"call_id\": \"call\", \"name\": \"run\", \"arguments\": \"-1e309\"}",
+        ),
+      ],
+      0.9,
+    ),
+    // top_negative_overflow
+    #(
+      [
+        types.User("ordinary conversation length"),
+        replay(
+          types.Responses,
+          "{\"type\": \"function_call\", \"id\": \"item\", \"call_id\": \"call\", \"name\": \"run\", \"arguments\": \"1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\"}",
+        ),
+      ],
+      0.9,
+    ),
+    // top_integer_overflow
   ]
   list.each(cases, fn(fixture) {
     let assert Ok(facts) = list.try_map(fixture.0, context_salience.measure)

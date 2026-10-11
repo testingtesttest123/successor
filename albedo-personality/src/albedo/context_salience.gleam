@@ -174,6 +174,7 @@ fn ecma_space(code: Int) -> Bool {
 
 type JsonValue {
   Null
+  NonFinite
   Text(String)
   CodeUnits(List(Int))
   CodeObject(List(#(List(Int), JsonValue)))
@@ -188,10 +189,13 @@ fn tool_input_size(arguments: String) -> Int {
   let codes =
     string.to_utf_codepoints(arguments) |> list.map(string.utf_codepoint_to_int)
   case parse_value(skip_json_space(codes)) {
-    Ok(#(Null, rest)) if rest == [] -> 2
     Ok(#(value, rest)) ->
       case skip_json_space(rest) {
-        [] -> json_size(value)
+        [] ->
+          case value {
+            Null -> 2
+            _ -> json_size(value)
+          }
         _ -> json_size(Text(arguments))
       }
     Error(_) -> json_size(Text(arguments))
@@ -425,12 +429,12 @@ fn parse_number(codes: List(Int)) -> Result(#(JsonValue, List(Int)), Nil) {
         <> int.to_string(position - 1)
       let number = case significant == "0", position {
         True, _ -> Number(0.0)
-        _, p if p > 309 -> Null
+        _, p if p > 309 -> NonFinite
         _, p if p < -325 -> Number(0.0)
         _, _ ->
           case float.parse(normalized) {
             Ok(n) -> Number(n)
-            Error(_) -> Null
+            Error(_) -> NonFinite
           }
       }
       Ok(#(number, list.drop(codes, list.length(digits))))
@@ -447,7 +451,7 @@ fn json_size(value: JsonValue) -> Int {
       + list.fold(values, 0, fn(n, pair) {
         n + 2 + units_size(pair.0) + 1 + json_size(pair.1)
       })
-    Null -> 4
+    Null | NonFinite -> 4
     Text(text) -> 2 + count(<<text:utf8>>, 0, True)
     Boolean(True) -> 4
     Boolean(False) -> 5

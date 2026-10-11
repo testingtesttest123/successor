@@ -378,3 +378,13 @@ defaults instead of an invalid strict schema whose properties are not all requir
 an actual complete contiguous prefix of eligible uncovered session rows. Its
 numeric span validation alone does not prove that source-prefix invariant. Any
 additional writer must enforce actual prefix coverage before advancing the cursor.
+
+The graph also exposes an indexed inventory for subsequent projection work.
+`graph.capture_inventory` captures source units, actual node/edge availability,
+immutable native cost/profile identities, static salience, configuration revision,
+graph generation and the previous durable selection receipt in one store turn.
+Legacy unequal-depth edges retain their recorded levels; missing coverage is
+explicitly unavailable. Structural selection validation requires complete ordered
+coverage and retains unfinished units as raw. Receipt commit revalidates actual
+metadata membership and generation stamps atomically. These Stage1 primitives
+are separate from the current selection and request acceptance path.

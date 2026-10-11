@@ -62,12 +62,13 @@ pub fn initialise_in(db: sqlight.Connection) -> Result(Nil, String) {
             _ -> "NEW"
           }
           let of_columns = case table.0, action {
-            "transcript", "UPDATE" -> " OF payload,provider,row_class,session"
+            "transcript", "UPDATE" ->
+              " OF payload,provider,row_class,session,seq"
             _, _ -> ""
           }
           let invalidate = case table.0, action {
             "transcript", "UPDATE" ->
-              " UPDATE transcript SET context_indexed=0 WHERE seq=NEW.seq; INSERT INTO context_source_fit_dirty(session) SELECT OLD.session WHERE OLD.row_class='image_fit' ON CONFLICT(session) DO UPDATE SET cursor=0; DELETE FROM context_source_fit WHERE seq=OLD.seq AND OLD.row_class='image_fit';"
+              " UPDATE transcript SET context_indexed=0 WHERE seq=NEW.seq OR (session=OLD.session AND (OLD.session<>NEW.session OR OLD.seq<>NEW.seq) AND seq IN (SELECT e.seq FROM context_source_entry e JOIN context_source_unit u ON u.session=e.session AND e.seq>=u.first_seq AND e.seq<=u.last_seq WHERE u.session=OLD.session AND u.first_seq<=OLD.seq AND u.last_seq>=OLD.seq)); DELETE FROM context_source_call WHERE seq=OLD.seq AND (OLD.session<>NEW.session OR OLD.seq<>NEW.seq); DELETE FROM context_source_image WHERE seq=OLD.seq AND (OLD.session<>NEW.session OR OLD.seq<>NEW.seq); DELETE FROM context_source_entry WHERE seq=OLD.seq AND (OLD.session<>NEW.session OR OLD.seq<>NEW.seq); DELETE FROM context_source_unit WHERE session=OLD.session AND first_seq<=OLD.seq AND last_seq>=OLD.seq AND (OLD.session<>NEW.session OR OLD.seq<>NEW.seq); INSERT INTO context_source_fit_dirty(session) SELECT OLD.session WHERE OLD.row_class='image_fit' ON CONFLICT(session) DO UPDATE SET cursor=0; DELETE FROM context_source_fit WHERE seq=OLD.seq AND OLD.row_class='image_fit';"
             "transcript", "DELETE" ->
               " INSERT INTO context_source_fit_dirty(session) SELECT OLD.session WHERE OLD.row_class='image_fit' ON CONFLICT(session) DO UPDATE SET cursor=0; DELETE FROM context_source_fit WHERE seq=OLD.seq; UPDATE transcript SET context_indexed=0 WHERE session=OLD.session AND seq IN (SELECT e.seq FROM context_source_entry e JOIN context_source_unit u ON u.session=e.session AND e.seq>=u.first_seq AND e.seq<=u.last_seq WHERE u.session=OLD.session AND u.first_seq<=OLD.seq AND u.last_seq>=OLD.seq); DELETE FROM context_source_call WHERE seq=OLD.seq; DELETE FROM context_source_image WHERE seq=OLD.seq; DELETE FROM context_source_entry WHERE seq=OLD.seq; DELETE FROM context_source_unit WHERE session=OLD.session AND first_seq<=OLD.seq AND last_seq>=OLD.seq;"
             _, _ -> ""
@@ -103,7 +104,11 @@ pub fn initialise_in(db: sqlight.Connection) -> Result(Nil, String) {
                 <> table.0
                 <> "',OLD."
                 <> table.1
-                <> ",(SELECT revision FROM context_source_revision WHERE session=OLD.session) WHERE OLD.session<>NEW.session ON CONFLICT(session,kind,position) DO UPDATE SET revision=excluded.revision;"
+                <> ",(SELECT revision FROM context_source_revision WHERE session=OLD.session) WHERE OLD.session<>NEW.session OR OLD."
+                <> table.1
+                <> "<>NEW."
+                <> table.1
+                <> " ON CONFLICT(session,kind,position) DO UPDATE SET revision=excluded.revision;"
               _ -> ""
             }
               <> invalidate
@@ -181,6 +186,17 @@ pub fn bound_in(
 }
 
 pub fn index_entry_in(
+  db: sqlight.Connection,
+  session: String,
+  seq: Int,
+  input: types.Input,
+) -> Result(Nil, String) {
+  use _ <- result.try(index_entry_metadata_in(db, session, seq, input))
+  refresh_around_in(db, session, seq)
+}
+
+/// Stage scalar facts inside the caller's transaction; refresh its units before commit.
+pub fn index_entry_metadata_in(
   db: sqlight.Connection,
   session: String,
   seq: Int,
@@ -305,8 +321,31 @@ pub fn index_entry_in(
     }
     _ -> Ok(Nil)
   })
-  use _ <- result.try(restore_images_in(db, session, Some(seq)))
-  refresh_around_in(db, session, seq)
+  restore_images_in(db, session, Some(seq))
+}
+
+/// A batch append rebuilds each affected complete unit once, after all rows are indexed.
+pub fn refresh_appended_in(
+  db: sqlight.Connection,
+  session: String,
+  first_seq: Int,
+  last_seq: Int,
+) -> Result(Nil, String) {
+  case first_seq > last_seq {
+    True -> Ok(Nil)
+    False -> {
+      use first <- result.try(unit_start_in(db, session, first_seq))
+      use starts <- result.try(store.rows(
+        db,
+        "SELECT seq FROM context_source_entry WHERE session=? AND seq>? AND seq<=? AND row_class IN ('user','image_fit') ORDER BY seq",
+        [sqlight.text(session), sqlight.int(first), sqlight.int(last_seq)],
+        decode.field(0, decode.int, decode.success),
+      ))
+      list.try_each([first, ..starts], fn(position) {
+        refresh_around_in(db, session, position)
+      })
+    }
+  }
 }
 
 fn facts_decoder() -> decode.Decoder(projection.CostFacts) {
@@ -529,7 +568,7 @@ fn index_fit_in(
   )
   use affected <- result.try(store.rows(
     db,
-    "SELECT DISTINCT seq FROM context_source_image WHERE session=? AND seq<? AND effective_hash=?",
+    "SELECT DISTINCT seq FROM context_source_image WHERE session=?1 AND seq<?2 AND (effective_hash=?3 OR source_hash IN (WITH RECURSIVE ancestors(hash) AS (SELECT ?3 UNION SELECT f.source_hash FROM context_source_fit f JOIN ancestors a ON f.target_hash=a.hash WHERE f.session=?1 AND f.seq<?2) SELECT hash FROM ancestors))",
     [sqlight.text(session), sqlight.int(seq), sqlight.text(fit.source)],
     decode.field(0, decode.int, decode.success),
   ))
