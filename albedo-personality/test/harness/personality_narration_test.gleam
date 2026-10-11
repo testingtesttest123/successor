@@ -44,12 +44,22 @@ import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/order
+import gleam/otp/actor
 import gleam/result
 import gleam/string
 import gleam/string_tree
 import gleeunit/should
 import harness/session_fixture
 import sqlight
+
+@external(erlang, "albedo_runtime_test_support", "with_runtime")
+fn with_runtime(run: fn() -> Nil) -> Dynamic
+
+@external(erlang, "albedo_runtime_test_support", "start_with_config")
+fn start_fixture_runtime(
+  path: String,
+  config: extensions.Config,
+) -> Result(runtime.Runtime, actor.StartError)
 
 @external(erlang, "erlang", "make_ref")
 fn unused_kernel() -> kernel.Kernel
@@ -89,7 +99,7 @@ fn setup_at(
     )
   let installed = [bundle, memory.extension()]
   let assert Ok(host) =
-    runtime.start_with_config(path, extensions.Config(installed, []))
+    start_fixture_runtime(path, extensions.Config(installed, []))
   session_fixture.initialise(host)
   session_fixture.create(host, "owner", "/tmp")
   let assert Ok(persona) =
@@ -1575,7 +1585,11 @@ pub fn legacy_native_graph_adds_optional_frame_without_rewriting_rows_test() -> 
   cleanup(host, session)
 }
 
-pub fn reading_many_source_rows_preserves_whole_unit_and_atomicity_test() -> Nil {
+pub fn reading_many_source_rows_preserves_whole_unit_and_atomicity_test_() -> Dynamic {
+  with_runtime(reading_many_source_rows_preserves_whole_unit_and_atomicity_case)
+}
+
+fn reading_many_source_rows_preserves_whole_unit_and_atomicity_case() -> Nil {
   list.each(
     [#(32, False), #(33, False), #(97, False), #(33, True), #(97, True)],
     fn(case_) {
@@ -1868,7 +1882,13 @@ fn list_metadata_ids(
   }
 }
 
-pub fn legitimately_formed_source_heavy_retrieval_is_bounded_and_complete_test() -> Nil {
+pub fn legitimately_formed_source_heavy_retrieval_is_bounded_and_complete_test_() -> Dynamic {
+  with_runtime(
+    legitimately_formed_source_heavy_retrieval_is_bounded_and_complete_case,
+  )
+}
+
+fn legitimately_formed_source_heavy_retrieval_is_bounded_and_complete_case() -> Nil {
   let #(host, session, _) = setup()
   let db = runtime.ledger(host)
   let assert Ok(large_name) =

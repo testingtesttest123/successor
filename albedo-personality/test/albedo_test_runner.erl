@@ -19,7 +19,7 @@ main() ->
         {report, {gleeunit_progress, [{colored, true}]}},
         {scale_timeouts, 10}
     ],
-    Result = eunit:test({inparallel, Modules}, Options),
+  Result = eunit:test({inparallel, [{inorder, Module} || Module <- Modules]}, Options),
     albedo_test_home:cleanup(),
     erlang:halt(case Result of ok -> 0; _ -> 1 end).
 

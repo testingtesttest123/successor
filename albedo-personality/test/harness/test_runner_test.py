@@ -1,4 +1,4 @@
-"""Empty test selections must fail before the gate can report success.
+"""Test discovery and fixture ordering must match the native runner's contract.
 
 Application E2E cannot detect deleted test methods or runner discovery errors.
 Use temporary suites and the real runner processes, without starting a daemon.
@@ -15,6 +15,87 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class TestRunnerTests(unittest.TestCase):
+    def test_native_modules_are_parallel_but_ordinary_module_tests_are_ordered(self):
+        barrier = """
+-module(order_probe).
+-export([start/0, wait/0]).
+start() -> register(order_probe, spawn(fun() ->
+    receive {wait, First} ->
+        receive {wait, Second} -> First ! go, Second ! go end
+    end
+end)).
+wait() ->
+    order_probe ! {wait, self()},
+    receive go -> ok after 2000 -> error(parallel_work_was_serialized) end.
+"""
+        cases = {
+            "ordinary tests share a module fixture": {
+                "example_test": """
+-module(example_test).
+-include_lib("eunit/include/eunit.hrl").
+first_test() -> fixture().
+second_test() -> fixture().
+fixture() ->
+    true = register(module_fixture, self()),
+    try receive after 100 -> ok end
+    after unregister(module_fixture) end.
+""",
+            },
+            "different modules remain concurrent": {
+                name: f'-module({name}).\n-include_lib("eunit/include/eunit.hrl").\n'
+                "ordinary_test() -> order_probe:wait().\n"
+                for name in ["first_test", "second_test"]
+            },
+            "explicit generator parallelism remains concurrent": {
+                "example_test": """
+-module(example_test).
+-include_lib("eunit/include/eunit.hrl").
+explicit_test_() -> {inparallel, [fun order_probe:wait/0, fun order_probe:wait/0]}.
+""",
+            },
+        }
+        for label, modules in cases.items():
+            with (
+                self.subTest(contract=label),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                tests = root / "test"
+                tests.mkdir()
+                sources = [
+                    ROOT / "test/albedo_test_runner.erl",
+                    ROOT / "test/albedo_test_home.erl",
+                ]
+                for name, source in {**modules, "order_probe": barrier}.items():
+                    path = tests / f"{name}.erl"
+                    path.write_text(source)
+                    sources.append(path)
+                subprocess.run(
+                    ["erlc", "-Werror", "-o", directory, *map(str, sources)],
+                    check=True,
+                    timeout=30,
+                )
+                result = subprocess.run(
+                    [
+                        "erl",
+                        "+S",
+                        "2:2",
+                        "-pa",
+                        directory,
+                        *map(str, sorted((ROOT / "build/dev/erlang").glob("*/ebin"))),
+                        "-noshell",
+                        "-eval",
+                        "albedo_test_home:isolate(), order_probe:start(), "
+                        "albedo_test_runner:main().",
+                    ],
+                    cwd=root,
+                    env={**os.environ, "ALBEDO_TEST_TMP": str(root / "scratch")},
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_python_runner_rejects_empty_files_and_preserves_failure_exit(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "example_test.py"

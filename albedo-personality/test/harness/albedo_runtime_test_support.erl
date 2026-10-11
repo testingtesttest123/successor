@@ -1,5 +1,6 @@
 -module(albedo_runtime_test_support).
 -export([temporary_database/0, cleanup/1, temporary_workspace/0, cleanup_workspace/1,
+         with_runtime/1, start/1, start_with_config/2,
          kernel_memory/1, catalog_does_not_block/3, catalog_forget_while_blocked/3,
          hold_preparation/2, capture_during_preparation/3]).
 temporary_workspace() ->
@@ -13,10 +14,151 @@ cleanup_workspace(Path) ->
 temporary_database() ->
     unicode:characters_to_binary(filename:join(os:getenv("TMPDIR", "/tmp"), "albedo-" ++ binary_to_list(albedo_native:new_id()) ++ ".sqlite" )).
 cleanup(Path) ->
+    case get({?MODULE, fixture_owner}) of
+        undefined -> cleanup_files(Path);
+        Owner -> fixture_call(Owner, {cleanup_path, Path})
+    end.
+cleanup_files(<<":memory:">>) -> nil;
+cleanup_files(Path) ->
     lists:foreach(fun(Suffix) -> file:delete(<<Path/binary, Suffix/binary>>) end,
                   [<<>>, <<"-wal">>, <<"-shm">>]),
     _ = file:del_dir_r(<<Path/binary, ".backup">>),
     nil.
+
+%% EUnit's setup owner survives assertion failures and killed test bodies.
+%% One owner tracks every reopening; all owners stop before any DB is unlinked.
+with_runtime(Test) ->
+    {setup, fun fixture_owner/0, fun(Owner) -> fixture_call(Owner, finish) end,
+     fun(Owner) -> fun() ->
+         put({?MODULE, fixture_owner}, Owner),
+         try Test() after erase({?MODULE, fixture_owner}) end
+     end end}.
+
+start(Path) ->
+    fixture_start(Path, fun() -> 'albedo@harness@runtime':start(Path) end).
+start_with_config(Path, Config) ->
+    fixture_start(Path, fun() -> 'albedo@harness@runtime':start_with_config(Path, Config) end).
+fixture_start(Path, Start) ->
+    case get({?MODULE, fixture_owner}) of
+        undefined -> Start();
+        Owner -> fixture_call(Owner, {start, Path, Start})
+    end.
+
+fixture_owner() ->
+    Parent = self(),
+    Owner = spawn(fun() ->
+        process_flag(trap_exit, true),
+        Monitor = erlang:monitor(process, Parent),
+        fixture_loop(Monitor, [], {#{}, []})
+    end),
+    Owner.
+
+fixture_call(Owner, Request) ->
+    Ref = erlang:monitor(process, Owner),
+    Owner ! {request, self(), Ref, Request},
+    receive
+        {reply, Ref, {returned, Value}} -> erlang:demonitor(Ref, [flush]), Value;
+        {reply, Ref, {raised, Class, Reason, Stack}} ->
+            erlang:demonitor(Ref, [flush]), erlang:raise(Class, Reason, Stack);
+        {'DOWN', Ref, process, Owner, Reason} -> error({fixture_owner_failed, Reason})
+    end.
+
+fixture_loop(Monitor, Runtimes, {Paths, EarlierFailures}) ->
+    receive
+        {request, Caller, Ref, {start, Path, Start}} ->
+            Result = try {returned, Start()} catch C:R:S -> {raised, C, R, S} end,
+            {Next, NextPaths} = case Result of
+                {returned, {ok, Runtime}} ->
+                    {[{Path, Runtime, monitor_runtime(Runtime)} | Runtimes],
+                     Paths#{Path => maps:get(Path, Paths, owned)}};
+                _ -> {Runtimes, Paths#{Path => unresolved}}
+            end,
+            Caller ! {reply, Ref, Result},
+            fixture_loop(Monitor, Next, {NextPaths, EarlierFailures});
+        {request, Caller, Ref, {cleanup_path, Path}} ->
+            {Owned, Rest} = lists:partition(fun({P, _, _}) -> P =:= Path end, Runtimes),
+            {Closed, Failures} = stop_fixture_runtimes(Owned),
+            OwnedPath = maps:get(Path, Paths, unresolved) =:= owned,
+            Value = case Closed andalso OwnedPath of true -> cleanup_files(Path); false -> nil end,
+            CleanupFailures = Failures ++ unresolved_paths(maps:with([Path], Paths)),
+            Reply = case CleanupFailures of
+                [] -> {returned, Value};
+                _ -> {raised, error, {fixture_teardown_failed, CleanupFailures}, []}
+            end,
+            Caller ! {reply, Ref, Reply},
+            %% A failed request must not kill the owner before EUnit teardown
+            %% drains other fixtures. An actor can die after a missed DOWN:
+            %% retain every unresolved handle so its known key still gets erased.
+            Remaining = case Closed of
+                true -> [];
+                false -> [{P, Runtime, monitor_runtime(Runtime)} || {P, Runtime, _} <- Owned]
+            end,
+            fixture_loop(Monitor, Remaining ++ Rest, {Paths, EarlierFailures ++ CleanupFailures});
+        {request, Caller, Ref, finish} ->
+            finish_fixture(Runtimes, Paths, EarlierFailures),
+            Caller ! {reply, Ref, {returned, nil}};
+        {'DOWN', Monitor, process, _, _} -> finish_fixture(Runtimes, Paths, EarlierFailures);
+        {'EXIT', _, _} -> fixture_loop(Monitor, Runtimes, {Paths, EarlierFailures})
+    end.
+
+finish_fixture(Runtimes, Paths, EarlierFailures) ->
+    {Closed, Failures} = stop_fixture_runtimes(Runtimes),
+    case Closed of
+        true -> lists:foreach(fun cleanup_files/1, [P || {P, owned} <- maps:to_list(Paths)]);
+        false -> ok
+    end,
+    require_fixture_cleanup(EarlierFailures ++ Failures ++ unresolved_paths(Paths)).
+
+%% No returned handle means the fixture has no store-DOWN proof for that path.
+%% Preserve files and the startup error; teardown reports its own incomplete ownership.
+unresolved_paths(Paths) -> [{fixture_start_unresolved, P} || {P, unresolved} <- maps:to_list(Paths)].
+
+monitor_runtime({runtime, Subject, Store, _}) ->
+    {ok, Owner} = 'gleam@erlang@process':subject_owner(Subject),
+    StoreOwner = 'albedo@daemon@store':owner(Store),
+    {Owner, erlang:monitor(process, Owner), StoreOwner, erlang:monitor(process, StoreOwner)}.
+
+stop_fixture_runtimes(Runtimes) ->
+    Results = [stop_fixture_runtime(Runtime, Monitors) || {_, Runtime, Monitors} <- Runtimes],
+    {lists:all(fun({Closed, _}) -> Closed end, Results),
+     lists:append([Failures || {_, Failures} <- Results])}.
+
+require_fixture_cleanup([]) -> ok;
+require_fixture_cleanup(Failures) -> error({fixture_teardown_failed, Failures}).
+
+stop_fixture_runtime({runtime, _, Store, Shared} = Runtime, {Owner, R, StoreOwner, S}) ->
+    %% A success-tail stop can already have acknowledged/released its key while
+    %% the actor is finishing. Its DOWN barrier, rather than a second Stop, wins.
+    Stop = try
+        case {is_process_alive(Owner), persistent_term:get(Shared, absent) =/= absent,
+              is_process_alive(StoreOwner)} of
+            {true, true, _} -> 'albedo@harness@runtime':stop(Runtime);
+            {false, _, true} -> 'albedo@daemon@store':close(Store);
+            _ -> ok
+        end,
+        ok
+    catch C:Reason -> {C, Reason}
+    end,
+    Results = [await_fixture_down(R, Owner), await_fixture_down(S, StoreOwner)],
+    [RuntimeDown, _] = Results,
+    case RuntimeDown of
+        {down, _} -> 'albedo@shared':release(Shared);
+        {alive, _} -> ok
+    end,
+    Failures = [Failure || {_, Failure} <- Results, Failure =/= ok],
+    StopFailures = case {Stop, Failures} of
+        {ok, _} -> [];
+        {_, []} -> []; % A concurrent normal stop won the race.
+        {Error, _} -> [{fixture_stop_failed, Error}]
+    end,
+    {lists:all(fun({Status, _}) -> Status =:= down end, Results), Failures ++ StopFailures}.
+
+await_fixture_down(Ref, Owner) ->
+    receive
+        {'DOWN', Ref, process, Owner, Reason} when Reason =:= normal; Reason =:= shutdown -> {down, ok};
+        {'DOWN', Ref, process, Owner, Reason} -> {down, {fixture_owner_failed, Owner, Reason}}
+    after 1000 -> {alive, {fixture_owner_did_not_stop, Owner}}
+    end.
 
 %% A barrier followed by GC measures retained ownership, not transient boot garbage.
 kernel_memory({session, _, _, Kernel, _, _, _, _, _}) ->

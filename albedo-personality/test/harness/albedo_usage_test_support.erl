@@ -7,14 +7,16 @@
 %% daemon is never involved: no route exercises this loop end to end yet.
 -module(albedo_usage_test_support).
 
--export([start/0, stop/1, envelope/1, env_dump/1, request_line/1,
+-export([start/0, stop/1, with_fake/1, envelope/1, env_dump/1, request_line/1,
          break_binary/1, mono_ms/0, trickle_pid_gone/1]).
 
-%% eunit runs a module's tests in parallel ({inparallel, _} reaches into the
-%% module), and ALBEDO_USAGE_CORE is one global environment variable, so the
-%% fakes must not overlap. A registered name is the lock: it is held from
-%% start to stop, and the death of a crashed test process releases it.
+%% ALBEDO_USAGE_CORE is global, so explicitly parallel fixtures must not overlap.
+%% EUnit teardown releases the lock even when a test fails or is killed.
 -define(LOCK, albedo_usage_fake).
+
+with_fake(Test) ->
+    {setup, fun() -> {ok, Fake} = start(), Fake end, fun stop/1,
+     fun(Fake) -> fun() -> Test(Fake) end end}.
 
 start() ->
     await_lock(),
@@ -39,19 +41,23 @@ start() ->
     ok = file:change_mode(Trickle, 8#755),
     os:putenv("ALBEDO_USAGE_CORE", Usage),
     os:putenv("ALBEDO_USAGE_TEST_CANARY", "leak"),
-    {ok, #{dir => Dir, listen => Listen, server => Server,
+    {ok, #{dir => Dir, listen => Listen, server => Server, owner => self(),
            envelope => filename:join(Dir, "envelope.txt"),
            env => filename:join(Dir, "env.txt"),
            trickle_pid => filename:join(Dir, "trickle.pid")}}.
 
 stop(Ref) ->
-    exit(maps:get(server, Ref), kill),
+    Server = maps:get(server, Ref),
+    Monitor = erlang:monitor(process, Server),
+    exit(Server, kill),
     gen_tcp:close(maps:get(listen, Ref)),
     os:unsetenv("ALBEDO_USAGE_CORE"),
     os:unsetenv("ALBEDO_USAGE_TEST_CANARY"),
     _ = file:del_dir_r(maps:get(dir, Ref)),
     _ = try unregister(?LOCK) catch error:badarg -> false end,
-    nil.
+    receive {'DOWN', Monitor, process, Server, _} -> nil
+    after 1000 -> error(usage_fixture_server_did_not_stop)
+    end.
 
 await_lock() ->
     case whereis(?LOCK) of

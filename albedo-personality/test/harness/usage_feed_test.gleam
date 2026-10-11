@@ -6,6 +6,7 @@
 //// or the command environment growing beyond the allowlist.
 
 import albedo/harness/usage_feed
+import gleam/dynamic.{type Dynamic}
 import gleam/json
 import gleam/option.{None, Some}
 import gleam/string
@@ -13,11 +14,8 @@ import gleeunit/should
 
 pub type Fake
 
-@external(erlang, "albedo_usage_test_support", "start")
-fn start_fake() -> Result(Fake, Nil)
-
-@external(erlang, "albedo_usage_test_support", "stop")
-fn stop_fake(fake: Fake) -> Nil
+@external(erlang, "albedo_usage_test_support", "with_fake")
+fn with_fake(run: fn(Fake) -> Nil) -> Dynamic
 
 @external(erlang, "albedo_usage_test_support", "envelope")
 fn fake_envelope(fake: Fake) -> String
@@ -44,8 +42,11 @@ fn credential() -> json.Json {
   ])
 }
 
-pub fn fetch_runs_http_and_command_rounds_test() -> Nil {
-  let assert Ok(fake) = start_fake()
+pub fn fetch_runs_http_and_command_rounds_test_() -> Dynamic {
+  with_fake(fetch_runs_http_and_command_rounds_case)
+}
+
+fn fetch_runs_http_and_command_rounds_case(fake: Fake) -> Nil {
   let assert Ok(report) = usage_feed.fetch("fake", credential(), 1_234_567_890)
   // The fake core built the report from the real HTTP response body, which
   // only the loop could have delivered.
@@ -79,44 +80,54 @@ pub fn fetch_runs_http_and_command_rounds_test() -> Nil {
   dumped |> string.contains("ALBEDO_USAGE_CORE") |> should.be_false
   dumped |> string.contains("PATH=") |> should.be_true
   dumped |> string.contains("HOME=") |> should.be_true
-  stop_fake(fake)
 }
 
-pub fn a_provider_error_is_data_not_a_driver_failure_test() -> Nil {
-  let assert Ok(fake) = start_fake()
+pub fn a_provider_error_is_data_not_a_driver_failure_test_() -> Dynamic {
+  with_fake(a_provider_error_is_data_not_a_driver_failure_case)
+}
+
+fn a_provider_error_is_data_not_a_driver_failure_case(_fake: Fake) -> Nil {
   let assert Ok(report) = usage_feed.fetch("broken", credential(), 0)
   report.error |> should.equal(Some("the provider is unreachable"))
   report.limits |> should.equal([])
   report.account_id |> should.equal(None)
-  stop_fake(fake)
 }
 
-pub fn a_feed_that_never_reports_is_a_driver_failure_test() -> Nil {
-  let assert Ok(fake) = start_fake()
+pub fn a_feed_that_never_reports_is_a_driver_failure_test_() -> Dynamic {
+  with_fake(a_feed_that_never_reports_is_a_driver_failure_case)
+}
+
+fn a_feed_that_never_reports_is_a_driver_failure_case(_fake: Fake) -> Nil {
   let assert Error(message) = usage_feed.fetch("endless", credential(), 0)
   message |> string.contains("did not finish in 6 rounds") |> should.be_true
-  stop_fake(fake)
 }
 
-pub fn a_missing_binary_is_a_driver_failure_test() -> Nil {
-  let assert Ok(fake) = start_fake()
+pub fn a_missing_binary_is_a_driver_failure_test_() -> Dynamic {
+  with_fake(a_missing_binary_is_a_driver_failure_case)
+}
+
+fn a_missing_binary_is_a_driver_failure_case(fake: Fake) -> Nil {
   break_binary(fake)
   let assert Error(message) = usage_feed.fetch("fake", credential(), 0)
   message |> string.contains("usage is not built") |> should.be_true
-  stop_fake(fake)
 }
 
-pub fn a_command_off_path_answers_126_test() -> Nil {
-  let assert Ok(fake) = start_fake()
+pub fn a_command_off_path_answers_126_test_() -> Dynamic {
+  with_fake(a_command_off_path_answers_126_case)
+}
+
+fn a_command_off_path_answers_126_case(_fake: Fake) -> Nil {
   // The fake core asks for a command that does not exist; the feed routes
   // around a non-zero status, so the report still arrives.
   let assert Ok(report) = usage_feed.fetch("missing-command", credential(), 0)
   report.error |> should.equal(Some("command answered 126"))
-  stop_fake(fake)
 }
 
-pub fn a_trickling_command_hits_its_deadline_and_is_killed_test() -> Nil {
-  let assert Ok(fake) = start_fake()
+pub fn a_trickling_command_hits_its_deadline_and_is_killed_test_() -> Dynamic {
+  with_fake(a_trickling_command_hits_its_deadline_and_is_killed_case)
+}
+
+fn a_trickling_command_hits_its_deadline_and_is_killed_case(fake: Fake) -> Nil {
   // The trickle command always has output but never exits: an idle timeout
   // would let it run forever, so only the deadline across chunks ends it.
   let started = mono_ms()
@@ -127,5 +138,4 @@ pub fn a_trickling_command_hits_its_deadline_and_is_killed_test() -> Nil {
   should.be_true(elapsed < 4000)
   // And the child was killed, not orphaned with closed pipes.
   trickle_pid_gone(fake) |> should.be_true
-  stop_fake(fake)
 }

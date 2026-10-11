@@ -8,13 +8,21 @@ import albedo/daemon/migrations/image_store
 import albedo/daemon/store
 import albedo/harness/runtime
 import albedo/openai_api/types
+import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
 import gleam/list
 import gleam/option.{None}
+import gleam/otp/actor
 import gleeunit/should
 import sqlight
 
 const png = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAIAAAA2iEnWAAAAAElFTkSuQmCC"
+
+@external(erlang, "albedo_runtime_test_support", "with_runtime")
+fn with_runtime(run: fn() -> Nil) -> Dynamic
+
+@external(erlang, "albedo_runtime_test_support", "start")
+fn start_runtime(path: String) -> Result(runtime.Runtime, actor.StartError)
 
 @external(erlang, "albedo_runtime_test_support", "temporary_database")
 fn temporary_database() -> String
@@ -58,7 +66,7 @@ fn session(id: String) -> conversation.Info {
 
 fn ledger() -> #(String, store.Store) {
   let path = temporary_database()
-  let assert Ok(host) = runtime.start(path)
+  let assert Ok(host) = start_runtime(path)
   let ledger = runtime.ledger(host)
   let assert Ok(_) = conversation.initialise(ledger)
   #(path, ledger)
@@ -84,7 +92,11 @@ fn loaded(ledger: store.Store, id: String) -> List(types.Input) {
   list.map(entries, fn(entry) { entry.input })
 }
 
-pub fn commit_keeps_one_payload_and_rows_load_references_test() -> Nil {
+pub fn commit_keeps_one_payload_and_rows_load_references_test_() -> Dynamic {
+  with_runtime(commit_keeps_one_payload_and_rows_load_references_case)
+}
+
+fn commit_keeps_one_payload_and_rows_load_references_case() -> Nil {
   let #(path, ledger) = ledger()
   let assert Ok(_) = conversation.create(ledger, session("s"))
   let assert Ok(_) =
@@ -111,7 +123,11 @@ pub fn commit_keeps_one_payload_and_rows_load_references_test() -> Nil {
   cleanup(path)
 }
 
-pub fn deleting_a_session_releases_only_unshared_payloads_test() -> Nil {
+pub fn deleting_a_session_releases_only_unshared_payloads_test_() -> Dynamic {
+  with_runtime(deleting_a_session_releases_only_unshared_payloads_case)
+}
+
+fn deleting_a_session_releases_only_unshared_payloads_case() -> Nil {
   let #(path, ledger) = ledger()
   let assert Ok(_) = family.initialise(ledger)
   let assert Ok(_) = conversation.create(ledger, session("a"))
@@ -158,7 +174,11 @@ pub fn deleting_a_session_releases_only_unshared_payloads_test() -> Nil {
   cleanup(path)
 }
 
-pub fn migration_moves_legacy_payloads_once_after_a_backup_test() -> Nil {
+pub fn migration_moves_legacy_payloads_once_after_a_backup_test_() -> Dynamic {
+  with_runtime(migration_moves_legacy_payloads_once_after_a_backup_case)
+}
+
+fn migration_moves_legacy_payloads_once_after_a_backup_case() -> Nil {
   let #(path, ledger) = ledger()
   let assert Ok(_) = conversation.create(ledger, session("s"))
   let assert Ok(_) =
@@ -183,7 +203,11 @@ pub fn migration_moves_legacy_payloads_once_after_a_backup_test() -> Nil {
   cleanup(path)
 }
 
-pub fn migration_converts_text_images_without_changing_references_test() -> Nil {
+pub fn migration_converts_text_images_without_changing_references_test_() -> Dynamic {
+  with_runtime(migration_converts_text_images_without_changing_references_case)
+}
+
+fn migration_converts_text_images_without_changing_references_case() -> Nil {
   let #(path, ledger) = ledger()
   let assert Ok(_) = conversation.create(ledger, session("s"))
   let assert Ok(_) =
@@ -219,7 +243,11 @@ pub fn migration_converts_text_images_without_changing_references_test() -> Nil 
   cleanup(path)
 }
 
-pub fn failed_backup_keeps_text_images_untouched_test() -> Nil {
+pub fn failed_backup_keeps_text_images_untouched_test_() -> Dynamic {
+  with_runtime(failed_backup_keeps_text_images_untouched_case)
+}
+
+fn failed_backup_keeps_text_images_untouched_case() -> Nil {
   let #(path, ledger) = ledger()
   let assert Ok(_) = conversation.create(ledger, session("s"))
   let assert Ok(_) =
@@ -237,7 +265,11 @@ pub fn failed_backup_keeps_text_images_untouched_test() -> Nil {
   cleanup(path)
 }
 
-pub fn fingerprints_ignore_where_a_payload_lives_test() -> Nil {
+pub fn fingerprints_ignore_where_a_payload_lives_test_() -> Dynamic {
+  with_runtime(fingerprints_ignore_where_a_payload_lives_case)
+}
+
+fn fingerprints_ignore_where_a_payload_lives_case() -> Nil {
   let #(path, ledger) = ledger()
   let assert Ok(_) = conversation.create(ledger, session("s"))
   let assert Ok(_) =
