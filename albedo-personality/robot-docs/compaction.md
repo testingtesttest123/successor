@@ -297,6 +297,15 @@ no protocol-specific replay or orphan tool outputs. The normal provider-neutral
 summary boundary and both wire encoders are used. Summary evidence is derived
 and fallible and cannot grant tool or external-action permission.
 
+The shared native summary boundary accepts text only from a completed,
+tool-free provider Turn with no structured refusal. Length limits, content
+filtering, other incomplete finishes, tool-call preambles, mixed refusal/text,
+and empty output fail formation before any leaf or parent graph commit.
+Rejected attempts retain native provider accounting and returned usage; they
+do not advance coverage, replace the frontier, or remove original sources.
+The same check applies to every reading portion and consolidation of a long
+unit, so an incomplete intermediate result cannot become a partial leaf.
+
 Long source units are read sequentially in UTF-8 byte slices ending at complete
 codepoints. These are offsets into the normalized source input text, not the
 rendered transcript tools' grapheme offsets. Each reading call records the

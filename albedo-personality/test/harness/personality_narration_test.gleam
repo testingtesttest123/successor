@@ -2574,6 +2574,279 @@ pub fn shared_summarizer_keeps_native_usage_when_output_is_unusable_test() -> Ni
   cleanup(host, session)
 }
 
+// Exercise the native Turn boundary and exact graph CAS snapshots without
+// racing the daemon's automatic leaf-to-parent progression. The HTTP regression
+// covers real wire reducers; these cases also reach inconsistent custom-provider
+// Turns that those reducers cannot emit, and failed intermediate reading folds.
+fn disposition_turn(protocol: types.Protocol, kind: String) -> types.Turn {
+  let text = case kind {
+    "empty" -> "  \n "
+    _ -> "I remember verified work."
+  }
+  let refusal = kind == "refusal"
+  let item = case protocol {
+    types.Responses ->
+      json.object([
+        #("type", json.string("message")),
+        #("role", json.string("assistant")),
+        #("status", json.string("completed")),
+        #(
+          "content",
+          json.array(
+            list.append(
+              [
+                json.object([
+                  #("type", json.string("output_text")),
+                  #("text", json.string(text)),
+                ]),
+              ],
+              case refusal {
+                True -> [
+                  json.object([
+                    #("type", json.string("refusal")),
+                    #("refusal", json.string("I cannot supply this memory.")),
+                  ]),
+                ]
+                False -> []
+              },
+            ),
+            fn(value) { value },
+          ),
+        ),
+      ])
+    types.ChatCompletions ->
+      json.object(
+        list.append(
+          [
+            #("role", json.string("assistant")),
+            #("content", json.string(text)),
+          ],
+          case refusal {
+            True -> [#("refusal", json.string("I cannot supply this memory."))]
+            False -> []
+          },
+        ),
+      )
+  }
+  let assert Ok(item) =
+    json.parse(json.to_string(item), types.replay_decoder(protocol))
+  let output = case protocol, kind {
+    types.Responses, "complete_reasoning" -> {
+      let assert Ok(reasoning) =
+        json.parse(
+          "{\"type\":\"reasoning\",\"id\":\"reasoning-fixture\",\"summary\":[],\"status\":\"completed\",\"content\":null}",
+          types.replay_decoder(protocol),
+        )
+      [reasoning, item]
+    }
+    _, _ -> [item]
+  }
+  types.Turn(
+    None,
+    output,
+    case kind {
+      "tools" | "complete_with_tools" -> [types.ToolCall("call", "read", "{}")]
+      _ -> []
+    },
+    Some(types.Usage(123, 7, Some(100), None, None, None, Some(2))),
+    case kind {
+      "length" -> types.LengthLimit
+      "filter" -> types.ContentFiltered
+      "incomplete" -> types.OtherFinish("incomplete")
+      "tools" -> types.ToolCalls
+      _ -> types.Complete
+    },
+    None,
+    [],
+  )
+}
+
+fn native_summary(
+  db: store.Store,
+  protocol: types.Protocol,
+  turn: types.Turn,
+  request: compaction.SummaryRequest,
+) -> Result(String, String) {
+  loop.summarize_call(
+    loop.CallContext(
+      db,
+      extension.Upstream(
+        "native-disposition-test",
+        protocol,
+        fn(_, _) { Ok(turn) },
+        fn(_) { None },
+        fn() { Some("verified-account") },
+        fn(_) { [] },
+        types.any_images,
+      ),
+      "owner",
+      "fixture",
+      "disposition-call",
+      None,
+    ),
+    request,
+  )
+}
+
+fn assert_disposition_accounting(db: store.Store) -> Nil {
+  store.read(
+    db,
+    "SELECT kind,input_tokens,output_tokens,account,seq FROM provider_requests WHERE session='owner'",
+    [],
+    {
+      use kind <- decode.field(0, decode.string)
+      use input <- decode.field(1, decode.int)
+      use output <- decode.field(2, decode.int)
+      use account <- decode.field(3, decode.string)
+      use seq <- decode.field(4, decode.optional(decode.int))
+      decode.success(#(kind, input, output, account, seq))
+    },
+  )
+  |> should.equal(Ok([#("summarizer", 123, 7, "verified-account", None)]))
+}
+
+fn rejected_dispositions_preserve_graph(
+  kinds: List(String),
+  parent: Bool,
+) -> Nil {
+  list.each([types.Responses, types.ChatCompletions], fn(protocol) {
+    list.each(kinds, fn(kind) {
+      let #(host, session, _) = setup()
+      let db = runtime.ledger(host)
+      save(host, string.repeat("first source ", 100), "first action")
+      save(host, string.repeat("second source ", 100), "second action")
+      save(host, "retained tail", "tail action")
+      let policy = policy_for(db, "owner")
+      let context =
+        context_for(db, "owner", policy, fn(_) {
+          Ok("I remember verified work.")
+        })
+      let assert Ok(strategy) =
+        lcm.strategy("personality").resolve(context.capacity, None)
+      let assert Some(ahead) = strategy.prepare_ahead
+      case parent {
+        True -> {
+          ahead(context) |> should.equal(Ok(True))
+          ahead(context) |> should.equal(Ok(True))
+        }
+        False -> Nil
+      }
+      let assert Ok(before) = graph.snapshot(db, "owner")
+      let assert Ok(frontier) = graph.frontier(db, "owner")
+      let assert Ok(rows) = conversation.load_sources(db, "owner")
+      let rejected =
+        compaction.Context(..context, summarize: native_summary(
+          db,
+          protocol,
+          disposition_turn(protocol, kind),
+          _,
+        ))
+      ahead(rejected) |> should.be_error
+      graph.snapshot(db, "owner") |> should.equal(Ok(before))
+      graph.frontier(db, "owner") |> should.equal(Ok(frontier))
+      conversation.load_sources(db, "owner") |> should.equal(Ok(rows))
+      assert_disposition_accounting(db)
+      // The same durable sources/frontier remain usable by a complete attempt.
+      let accepted =
+        compaction.Context(..context, summarize: native_summary(
+          db,
+          protocol,
+          // Completed reasoning items may have null content; their visible
+          // assistant answer must still succeed for the retained frontier.
+          disposition_turn(protocol, case protocol {
+            types.Responses -> "complete_reasoning"
+            types.ChatCompletions -> "complete"
+          }),
+          _,
+        ))
+      ahead(accepted) |> should.equal(Ok(True))
+      graph.snapshot(db, "owner") |> should.not_equal(Ok(before))
+      conversation.load_sources(db, "owner") |> should.equal(Ok(rows))
+      cleanup(host, session)
+    })
+  })
+}
+
+pub fn incomplete_summary_finishes_preserve_leaf_frontier_test() -> Nil {
+  rejected_dispositions_preserve_graph(
+    ["length", "filter", "incomplete"],
+    False,
+  )
+}
+
+pub fn incomplete_summary_finishes_preserve_parent_frontier_test() -> Nil {
+  rejected_dispositions_preserve_graph(["length", "filter", "incomplete"], True)
+}
+
+pub fn tools_and_refusal_preserve_leaf_frontier_test() -> Nil {
+  rejected_dispositions_preserve_graph(
+    ["tools", "complete_with_tools", "refusal"],
+    False,
+  )
+}
+
+pub fn tools_and_refusal_preserve_parent_frontier_test() -> Nil {
+  rejected_dispositions_preserve_graph(
+    ["tools", "complete_with_tools", "refusal"],
+    True,
+  )
+}
+
+pub fn empty_summary_preserves_leaf_frontier_test() -> Nil {
+  rejected_dispositions_preserve_graph(["empty"], False)
+}
+
+pub fn empty_summary_preserves_parent_frontier_test() -> Nil {
+  rejected_dispositions_preserve_graph(["empty"], True)
+}
+
+pub fn incomplete_native_reading_and_consolidation_commit_no_partial_leaf_test() -> Nil {
+  list.each([types.Responses, types.ChatCompletions], fn(protocol) {
+    list.each(["reading", "consolidation"], fn(failed_mode) {
+      let #(host, session, _) = setup()
+      let db = runtime.ledger(host)
+      save(
+        host,
+        string.repeat("é🧭 actual long source ", 5000),
+        "received account",
+      )
+      save(host, "retained tail", "tail action")
+      let assert Ok(before) = graph.snapshot(db, "owner")
+      let assert Ok(rows) = conversation.load_sources(db, "owner")
+      let calls = process.new_subject()
+      process.send(calls, 0)
+      let failed =
+        prepared_result(
+          host,
+          session,
+          fn(request) {
+            let assert Some(formation) = request.formation
+            let assert Ok(count) = process.receive(calls, 0)
+            process.send(calls, count + 1)
+            let reject = formation.mode == failed_mode && count > 0
+            native_summary(
+              db,
+              protocol,
+              disposition_turn(protocol, case reject {
+                True -> "length"
+                False -> "complete"
+              }),
+              request,
+            )
+          },
+          True,
+        )
+      failed |> should.be_error
+      let assert Ok(count) = process.receive(calls, 0)
+      should.be_true(count > 1)
+      graph.snapshot(db, "owner") |> should.equal(Ok(before))
+      graph.frontier(db, "owner") |> should.equal(Ok([]))
+      conversation.load_sources(db, "owner") |> should.equal(Ok(rows))
+      cleanup(host, session)
+    })
+  })
+}
+
 pub fn incomplete_native_tool_unit_defers_leaves_but_not_faithful_parent_progress_test() -> Nil {
   let #(host, session, _) = setup()
   let db = runtime.ledger(host)
