@@ -1,14 +1,24 @@
 -module(albedo_runtime_test_support).
 -export([temporary_database/0, cleanup/1, temporary_workspace/0, cleanup_workspace/1,
-         with_runtime/1, start/1, start_with_config/2,
+         with_runtime/1, start/1, start_with_config/2, start_session/3,
          kernel_memory/1, catalog_does_not_block/3, catalog_forget_while_blocked/3,
          hold_preparation/2, capture_during_preparation/3]).
 temporary_workspace() ->
+    case get({?MODULE, fixture_owner}) of
+        undefined -> workspace_files();
+        Owner -> fixture_call(Owner, workspace)
+    end.
+workspace_files() ->
     Path = filename:join(os:getenv("TMPDIR", "/tmp"),
                          "runtime-workspace-" ++ binary_to_list(albedo_native:new_id())),
     ok = file:make_dir(Path),
     unicode:characters_to_binary(Path).
 cleanup_workspace(Path) ->
+    case get({?MODULE, fixture_owner}) of
+        undefined -> cleanup_workspace_files(Path);
+        Owner -> fixture_call(Owner, {cleanup_workspace, Path})
+    end.
+cleanup_workspace_files(Path) ->
     _ = file:del_dir_r(Path),
     nil.
 temporary_database() ->
@@ -38,6 +48,12 @@ start(Path) ->
     fixture_start(Path, fun() -> 'albedo@harness@runtime':start(Path) end).
 start_with_config(Path, Config) ->
     fixture_start(Path, fun() -> 'albedo@harness@runtime':start_with_config(Path, Config) end).
+start_session(Runtime, Info, Home) ->
+    Start = fun() -> 'albedo@daemon@session':start(Runtime, Info, Home) end,
+    case get({?MODULE, fixture_owner}) of
+        undefined -> Start();
+        Owner -> fixture_call(Owner, {start_session, Start})
+    end.
 fixture_start(Path, Start) ->
     case get({?MODULE, fixture_owner}) of
         undefined -> Start();
@@ -49,7 +65,7 @@ fixture_owner() ->
     Owner = spawn(fun() ->
         process_flag(trap_exit, true),
         Monitor = erlang:monitor(process, Parent),
-        fixture_loop(Monitor, [], {#{}, []})
+        fixture_loop(Monitor, [], {#{}, []}, {[], []})
     end),
     Owner.
 
@@ -63,8 +79,30 @@ fixture_call(Owner, Request) ->
         {'DOWN', Ref, process, Owner, Reason} -> error({fixture_owner_failed, Reason})
     end.
 
-fixture_loop(Monitor, Runtimes, {Paths, EarlierFailures}) ->
+fixture_loop(Monitor, Runtimes, {Paths, EarlierFailures}, {Workspaces, Sessions} = Resources) ->
     receive
+        {request, Caller, Ref, workspace} ->
+            Path = workspace_files(),
+            Caller ! {reply, Ref, {returned, Path}},
+            fixture_loop(Monitor, Runtimes, {Paths, EarlierFailures}, {[Path | Workspaces], Sessions});
+        {request, Caller, Ref, {cleanup_workspace, Path}} ->
+            %% Owned files remain until session/runtime/store DOWN barriers.
+            Value = case lists:member(Path, Workspaces) of
+                true -> nil;
+                false -> cleanup_workspace_files(Path)
+            end,
+            Caller ! {reply, Ref, {returned, Value}},
+            fixture_loop(Monitor, Runtimes, {Paths, EarlierFailures}, Resources);
+        {request, Caller, Ref, {start_session, Start}} ->
+            Result = try {returned, Start()} catch C:R:S -> {raised, C, R, S} end,
+            NextSessions = case Result of
+                {returned, {ok, Session}} ->
+                    {ok, Owner} = 'gleam@erlang@process':subject_owner(Session),
+                    [{Session, Owner, erlang:monitor(process, Owner)} | Sessions];
+                _ -> [unresolved | Sessions]
+            end,
+            Caller ! {reply, Ref, Result},
+            fixture_loop(Monitor, Runtimes, {Paths, EarlierFailures}, {Workspaces, NextSessions});
         {request, Caller, Ref, {start, Path, Start}} ->
             Result = try {returned, Start()} catch C:R:S -> {raised, C, R, S} end,
             {Next, NextPaths} = case Result of
@@ -74,7 +112,12 @@ fixture_loop(Monitor, Runtimes, {Paths, EarlierFailures}) ->
                 _ -> {Runtimes, Paths#{Path => unresolved}}
             end,
             Caller ! {reply, Ref, Result},
-            fixture_loop(Monitor, Next, {NextPaths, EarlierFailures});
+            fixture_loop(Monitor, Next, {NextPaths, EarlierFailures}, Resources);
+        {request, Caller, Ref, {cleanup_path, _}} when Sessions =/= [] ->
+            %% Session starts may be unresolved. Keep their runtime usable for
+            %% ordered teardown and retain files until every DOWN is known.
+            Caller ! {reply, Ref, {returned, nil}},
+            fixture_loop(Monitor, Runtimes, {Paths, EarlierFailures}, Resources);
         {request, Caller, Ref, {cleanup_path, Path}} ->
             {Owned, Rest} = lists:partition(fun({P, _, _}) -> P =:= Path end, Runtimes),
             {Closed, Failures} = stop_fixture_runtimes(Owned),
@@ -93,21 +136,46 @@ fixture_loop(Monitor, Runtimes, {Paths, EarlierFailures}) ->
                 true -> [];
                 false -> [{P, Runtime, monitor_runtime(Runtime)} || {P, Runtime, _} <- Owned]
             end,
-            fixture_loop(Monitor, Remaining ++ Rest, {Paths, EarlierFailures ++ CleanupFailures});
+            fixture_loop(Monitor, Remaining ++ Rest, {Paths, EarlierFailures ++ CleanupFailures}, Resources);
         {request, Caller, Ref, finish} ->
-            finish_fixture(Runtimes, Paths, EarlierFailures),
+            finish_fixture(Runtimes, Paths, EarlierFailures, Resources),
             Caller ! {reply, Ref, {returned, nil}};
-        {'DOWN', Monitor, process, _, _} -> finish_fixture(Runtimes, Paths, EarlierFailures);
-        {'EXIT', _, _} -> fixture_loop(Monitor, Runtimes, {Paths, EarlierFailures})
+        {'DOWN', Monitor, process, _, _} -> finish_fixture(Runtimes, Paths, EarlierFailures, Resources);
+        {'EXIT', _, _} -> fixture_loop(Monitor, Runtimes, {Paths, EarlierFailures}, Resources)
     end.
 
-finish_fixture(Runtimes, Paths, EarlierFailures) ->
+finish_fixture(Runtimes, Paths, EarlierFailures, {Workspaces, Sessions}) ->
+    SessionResults = [stop_fixture_session(Session) || Session <- Sessions],
+    SessionsClosed = lists:all(fun({Closed, _}) -> Closed end, SessionResults),
+    SessionFailures = lists:append([Failures || {_, Failures} <- SessionResults]),
     {Closed, Failures} = stop_fixture_runtimes(Runtimes),
-    case Closed of
-        true -> lists:foreach(fun cleanup_files/1, [P || {P, owned} <- maps:to_list(Paths)]);
+    case Closed andalso SessionsClosed of
+        true ->
+            lists:foreach(fun cleanup_files/1, [P || {P, owned} <- maps:to_list(Paths)]),
+            lists:foreach(fun cleanup_workspace_files/1, Workspaces);
         false -> ok
     end,
-    require_fixture_cleanup(EarlierFailures ++ Failures ++ unresolved_paths(Paths)).
+    require_fixture_cleanup(EarlierFailures ++ SessionFailures ++ Failures ++ unresolved_paths(Paths)).
+
+stop_fixture_session(unresolved) ->
+    {false, [fixture_session_start_unresolved]};
+stop_fixture_session({Session, Owner, Monitor}) ->
+    Stop = try
+        case is_process_alive(Owner) of
+            true -> 'albedo@daemon@session':close(Session);
+            false -> ok
+        end,
+        ok
+    catch C:Reason -> {C, Reason}
+    end,
+    {Status, Failure} = await_fixture_down(Monitor, Owner),
+    Failures = case Failure of ok -> []; _ -> [Failure] end,
+    StopFailures = case {Stop, Status} of
+        {ok, _} -> [];
+        {_, down} -> [];
+        {Error, _} -> [{fixture_session_stop_failed, Error}]
+    end,
+    {Status =:= down, Failures ++ StopFailures}.
 
 %% No returned handle means the fixture has no store-DOWN proof for that path.
 %% Preserve files and the startup error; teardown reports its own incomplete ownership.

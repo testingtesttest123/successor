@@ -54,6 +54,42 @@ runtime_failed_start_preserves_files_and_error_test() ->
 usage_assertion_cleanup_test() -> usage_case(assertion), usage_case(success).
 usage_timeout_cleanup_test() -> usage_case(timeout), usage_case(success).
 
+session_failed_start_preserves_workspace_and_error_test() ->
+    Parent = self(),
+    Ref = make_ref(),
+    Test = fun() ->
+        Home = albedo_runtime_test_support:temporary_workspace(),
+        Sentinel = filename:join(Home, <<"keep">>),
+        ok = file:write_file(Sentinel, <<"unresolved session">>),
+        Path = albedo_runtime_test_support:temporary_database(),
+        {ok, Runtime} = albedo_runtime_test_support:start_with_config(Path, {config, [], []}),
+        {ok, _} = 'albedo@daemon@conversation':initialise(element(3, Runtime)),
+        %% No family initializer: use the real session initializer's error path.
+        'harness@session_fixture':create(Runtime, <<"missing-family">>, Home),
+        {ok, Info} = 'albedo@daemon@conversation':get(element(3, Runtime), <<"missing-family">>),
+        Direct = 'albedo@daemon@session':start(Runtime, Info, Home),
+        Wrapped = albedo_runtime_test_support:start_session(Runtime, Info, Home),
+        ?assertMatch({error, _}, Direct),
+        ?assertEqual(Direct, Wrapped),
+        albedo_runtime_test_support:cleanup(Path),
+        Parent ! {failed_session_fixture, Ref, Runtime, Path, Home, Sentinel, Direct, Wrapped}
+    end,
+    Result = eunit:test(albedo_runtime_test_support:with_runtime(Test), [no_tty]),
+    receive
+        {failed_session_fixture, Ref, Runtime, Path, Home, Sentinel, Direct, Wrapped} ->
+            try
+                ?assertMatch({error, _}, Direct),
+                ?assertEqual(Direct, Wrapped),
+                assert_runtime_closed(Runtime),
+                ?assertEqual({error, {ok, <<"unresolved session">>}, true},
+                             {Result, file:read_file(Sentinel), filelib:is_regular(Path)})
+            after
+                _ = file:del_dir_r(Home),
+                lists:foreach(fun file:delete/1, [Path, <<Path/binary, "-wal">>, <<Path/binary, "-shm">>])
+            end
+    after 1000 -> error(session_start_error_was_not_observed)
+    end.
+
 runtime_case(Mode) ->
     Path = albedo_runtime_test_support:temporary_database(),
     Neighbor = <<Path/binary, ".keep">>,

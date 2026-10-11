@@ -6,19 +6,35 @@ import albedo/daemon/context_source
 import albedo/daemon/conversation
 import albedo/daemon/history
 import albedo/daemon/store
+import albedo/harness/extension/selection as extension_selection
+import albedo/harness/extensions
+import albedo/harness/extensions/lcm/extension as lcm
 import albedo/harness/extensions/lcm/graph
+import albedo/harness/extensions/lcm/memory as lcm_memory
 import albedo/harness/extensions/lcm/narration
 import albedo/harness/extensions/lcm/projection_state
 import albedo/harness/extensions/lcm/selection_types as selection
 import albedo/harness/runtime
 import albedo/openai_api/types
+import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
 import gleam/erlang/process
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/otp/actor
 import gleam/result
 import gleeunit/should
+import harness/session_fixture
 import sqlight
+
+@external(erlang, "albedo_runtime_test_support", "with_runtime")
+fn with_runtime(run: fn() -> Nil) -> Dynamic
+
+@external(erlang, "albedo_runtime_test_support", "start_with_config")
+fn fixture_start(
+  path: String,
+  config: extensions.Config,
+) -> Result(runtime.Runtime, actor.StartError)
 
 pub fn graph_indexes_native_recall_costs_without_payload_inventory_test() -> Nil {
   let assert Ok(host) = runtime.start(":memory:")
@@ -84,6 +100,10 @@ fn fixture() -> #(runtime.Runtime, store.Store) {
 
 fn fixture_at(path: String) -> #(runtime.Runtime, store.Store) {
   let assert Ok(host) = runtime.start(path)
+  fixture_host(host)
+}
+
+fn fixture_host(host: runtime.Runtime) -> #(runtime.Runtime, store.Store) {
   let ledger = runtime.ledger(host)
   let assert Ok(_) = conversation.initialise(ledger)
   let assert Ok(_) =
@@ -111,6 +131,105 @@ fn fixture_at(path: String) -> #(runtime.Runtime, store.Store) {
   let assert Ok(_) =
     graph.save_leaves(ledger, "receipt", [graph.Leaf(1, 2, "memory", None)])
   #(host, ledger)
+}
+
+fn raw_fork_fixture() -> runtime.Runtime {
+  let assert Ok(host) = fixture_start(":memory:", extensions.Config([], []))
+  session_fixture.initialise(host)
+  session_fixture.create(host, "raw-source", "/tmp")
+  conversation.commit(
+    runtime.ledger(host),
+    "raw-source",
+    [types.User("one"), types.Assistant("answer"), types.User("tail")],
+    conversation.Idle,
+  )
+  |> should.be_ok
+  host
+}
+
+pub fn fork_without_optional_lcm_storage_copies_raw_prefix_test_() -> Dynamic {
+  with_runtime(fn() {
+    let host = raw_fork_fixture()
+    let ledger = runtime.ledger(host)
+    let tables = fn() {
+      store.read(
+        ledger,
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'lcm_%'",
+        [],
+        decode.field(0, decode.int, decode.success),
+      )
+    }
+    tables() |> should.equal(Ok([0]))
+    history.fork(ledger, "raw-source", "raw-branch", 2) |> should.be_ok
+    conversation.load(ledger, "raw-branch")
+    |> should.equal(Ok([types.User("one"), types.Assistant("answer")]))
+    conversation.load(ledger, "raw-source")
+    |> should.equal(
+      Ok([types.User("one"), types.Assistant("answer"), types.User("tail")]),
+    )
+    // Ordinary forks must not install an optional extension as a side effect.
+    tables() |> should.equal(Ok([0]))
+  })
+}
+
+pub fn fork_with_disabled_lcm_remaps_populated_projection_test_() -> Dynamic {
+  with_runtime(fn() {
+    let installed = [lcm.extension(), lcm_memory.extension()]
+    let assert Ok(started) =
+      fixture_start(":memory:", extensions.Config(installed, []))
+    session_fixture.initialise(started)
+    let #(_host, ledger) = fixture_host(started)
+    extension_selection.enabled(ledger, installed, [], "receipt")
+    |> should.equal(Ok([]))
+    let before = capture(ledger)
+    let selected = folded(before)
+    projection_state.commit(
+      ledger,
+      "receipt",
+      before.expected,
+      selected,
+      graph.unguarded,
+    )
+    |> should.equal(Ok(True))
+    history.fork(ledger, "receipt", "disabled-branch", 3) |> should.be_ok
+    let assert Ok(branch) =
+      graph.capture_inventory(ledger, "disabled-branch", profile())
+    let assert [node] = branch.inventory.nodes
+    let assert [_, tail] = branch.inventory.units
+    branch.previous.source |> should.equal(Some(branch.inventory.source))
+    branch.inventory.source.session |> should.equal("disabled-branch")
+    branch.previous.generation |> should.equal(1)
+    branch.previous.refs
+    |> should.equal([
+      selection.Recall(node.id, node.cost_key),
+      selection.Raw(tail.first_seq, tail.cost_key),
+    ])
+    branch.previous.refs |> should.not_equal(selection.references(selected))
+    should.be_true(tail.first_seq > 3)
+    capture(ledger).previous.refs
+    |> should.equal(selection.references(selected))
+    extension_selection.enabled(ledger, installed, [], "disabled-branch")
+    |> should.equal(Ok([]))
+    Nil
+  })
+}
+
+pub fn fork_rejects_damaged_installed_projection_storage_atomically_test_() -> Dynamic {
+  with_runtime(fn() {
+    let host = raw_fork_fixture()
+    let ledger = runtime.ledger(host)
+    store.write(ledger, "CREATE TABLE lcm_projection_state(session TEXT)", [])
+    |> should.be_ok
+    history.fork(ledger, "raw-source", "broken-branch", 2) |> should.be_error
+    conversation.get(ledger, "broken-branch") |> should.be_error
+    store.read(
+      ledger,
+      "SELECT COUNT(*) FROM transcript WHERE session='broken-branch'",
+      [],
+      decode.field(0, decode.int, decode.success),
+    )
+    |> should.equal(Ok([0]))
+  })
 }
 
 fn profile() -> context_cost.CostProfile {

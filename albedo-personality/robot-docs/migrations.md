@@ -296,5 +296,8 @@ source/graph/profile/identity/receipt generation checks plus the caller's owner
 validator. Restart discards stale or unsupported receipts while retaining their
 generation. Fork copying remaps complete surviving references onto branch-local
 source/node keys; a crossing or incomplete selection leaves no usable prior.
+Fork receipt inheritance is a no-op when optional LCM projection storage is
+absent and never installs it. Existing projection storage is read and validated
+even when the LCM extension is disabled; storage errors still roll back the fork.
 These primitives do not change the active compaction selector or provider request
 admission.

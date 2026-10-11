@@ -32,6 +32,36 @@ import harness/session_fixture
 @external(erlang, "albedo_session_memory_test_support", "late_composition")
 fn late_composition(runtime_owner: process.Pid, start: fn() -> a) -> a
 
+@external(erlang, "albedo_runtime_test_support", "with_runtime")
+fn with_runtime(run: fn() -> Nil) -> Dynamic
+
+@external(erlang, "albedo_runtime_test_support", "start_with_config")
+fn fixture_start_runtime(
+  path: String,
+  config: extensions.Config,
+) -> Result(runtime.Runtime, actor.StartError)
+
+@external(erlang, "albedo_runtime_test_support", "start_session")
+fn fixture_start_session(
+  host: runtime.Runtime,
+  info: conversation.Info,
+  home: String,
+) -> Result(session.Session, actor.StartError)
+
+@external(erlang, "albedo_session_memory_test_support", "fixture_cleanup")
+fn fixture_cleanup(
+  start: fn() -> #(runtime.Runtime, String, session.Session),
+) -> Nil
+
+pub fn background_memory_fixture_assertion_and_timeout_cleanup_test() -> Nil {
+  fixture_cleanup(fn() {
+    let #(host, home) = native_session_fixture(process.new_subject())
+    let assert Ok(info) = conversation.get(runtime.ledger(host), "memory-owner")
+    let assert Ok(owner) = fixture_start_session(host, info, home)
+    #(host, home, owner)
+  })
+}
+
 fn ended(job: memory.Job) -> process.Down {
   let assert Ok(down) =
     process.new_selector()
@@ -247,7 +277,7 @@ fn native_session_fixture_with(
     )
   let installed = [bundle, lcm_memory.extension(), provider]
   let assert Ok(host) =
-    runtime.start_with_config(
+    fixture_start_runtime(
       ":memory:",
       extensions.Config(installed, ["lcm-memory", "memory-provider"]),
     )
@@ -273,11 +303,17 @@ fn native_session_fixture_with(
   #(host, home)
 }
 
-pub fn actual_session_load_runs_memory_without_kernel_or_foreground_busy_test() -> Nil {
+pub fn actual_session_load_runs_memory_without_kernel_or_foreground_busy_test_() -> Dynamic {
+  with_runtime(
+    actual_session_load_runs_memory_without_kernel_or_foreground_busy_case,
+  )
+}
+
+fn actual_session_load_runs_memory_without_kernel_or_foreground_busy_case() -> Nil {
   let calls = process.new_subject()
   let #(host, home) = native_session_fixture(calls)
   let assert Ok(info) = conversation.get(runtime.ledger(host), "memory-owner")
-  let assert Ok(owner) = session.start(host, info, home)
+  let assert Ok(owner) = fixture_start_session(host, info, home)
   let first = process.receive(calls, 1000)
   // Load recovery must begin below overflow through the actual session actor.
   first |> should.be_ok
@@ -301,7 +337,13 @@ pub fn actual_session_load_runs_memory_without_kernel_or_foreground_busy_test() 
   cleanup_workspace(home)
 }
 
-pub fn late_composition_only_success_rearms_quiet_memory_without_new_source_test() -> Nil {
+pub fn late_composition_only_success_rearms_quiet_memory_without_new_source_test_() -> Dynamic {
+  with_runtime(
+    late_composition_only_success_rearms_quiet_memory_without_new_source_case,
+  )
+}
+
+fn late_composition_only_success_rearms_quiet_memory_without_new_source_case() -> Nil {
   let calls = process.new_subject()
   let #(host, home) = native_session_fixture(calls)
   let db = runtime.ledger(host)
@@ -309,7 +351,7 @@ pub fn late_composition_only_success_rearms_quiet_memory_without_new_source_test
   let assert Ok(runtime_owner) = process.subject_owner(host.subject)
   let owner =
     late_composition(runtime_owner, fn() {
-      let assert Ok(owner) = session.start(host, info, home)
+      let assert Ok(owner) = fixture_start_session(host, info, home)
       owner
     })
   // Actual composition installation happened after the native15s deadline.
@@ -326,7 +368,13 @@ pub fn late_composition_only_success_rearms_quiet_memory_without_new_source_test
   idle.kernel |> should.equal(None)
 }
 
-pub fn completion_notifies_actual_adoption_once_but_not_cached_preparation_test() -> Nil {
+pub fn completion_notifies_actual_adoption_once_but_not_cached_preparation_test_() -> Dynamic {
+  with_runtime(
+    completion_notifies_actual_adoption_once_but_not_cached_preparation_case,
+  )
+}
+
+fn completion_notifies_actual_adoption_once_but_not_cached_preparation_case() -> Nil {
   let calls = process.new_subject()
   let adopted = process.new_subject()
   let #(host, home) = native_session_fixture(calls)
@@ -355,7 +403,13 @@ pub fn stale_or_cancelled_completion_cannot_rearm_an_attempted_watermark_test() 
   memory.quiet(valid) |> memory.needed |> should.be_false
 }
 
-pub fn closed_owner_ignores_late_composition_and_has_no_memory_call_test() -> Nil {
+pub fn closed_owner_ignores_late_composition_and_has_no_memory_call_test_() -> Dynamic {
+  with_runtime(
+    closed_owner_ignores_late_composition_and_has_no_memory_call_case,
+  )
+}
+
+fn closed_owner_ignores_late_composition_and_has_no_memory_call_case() -> Nil {
   let calls = process.new_subject()
   let preparing = process.new_subject()
   let #(host, home) =
@@ -368,7 +422,7 @@ pub fn closed_owner_ignores_late_composition_and_has_no_memory_call_test() -> Ni
       }),
     ])
   let assert Ok(info) = conversation.get(runtime.ledger(host), "memory-owner")
-  let assert Ok(owner) = session.start(host, info, home)
+  let assert Ok(owner) = fixture_start_session(host, info, home)
   let assert Ok(gate) = process.receive(preparing, 1000)
   let assert Ok(worker) = process.subject_owner(gate)
   let monitor = process.monitor(worker)
@@ -432,7 +486,13 @@ fn fence_owner(db: store.Store) -> process.Subject(FenceMessage) {
   started.data
 }
 
-pub fn close_fence_covers_queued_and_already_checked_graph_transactions_test() -> Nil {
+pub fn close_fence_covers_queued_and_already_checked_graph_transactions_test_() -> Dynamic {
+  with_runtime(
+    close_fence_covers_queued_and_already_checked_graph_transactions_case,
+  )
+}
+
+fn close_fence_covers_queued_and_already_checked_graph_transactions_case() -> Nil {
   list.each([False, True], fn(already_checked) {
     let #(host, home) = native_session_fixture(process.new_subject())
     let db = runtime.ledger(host)
@@ -523,7 +583,13 @@ pub fn close_fence_covers_queued_and_already_checked_graph_transactions_test() -
   })
 }
 
-pub fn actor_load_settles_legacy_rows_before_memory_captures_source_identity_test() -> Nil {
+pub fn actor_load_settles_legacy_rows_before_memory_captures_source_identity_test_() -> Dynamic {
+  with_runtime(
+    actor_load_settles_legacy_rows_before_memory_captures_source_identity_case,
+  )
+}
+
+fn actor_load_settles_legacy_rows_before_memory_captures_source_identity_case() -> Nil {
   let calls = process.new_subject()
   let #(host, home) = native_session_fixture(calls)
   let db = runtime.ledger(host)
@@ -558,7 +624,7 @@ pub fn actor_load_settles_legacy_rows_before_memory_captures_source_identity_tes
   |> should.be_ok
   conversation.load_sources(db, "memory-owner") |> should.not_equal(Ok(settled))
   let assert Ok(info) = conversation.get(db, "memory-owner")
-  let assert Ok(owner) = session.start(host, info, home)
+  let assert Ok(owner) = fixture_start_session(host, info, home)
   let assert Ok(_gate) = process.receive(calls, 1000)
   conversation.last_seq(db, "memory-owner") |> should.equal(Ok(before))
   conversation.load_sources(db, "memory-owner") |> should.equal(Ok(settled))
@@ -567,12 +633,18 @@ pub fn actor_load_settles_legacy_rows_before_memory_captures_source_identity_tes
   cleanup_workspace(home)
 }
 
-pub fn source_notifications_coalesce_and_stale_return_keeps_native_usage_test() -> Nil {
+pub fn source_notifications_coalesce_and_stale_return_keeps_native_usage_test_() -> Dynamic {
+  with_runtime(
+    source_notifications_coalesce_and_stale_return_keeps_native_usage_case,
+  )
+}
+
+fn source_notifications_coalesce_and_stale_return_keeps_native_usage_case() -> Nil {
   let calls = process.new_subject()
   let #(host, home) = native_session_fixture(calls)
   let db = runtime.ledger(host)
   let assert Ok(info) = conversation.get(db, "memory-owner")
-  let assert Ok(owner) = session.start(host, info, home)
+  let assert Ok(owner) = fixture_start_session(host, info, home)
   let assert Ok(first) = process.receive(calls, 1000)
   conversation.commit_from(
     db,
@@ -618,12 +690,18 @@ pub fn source_notifications_coalesce_and_stale_return_keeps_native_usage_test() 
   cleanup_workspace(home)
 }
 
-pub fn closed_actor_cancels_memory_and_loaded_actor_recovers_durable_backlog_test() -> Nil {
+pub fn closed_actor_cancels_memory_and_loaded_actor_recovers_durable_backlog_test_() -> Dynamic {
+  with_runtime(
+    closed_actor_cancels_memory_and_loaded_actor_recovers_durable_backlog_case,
+  )
+}
+
+fn closed_actor_cancels_memory_and_loaded_actor_recovers_durable_backlog_case() -> Nil {
   let calls = process.new_subject()
   let #(host, home) = native_session_fixture(calls)
   let db = runtime.ledger(host)
   let assert Ok(info) = conversation.get(db, "memory-owner")
-  let assert Ok(owner) = session.start(host, info, home)
+  let assert Ok(owner) = fixture_start_session(host, info, home)
   let assert Ok(first) = process.receive(calls, 1000)
   let assert Ok(helper) = process.subject_owner(first)
   let monitor = process.monitor(helper)
@@ -633,7 +711,7 @@ pub fn closed_actor_cancels_memory_and_loaded_actor_recovers_durable_backlog_tes
   |> process.selector_receive(1000)
   |> should.equal(Ok(Nil))
   graph.last_seq(db, "memory-owner") |> should.equal(Ok(0))
-  let assert Ok(owner) = session.start(host, info, home)
+  let assert Ok(owner) = fixture_start_session(host, info, home)
   let assert Ok(second) = process.receive(calls, 1000)
   process.send(second, Nil)
   let complete = process.new_subject()
@@ -647,7 +725,13 @@ pub fn closed_actor_cancels_memory_and_loaded_actor_recovers_durable_backlog_tes
   cleanup_workspace(home)
 }
 
-pub fn suspension_cancels_and_reenabling_reconsiders_without_new_identity_test() -> Nil {
+pub fn suspension_cancels_and_reenabling_reconsiders_without_new_identity_test_() -> Dynamic {
+  with_runtime(
+    suspension_cancels_and_reenabling_reconsiders_without_new_identity_case,
+  )
+}
+
+fn suspension_cancels_and_reenabling_reconsiders_without_new_identity_case() -> Nil {
   let calls = process.new_subject()
   let #(host, home) = native_session_fixture(calls)
   let db = runtime.ledger(host)
@@ -659,7 +743,7 @@ pub fn suspension_cancels_and_reenabling_reconsiders_without_new_identity_test()
       decode.field(0, decode.string, decode.success),
     )
   let assert Ok(info) = conversation.get(db, "memory-owner")
-  let assert Ok(owner) = session.start(host, info, home)
+  let assert Ok(owner) = fixture_start_session(host, info, home)
   let assert Ok(first) = process.receive(calls, 1000)
   let assert Ok(helper) = process.subject_owner(first)
   let monitor = process.monitor(helper)
@@ -701,7 +785,13 @@ pub fn suspension_cancels_and_reenabling_reconsiders_without_new_identity_test()
   cleanup_workspace(home)
 }
 
-pub fn unselected_actor_load_and_inspection_do_not_start_memory_jobs_test() -> Nil {
+pub fn unselected_actor_load_and_inspection_do_not_start_memory_jobs_test_() -> Dynamic {
+  with_runtime(
+    unselected_actor_load_and_inspection_do_not_start_memory_jobs_case,
+  )
+}
+
+fn unselected_actor_load_and_inspection_do_not_start_memory_jobs_case() -> Nil {
   let calls = process.new_subject()
   let #(host, home) = native_session_fixture(calls)
   let db = runtime.ledger(host)
@@ -715,7 +805,7 @@ pub fn unselected_actor_load_and_inspection_do_not_start_memory_jobs_test() -> N
   )
   |> should.be_ok
   let assert Ok(info) = conversation.get(db, "memory-owner")
-  let assert Ok(owner) = session.start(host, info, home)
+  let assert Ok(owner) = fixture_start_session(host, info, home)
   let report = actor.call(owner, 1000, session.Idle)
   report.kernel |> should.equal(None)
   process.receive(calls, 50) |> should.equal(Error(Nil))

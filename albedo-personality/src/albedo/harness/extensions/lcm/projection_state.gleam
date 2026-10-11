@@ -379,7 +379,17 @@ pub fn inherit_fork_in(
   checkpoint: Int,
   source_seqs: List(Int),
 ) -> Result(Nil, String) {
-  use previous <- result.try(capture_in(db, source))
+  use installed <- result.try(store.rows(
+    db,
+    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='lcm_projection_state'",
+    [],
+    decode.field(0, decode.int, decode.success),
+  ))
+  use previous <- result.try(case installed {
+    [0] -> Ok(selection.empty_receipt(0, None))
+    [1] -> capture_in(db, source)
+    _ -> Error("could not inspect installed LCM projection storage")
+  })
   case previous.source, previous.profile {
     Some(_), Some(profile) -> {
       use branch_seqs <- result.try(store.rows(

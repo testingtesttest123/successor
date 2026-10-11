@@ -1,5 +1,56 @@
 -module(albedo_session_memory_test_support).
--export([queued/1, late_composition/2, count_reads/2]).
+-export([queued/1, late_composition/2, count_reads/2, fixture_cleanup/1]).
+-include_lib("eunit/include/eunit.hrl").
+
+%% Exercise the real native memory fixture under EUnit's assertion and killed
+%% body paths. Observe ownership before fallback cleanup of this known fixture.
+fixture_cleanup(Start) ->
+    lists:foreach(fun(Mode) -> fixture_cleanup(Start, Mode) end,
+                  [assertion, timeout, success]).
+
+fixture_cleanup(Start, Mode) ->
+    Parent = self(),
+    Ref = make_ref(),
+    Test = fun() ->
+        Fixture = Start(),
+        Parent ! {known_memory_fixture, Ref, Fixture},
+        case Mode of
+            assertion -> ?assert(false);
+            timeout -> receive intentional_memory_fixture_hang -> ok end;
+            success -> ok
+        end
+    end,
+    {setup, Setup, Cleanup, Instantiate} = albedo_runtime_test_support:with_runtime(Test),
+    Descriptor = {setup, Setup, Cleanup,
+                  fun(Owner) -> {timeout, 1, Instantiate(Owner)} end},
+    Expected = case Mode of success -> ok; _ -> error end,
+    Result = eunit:test(Descriptor, [no_tty, {scale_timeouts, 1}]),
+    Fixture = receive {known_memory_fixture, Ref, Known} -> Known
+              after 1000 -> error(memory_fixture_did_not_start)
+              end,
+    {Runtime, Home, Session} = Fixture,
+    {runtime, Subject, Store, Shared} = Runtime,
+    {ok, RuntimeOwner} = 'gleam@erlang@process':subject_owner(Subject),
+    {ok, SessionOwner} = 'gleam@erlang@process':subject_owner(Session),
+    Observation = {is_process_alive(RuntimeOwner),
+                   is_process_alive('albedo@daemon@store':owner(Store)),
+                   persistent_term:get(Shared, absent) =/= absent,
+                   is_process_alive(SessionOwner), filelib:is_dir(Home)},
+    try
+        ?assertEqual(Expected, Result),
+        ?assertEqual({false, false, false, false, false}, Observation)
+    after
+        %% A red regression must not leave its deliberately failed fixture alive.
+        case is_process_alive(SessionOwner) of
+            true -> 'albedo@daemon@session':close(Session);
+            false -> ok
+        end,
+        case is_process_alive(RuntimeOwner) of
+            true -> 'albedo@harness@runtime':stop(Runtime);
+            false -> ok
+        end,
+        _ = file:del_dir_r(Home)
+    end.
 
 %% The runtime's accepted composition request remains queued beyond the
 %% production15s deadline. Always release its suspension, including test errors.
