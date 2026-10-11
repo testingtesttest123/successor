@@ -1,6 +1,7 @@
 //// Converts durable provider output into the portable model-input subset.
 //// Raw replay remains untouched only for the provider/protocol that produced it.
 
+import albedo/context_cost
 import albedo/daemon/message_content as events
 import albedo/daemon/transcript
 import albedo/openai_api/replay
@@ -10,9 +11,257 @@ import gleam/dynamic
 import gleam/dynamic/decode
 import gleam/json
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
+
+/// Non-payload facts sufficient to price complete native units on either wire.
+/// Consecutive transferred Responses rows retain their Chat coalescing boundary.
+pub type ChatPrice {
+  Direct(tokens: Int)
+  Fragment(text_bytes: Int, has_text: Bool, call_bytes: Int, calls: Int)
+}
+
+pub type CostFacts {
+  CostFacts(
+    native_tokens: Int,
+    provider: Option(String),
+    protocol: Option(types.Protocol),
+    responses: Result(Int, String),
+    chat: Result(ChatPrice, String),
+  )
+}
+
+pub fn cost_facts(entry: transcript.Entry) -> CostFacts {
+  let native = context_cost.estimate_input(entry.input)
+  case entry.input {
+    types.Replay(item) -> {
+      // Force transfer independently of any saved provider name.
+      let foreign = transcript.Entry(..entry, provider: None)
+      let responses =
+        for_model([foreign], "", types.Responses)
+        |> result.map(context_cost.estimate_inputs)
+      let chat = case types.replay_protocol(item) {
+        types.ChatCompletions ->
+          for_model([foreign], "", types.ChatCompletions)
+          |> result.map(fn(inputs) {
+            Direct(context_cost.estimate_inputs(inputs))
+          })
+        types.Responses ->
+          response_semantics(item)
+          |> result.map(fn(semantic) {
+            case semantic {
+              ResponseReasoning("") -> Fragment(0, False, 0, 0)
+              ResponseReasoning(text) -> text_fragment(reasoning_summary(text))
+              ResponseText(text) -> text_fragment(text)
+              ResponseCall(call) ->
+                Fragment(
+                  0,
+                  False,
+                  string.byte_size(json.to_string(replay.tool_call(call))),
+                  1,
+                )
+            }
+          })
+      }
+      CostFacts(
+        native,
+        entry.provider,
+        Some(types.replay_protocol(item)),
+        responses,
+        chat,
+      )
+    }
+    _ -> CostFacts(native, entry.provider, None, Ok(native), Ok(Direct(native)))
+  }
+}
+
+fn text_fragment(text: String) -> ChatPrice {
+  Fragment(string.byte_size(json.to_string(json.string(text))) - 2, True, 0, 0)
+}
+
+/// Same projection transitions as for_model; only immutable scalar facts cross this seam.
+pub fn estimate_facts(
+  facts: List(CostFacts),
+  provider: Option(String),
+  protocol: types.Protocol,
+) -> Result(Int, String) {
+  price_facts(facts, provider, protocol, 0, Fragment(0, False, 0, 0))
+}
+
+fn price_facts(
+  facts: List(CostFacts),
+  provider: Option(String),
+  protocol: types.Protocol,
+  total: Int,
+  pending: ChatPrice,
+) -> Result(Int, String) {
+  case facts {
+    [] -> Ok(total + fragment_tokens(pending))
+    [fact, ..rest] -> {
+      let own =
+        provider != None
+        && fact.provider == provider
+        && fact.protocol == Some(protocol)
+      case own, protocol {
+        True, _ ->
+          price_facts(
+            rest,
+            provider,
+            protocol,
+            total + fragment_tokens(pending) + fact.native_tokens,
+            Fragment(0, False, 0, 0),
+          )
+        False, types.Responses -> {
+          use tokens <- result.try(fact.responses)
+          price_facts(rest, provider, protocol, total + tokens, pending)
+        }
+        False, types.ChatCompletions -> {
+          use chat <- result.try(fact.chat)
+          case chat, pending {
+            Direct(tokens), _ ->
+              price_facts(
+                rest,
+                provider,
+                protocol,
+                total + fragment_tokens(pending) + tokens,
+                Fragment(0, False, 0, 0),
+              )
+            Fragment(t, h, c, n), Fragment(pt, ph, pc, pn) ->
+              price_facts(
+                rest,
+                provider,
+                protocol,
+                total,
+                Fragment(pt + t, ph || h, pc + c, pn + n),
+              )
+            _, Direct(_) -> Error("invalid pending Chat price")
+          }
+        }
+      }
+    }
+  }
+}
+
+fn fragment_tokens(fragment: ChatPrice) -> Int {
+  case fragment {
+    Fragment(_, False, _, 0) -> 0
+    Fragment(text, has_text, call_bytes, calls) -> {
+      let shell =
+        string.byte_size(
+          json.to_string(replay.message(json.null(), "", None, [])),
+        )
+      let content = case has_text {
+        True -> text + 2 - 4
+        False -> 0
+      }
+      let tools = case calls {
+        0 -> 0
+        _ -> {
+          let blank = types.ToolCall("", "", "")
+          let with_call =
+            string.byte_size(
+              json.to_string(replay.message(json.null(), "", None, [blank])),
+            )
+          let blank_bytes =
+            string.byte_size(json.to_string(replay.tool_call(blank)))
+          with_call - shell - blank_bytes + call_bytes + calls - 1
+        }
+      }
+      { shell + content + tools + 3 } / 4 + 12
+    }
+    Direct(tokens) -> tokens
+  }
+}
+
+/// Durable index boundary: scalar projection facts only, never text or replay bodies.
+pub fn cost_facts_json(facts: CostFacts) -> json.Json {
+  let responses = case facts.responses {
+    Ok(tokens) -> [#("responses", json.int(tokens))]
+    Error(message) -> [#("responses_error", json.string(message))]
+  }
+  let chat = case facts.chat {
+    Error(message) -> [#("chat_error", json.string(message))]
+    Ok(Direct(tokens)) -> [#("chat", json.int(tokens))]
+    Ok(Fragment(text, has_text, bytes, calls)) -> [
+      #("text_bytes", json.int(text)),
+      #("has_text", json.bool(has_text)),
+      #("call_bytes", json.int(bytes)),
+      #("calls", json.int(calls)),
+    ]
+  }
+  json.object(list.append(
+    [
+      #("native", json.int(facts.native_tokens)),
+      #(
+        "provider",
+        option.map(facts.provider, json.string) |> option.unwrap(json.null()),
+      ),
+      #(
+        "protocol",
+        option.map(facts.protocol, fn(p) { json.string(types.protocol_name(p)) })
+          |> option.unwrap(json.null()),
+      ),
+    ],
+    list.append(responses, chat),
+  ))
+}
+
+pub fn cost_facts_decoder() -> decode.Decoder(CostFacts) {
+  use native <- decode.field("native", decode.int)
+  use provider <- decode.field("provider", decode.optional(decode.string))
+  use protocol <- decode.field(
+    "protocol",
+    decode.optional(types.protocol_decoder()),
+  )
+  use response_error <- decode.optional_field(
+    "responses_error",
+    None,
+    decode.optional(decode.string),
+  )
+  use response_tokens <- decode.optional_field("responses", 0, decode.int)
+  use chat_error <- decode.optional_field(
+    "chat_error",
+    None,
+    decode.optional(decode.string),
+  )
+  use direct <- decode.optional_field("chat", None, decode.optional(decode.int))
+  use text <- decode.optional_field("text_bytes", 0, decode.int)
+  use has_text <- decode.optional_field("has_text", False, decode.bool)
+  use bytes <- decode.optional_field("call_bytes", 0, decode.int)
+  use calls <- decode.optional_field("calls", 0, decode.int)
+  decode.success(
+    CostFacts(
+      native,
+      provider,
+      protocol,
+      case response_error {
+        Some(error) -> Error(error)
+        None -> Ok(response_tokens)
+      },
+      case chat_error, direct {
+        Some(error), _ -> Error(error)
+        None, Some(tokens) -> Ok(Direct(tokens))
+        None, None -> Ok(Fragment(text, has_text, bytes, calls))
+      },
+    ),
+  )
+}
+
+/// A native image fit changes dimensions, with every other projection fact retained.
+pub fn adjust_image_tokens(facts: CostFacts, delta: Int) -> CostFacts {
+  CostFacts(
+    ..facts,
+    native_tokens: facts.native_tokens + delta,
+    responses: result.map(facts.responses, fn(tokens) { tokens + delta }),
+    chat: result.map(facts.chat, fn(chat) {
+      case chat {
+        Direct(tokens) -> Direct(tokens + delta)
+        fragment -> fragment
+      }
+    }),
+  )
+}
 
 pub fn for_model(
   newest_first: List(transcript.Entry),

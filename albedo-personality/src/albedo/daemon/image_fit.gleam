@@ -99,7 +99,7 @@ fn images(input: types.Input) -> List(types.Image) {
 }
 
 /// The hash albedo_images.erl stores `image`'s payload under.
-fn source(image: types.Image) -> String {
+pub fn source(image: types.Image) -> String {
   case types.image_data(image) {
     types.StoredData(hash, _, _) -> hash
     types.InlineData(data) -> hash(data)

@@ -1,11 +1,12 @@
 //// Optional request-history projection, not a transcript rewrite.
 
+import albedo/context_cost
+import albedo/daemon/message_content as events
 import albedo/daemon/note
 import albedo/daemon/store
 import albedo/harness/extensions/lcm/narration_types
 import albedo/harness/request_context
 import albedo/openai_api/types
-import gleam/dynamic/decode
 import gleam/int
 import gleam/json
 import gleam/list
@@ -165,60 +166,7 @@ pub fn compose_prior(
 pub fn assistant_parts(
   item: types.ReplayItem,
 ) -> Result(#(String, List(types.ToolCall)), Nil) {
-  let decoder = case types.replay_protocol(item) {
-    types.ChatCompletions -> chat_parts_decoder()
-    types.Responses -> responses_parts_decoder()
-  }
-  types.inspect_item(item, decoder) |> result.replace_error(Nil)
-}
-
-fn chat_parts_decoder() -> decode.Decoder(#(String, List(types.ToolCall))) {
-  use text <- decode.optional_field(
-    "content",
-    "",
-    decode.optional(decode.string) |> decode.map(option.unwrap(_, "")),
-  )
-  use calls <- decode.optional_field(
-    "tool_calls",
-    [],
-    decode.list(call_decoder()),
-  )
-  decode.success(#(text, calls))
-}
-
-/// A Responses output item as text and calls: a message's text parts, or one
-/// function call. Any other item decodes to nothing.
-fn responses_parts_decoder() -> decode.Decoder(#(String, List(types.ToolCall))) {
-  use kind <- decode.field("type", decode.string)
-  case kind {
-    "message" -> {
-      use parts <- decode.optional_field(
-        "content",
-        [],
-        decode.list(decode.optional_field(
-          "text",
-          "",
-          decode.string,
-          decode.success,
-        )),
-      )
-      decode.success(#(string.concat(parts), []))
-    }
-    "function_call" -> {
-      use id <- decode.field("call_id", decode.string)
-      use name <- decode.field("name", decode.string)
-      use args <- decode.field("arguments", decode.string)
-      decode.success(#("", [types.ToolCall(id, name, args)]))
-    }
-    _ -> decode.success(#("", []))
-  }
-}
-
-fn call_decoder() -> decode.Decoder(types.ToolCall) {
-  use id <- decode.field("id", decode.string)
-  use name <- decode.subfield(["function", "name"], decode.string)
-  use args <- decode.subfield(["function", "arguments"], decode.string)
-  decode.success(types.ToolCall(id, name, args))
+  events.assistant_parts(item)
 }
 
 /// Whether `input` is a capabilities-changed note. A compaction rebuilds the
@@ -437,78 +385,28 @@ pub fn project(
 
 /// A deliberately approximate request-size estimate. It is used only when a
 /// provider has not supplied a tokenizer for the current request.
-fn estimate_text(text: String) -> Int {
-  { string.byte_size(text) + 3 } / 4
-}
-
 pub fn input_bytes(input: types.Input) -> Int {
-  case input {
-    types.User(text) | types.Assistant(text) -> string.byte_size(text)
-    types.UserImage(text, images) ->
-      string.byte_size(text) + fold_cost(images, types.image_size)
-    types.ToolOutput(id, output, images) ->
-      string.byte_size(id)
-      + string.byte_size(output)
-      + fold_cost(images, types.image_size)
-    types.Replay(item) -> types.replay_bytes(item)
-  }
+  context_cost.input_bytes(input)
 }
 
 pub fn inputs_bytes(inputs: List(types.Input)) -> Int {
-  fold_cost(inputs, input_bytes)
-}
-
-/// The total of `cost` over `items`.
-fn fold_cost(items: List(a), cost: fn(a) -> Int) -> Int {
-  list.fold(items, 0, fn(total, item) { total + cost(item) })
+  context_cost.inputs_bytes(inputs)
 }
 
 pub fn estimate_input(input: types.Input) -> Int {
-  // Covers request framing, roles, and content-part keys without pretending
-  // to be an exact provider tokenizer. Image payload bytes affect transport
-  // size, not vision tokens, so image cost is estimated from dimensions.
-  case input {
-    types.UserImage(text, images) ->
-      estimate_text(text)
-      + fold_cost(images, fn(image) { estimate_image(image) + 20 })
-    types.ToolOutput(id, output, [_, ..] as images) ->
-      estimate_text(id <> output)
-      + fold_cost(images, fn(image) { estimate_image(image) + 20 })
-      + 12
-    _ -> { input_bytes(input) + 3 } / 4 + 12
-  }
+  context_cost.estimate_input(input)
 }
 
-fn estimate_image(image: types.Image) -> Int {
-  let #(_, width, height, _) = types.image_meta(image)
-  image_tokens(width, height)
-}
-
-/// Provider-neutral approximation based on 512px vision tiles. Providers may
-/// tokenize images differently; this is only the compaction trigger signal.
 pub fn image_tokens(width: Int, height: Int) -> Int {
-  85 + 170 * ceiling_div(width, 512) * ceiling_div(height, 512)
-}
-
-fn ceiling_div(value: Int, divisor: Int) -> Int {
-  { value + divisor - 1 } / divisor
+  context_cost.image_tokens(width, height)
 }
 
 pub fn estimate_inputs(inputs: List(types.Input)) -> Int {
-  fold_cost(inputs, estimate_input)
-}
-
-fn estimate_tools(tools: List(types.Tool)) -> Int {
-  fold_cost(tools, fn(tool) {
-    estimate_text(tool.name)
-    + estimate_text(tool.description)
-    + estimate_text(json.to_string(tool.parameters))
-    + 20
-  })
+  context_cost.estimate_inputs(inputs)
 }
 
 pub fn estimate_pinned(instructions: String, tools: List(types.Tool)) -> Int {
-  16 + estimate_text(instructions) + estimate_tools(tools)
+  context_cost.estimate_pinned(instructions, tools)
 }
 
 /// Where a saved compaction splits history: after `users` user messages. Each

@@ -156,3 +156,89 @@ pub fn calls(input: types.Input) -> List(types.ToolCall) {
     _ -> []
   }
 }
+
+pub fn assistant_parts(
+  item: types.ReplayItem,
+) -> Result(#(String, List(types.ToolCall)), Nil) {
+  let decoder = case types.replay_protocol(item) {
+    types.ChatCompletions -> chat_parts_decoder()
+    types.Responses -> responses_parts_decoder()
+  }
+  types.inspect_item(item, decoder) |> result.replace_error(Nil)
+}
+
+/// Portable metadata accepts the native wire's explicit null empty call list.
+pub fn portable_assistant_parts(
+  item: types.ReplayItem,
+) -> Result(#(String, List(types.ToolCall)), Nil) {
+  let decoder = case types.replay_protocol(item) {
+    types.ChatCompletions -> nullable_chat_parts_decoder()
+    types.Responses -> responses_parts_decoder()
+  }
+  types.inspect_item(item, decoder) |> result.replace_error(Nil)
+}
+
+fn nullable_chat_parts_decoder() -> decode.Decoder(
+  #(String, List(types.ToolCall)),
+) {
+  use text <- decode.optional_field(
+    "content",
+    "",
+    decode.optional(decode.string) |> decode.map(option.unwrap(_, "")),
+  )
+  use calls <- decode.optional_field(
+    "tool_calls",
+    None,
+    decode.optional(decode.list(call_decoder())),
+  )
+  decode.success(#(text, option.unwrap(calls, [])))
+}
+
+fn chat_parts_decoder() -> decode.Decoder(#(String, List(types.ToolCall))) {
+  use text <- decode.optional_field(
+    "content",
+    "",
+    decode.optional(decode.string) |> decode.map(option.unwrap(_, "")),
+  )
+  use calls <- decode.optional_field(
+    "tool_calls",
+    [],
+    decode.list(call_decoder()),
+  )
+  decode.success(#(text, calls))
+}
+
+/// A Responses output item as text and calls: a message's text parts, or one
+/// function call. Any other item decodes to nothing.
+fn responses_parts_decoder() -> decode.Decoder(#(String, List(types.ToolCall))) {
+  use kind <- decode.field("type", decode.string)
+  case kind {
+    "message" -> {
+      use parts <- decode.optional_field(
+        "content",
+        [],
+        decode.list(decode.optional_field(
+          "text",
+          "",
+          decode.string,
+          decode.success,
+        )),
+      )
+      decode.success(#(string.concat(parts), []))
+    }
+    "function_call" -> {
+      use id <- decode.field("call_id", decode.string)
+      use name <- decode.field("name", decode.string)
+      use args <- decode.field("arguments", decode.string)
+      decode.success(#("", [types.ToolCall(id, name, args)]))
+    }
+    _ -> decode.success(#("", []))
+  }
+}
+
+fn call_decoder() -> decode.Decoder(types.ToolCall) {
+  use id <- decode.field("id", decode.string)
+  use name <- decode.subfield(["function", "name"], decode.string)
+  use args <- decode.subfield(["function", "arguments"], decode.string)
+  decode.success(types.ToolCall(id, name, args))
+}

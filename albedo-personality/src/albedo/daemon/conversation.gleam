@@ -1,3 +1,4 @@
+import albedo/daemon/context_source
 import albedo/daemon/family
 import albedo/daemon/image_fit
 import albedo/daemon/images
@@ -457,6 +458,11 @@ pub fn initialise(store: store.Store) -> Result(Nil, String) {
         "DROP INDEX IF EXISTS transcript_calls_pending; DROP INDEX IF EXISTS transcript_summary_pending; CREATE INDEX IF NOT EXISTS transcript_entries_pending ON transcript(seq) WHERE calls_indexed=0 OR summary_indexed=0",
       ))
       use _ <- result.try(operations.initialise(db))
+      use _ <- result.try(context_source.initialise_in(db))
+      use _ <- result.try(store.exec(
+        db,
+        "DROP INDEX IF EXISTS transcript_entries_pending; CREATE INDEX transcript_entries_pending ON transcript(seq) WHERE calls_indexed=0 OR summary_indexed=0 OR context_indexed=0",
+      ))
       use _ <- result.try(operations.abandon_unfinished(db))
       use _ <- result.try(
         store.run(
@@ -472,7 +478,8 @@ pub fn initialise(store: store.Store) -> Result(Nil, String) {
       )
     }),
   )
-  index_saved_entries(store)
+  use _ <- result.try(index_saved_entries(store))
+  context_source.recover_fits(store)
 }
 
 @external(erlang, "albedo_context_snapshot", "page")
@@ -506,7 +513,8 @@ pub fn index_entry_in(
       )
     }),
   )
-  index_preview_in(db, session, position, input)
+  use _ <- result.try(index_preview_in(db, session, position, input))
+  context_source.index_entry_in(db, session, position, input)
 }
 
 fn index_preview_in(
@@ -659,7 +667,7 @@ fn move_rows_in(
       <> ")",
     keyed,
   ))
-  store.run(
+  use _ <- result.try(store.run(
     db,
     "UPDATE transcript_quarantine SET "
       <> remap("seq")
@@ -670,7 +678,8 @@ fn move_rows_in(
       }),
       [sqlight.text(session)],
     ),
-  )
+  ))
+  context_source.reindex_in(db, session)
 }
 
 /// One `?` per value, for an `IN (...)` list.
@@ -791,7 +800,7 @@ fn index_saved_entries(ledger: store.Store) -> Result(Nil, String) {
         use rows <- result.try(
           store.rows(
             db,
-            "SELECT seq,session,payload,calls_indexed FROM transcript WHERE calls_indexed=0 OR summary_indexed=0 ORDER BY seq LIMIT 128",
+            "SELECT seq,session,payload,calls_indexed FROM transcript WHERE calls_indexed=0 OR summary_indexed=0 OR context_indexed=0 ORDER BY seq LIMIT 128",
             [],
             {
               use position <- decode.field(0, decode.int)
@@ -809,7 +818,10 @@ fn index_saved_entries(ledger: store.Store) -> Result(Nil, String) {
               Error(Nil) -> heal_in(db, row.1, row.0, row.2)
             })
             case row.3 {
-              True -> index_preview_in(db, row.1, row.0, input)
+              True -> {
+                use _ <- result.try(index_preview_in(db, row.1, row.0, input))
+                context_source.index_entry_in(db, row.1, row.0, input)
+              }
               False -> index_entry_in(db, row.1, row.0, input)
             }
           }),
@@ -1078,6 +1090,7 @@ fn delete_in(
       },
     ),
   )
+  use _ <- result.try(context_source.forget_in(db, id))
   use _ <- result.try(list.try_each(cleaners, fn(clean) { clean(db, id) }))
   use _ <- result.try(
     store.run(db, "DELETE FROM sessions WHERE id=?", [sqlight.text(id)]),
@@ -2235,16 +2248,26 @@ pub fn commit_fits(
       list.try_each(fits, fn(fit) {
         use stored <- result.try(images.store_images(db, [fit.image]))
         let assert [image] = stored
-        store.run(
-          db,
-          "INSERT INTO transcript(session,payload,timestamp,provider,row_class) VALUES(?,?,?,?,'image_fit')",
-          [
-            sqlight.text(id),
-            sqlight.blob(pack_fit(fit.note, fit.source, image)),
-            sqlight.int(timestamp),
-            sqlight.text(provider),
-          ],
+        use _ <- result.try(
+          store.run(
+            db,
+            "INSERT INTO transcript(session,payload,timestamp,provider,row_class) VALUES(?,?,?,?,'image_fit')",
+            [
+              sqlight.text(id),
+              sqlight.blob(pack_fit(fit.note, fit.source, image)),
+              sqlight.int(timestamp),
+              sqlight.text(provider),
+            ],
+          ),
         )
+        use seq <- result.try(store.one(
+          db,
+          "SELECT last_insert_rowid()",
+          [],
+          decode.field(0, decode.int, decode.success),
+          "image-fit sequence unavailable",
+        ))
+        index_entry_in(db, id, seq, types.User(fit.note))
       })
       |> result.replace(timestamp)
     })
@@ -2611,17 +2634,20 @@ pub fn set_configuration(
           [sqlight.text(id), sqlight.text(id)],
         ),
       )
-      store.run(
-        db,
-        "UPDATE sessions SET provider=?,model=?,protocol=?,effort=?,config_revision=config_revision+1 WHERE id=?",
-        [
-          sqlight.text(provider),
-          sqlight.text(model),
-          sqlight.text(protocol(selected_protocol)),
-          sqlight.nullable(sqlight.text, effort),
-          sqlight.text(id),
-        ],
+      use _ <- result.try(
+        store.run(
+          db,
+          "UPDATE sessions SET provider=?,model=?,protocol=?,effort=?,config_revision=config_revision+1 WHERE id=?",
+          [
+            sqlight.text(provider),
+            sqlight.text(model),
+            sqlight.text(protocol(selected_protocol)),
+            sqlight.nullable(sqlight.text, effort),
+            sqlight.text(id),
+          ],
+        ),
       )
+      context_source.reindex_in(db, id)
     })
   })
 }

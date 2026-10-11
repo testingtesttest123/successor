@@ -1,8 +1,10 @@
 //// Immutable formation facts, independent of graph, strategy and personality.
 //// Source text and generated prose never supply trusted narrator metadata.
 
+import albedo/openai_api/types
 import gleam/dict
 import gleam/dynamic/decode
+import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -295,4 +297,60 @@ pub fn coverage_json(frame: Frame, portions: List(Portion)) -> json.Json {
       False -> portion_json(span.first)
     }
   })
+}
+
+pub fn recall_cue(
+  session: String,
+  id: Int,
+  first_seq: Int,
+  last_seq: Int,
+  frame: Option(Frame),
+) -> String {
+  let narrator = case frame {
+    Some(Frame(Some(who), view, _, _)) ->
+      who.name
+      <> " ("
+      <> who.subject
+      <> ", identity revision "
+      <> int.to_string(who.revision)
+      <> "; "
+      <> perspective(view)
+      <> ")"
+    _ -> "unknown narrator"
+  }
+  "[memory recall; narrator "
+  <> narrator
+  <> "; session "
+  <> session
+  <> "; node #"
+  <> int.to_string(id)
+  <> "; source rows "
+  <> int.to_string(first_seq)
+  <> ".."
+  <> int.to_string(last_seq)
+  <> "; generated fallible memory. Current-session details: lcm_describe/lcm_expand; other-session details: agents.messages/search_messages only when available.]"
+}
+
+pub fn recall_inputs(
+  session: String,
+  id: Int,
+  first_seq: Int,
+  last_seq: Int,
+  summary: String,
+  frame: Option(Frame),
+  current_subject: Option(String),
+) -> List(types.Input) {
+  case frame, current_subject {
+    Some(Frame(Some(who), _, _, _)), Some(subject) if who.subject == subject -> [
+      types.User(recall_cue(session, id, first_seq, last_seq, frame)),
+      types.Assistant(summary),
+    ]
+    _, _ -> [
+      types.User(
+        recall_cue(session, id, first_seq, last_seq, frame)
+        <> "\nAttributed historical evidence:\n"
+        <> summary,
+      ),
+    ]
+  }
 }

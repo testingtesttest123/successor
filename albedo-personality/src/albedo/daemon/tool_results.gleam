@@ -47,7 +47,10 @@ pub fn closed_unit(inputs: List(types.Input)) -> Bool {
   valid && dict.size(pending) == 0
 }
 
-fn identified_calls(input: types.Input, calls: List(types.ToolCall)) -> Bool {
+pub fn identified_calls(
+  input: types.Input,
+  calls: List(types.ToolCall),
+) -> Bool {
   let count = case input {
     types.Replay(item) ->
       case types.replay_protocol(item) {

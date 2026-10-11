@@ -1,5 +1,7 @@
 //// Durable prefix forks. These operations never start a session actor.
 
+import albedo/harness/extensions/lcm/projection_state
+
 import albedo/daemon/conversation
 import albedo/daemon/message_content as events
 import albedo/daemon/operations
@@ -131,6 +133,13 @@ fn fork_in(
     branch_id,
     source.provider,
     pending,
+  ))
+  use _ <- result.try(projection_state.inherit_fork_in(
+    db,
+    source_id,
+    branch_id,
+    checkpoint,
+    list.map(rows, fn(row) { row.seq }),
   ))
   Ok(conversation.Info(
     branch_id,
@@ -355,17 +364,26 @@ fn append_incomplete_results(
   pending: List(String),
 ) -> Result(Nil, String) {
   list.try_each(pending, fn(call_id) {
-    store.run(
-      db,
-      "INSERT INTO transcript(session,payload,timestamp,provider,row_class) VALUES(?,?,NULL,?,'other')",
-      [
-        sqlight.text(branch_id),
-        sqlight.blob(
-          pack(types.ToolOutput(call_id, incomplete_tool_result, [])),
-        ),
-        sqlight.text(provider),
-      ],
+    let input = types.ToolOutput(call_id, incomplete_tool_result, [])
+    use _ <- result.try(
+      store.run(
+        db,
+        "INSERT INTO transcript(session,payload,timestamp,provider,row_class) VALUES(?,?,NULL,?,'other')",
+        [
+          sqlight.text(branch_id),
+          sqlight.blob(pack(input)),
+          sqlight.text(provider),
+        ],
+      ),
     )
+    use seq <- result.try(store.one(
+      db,
+      "SELECT last_insert_rowid()",
+      [],
+      decode.field(0, decode.int, decode.success),
+      "fork completion missing",
+    ))
+    conversation.index_entry_in(db, branch_id, seq, input)
   })
 }
 

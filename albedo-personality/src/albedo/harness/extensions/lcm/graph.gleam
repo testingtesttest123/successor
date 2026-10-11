@@ -1,5 +1,11 @@
 //// Derived summary tree. The transcript remains the authority for every leaf.
 
+import albedo/context_cost
+import albedo/context_salience
+import albedo/harness/extensions/lcm/inventory
+import albedo/harness/extensions/lcm/projection_state
+import albedo/harness/extensions/lcm/selection_types as selection
+
 import albedo/daemon/store
 import albedo/harness/extensions/lcm/narration_types as narration
 import gleam/dict.{type Dict}
@@ -33,40 +39,44 @@ pub type Leaf {
 }
 
 pub fn initialise(ledger: store.Store) -> Result(Nil, String) {
-  store.query(ledger, fn(db) {
-    store.transaction(db, fn() {
-      use _ <- result.try(store.exec(
-        db,
-        "CREATE TABLE IF NOT EXISTS lcm_compaction_state(session TEXT PRIMARY KEY REFERENCES sessions(id),last_seq INTEGER NOT NULL CHECK(last_seq >= 0)); CREATE TABLE IF NOT EXISTS lcm_compaction_node(id INTEGER PRIMARY KEY AUTOINCREMENT,session TEXT NOT NULL REFERENCES sessions(id),depth INTEGER NOT NULL CHECK(depth >= 0),first_seq INTEGER NOT NULL,last_seq INTEGER NOT NULL,summary TEXT NOT NULL,narration TEXT,formation_id INTEGER); CREATE INDEX IF NOT EXISTS lcm_compaction_node_session ON lcm_compaction_node(session,first_seq); CREATE TABLE IF NOT EXISTS lcm_compaction_edge(child INTEGER PRIMARY KEY REFERENCES lcm_compaction_node(id),parent INTEGER NOT NULL REFERENCES lcm_compaction_node(id),position INTEGER NOT NULL CHECK(position >= 0)); CREATE INDEX IF NOT EXISTS lcm_compaction_edge_parent ON lcm_compaction_edge(parent,position);",
-      ))
-      use columns <- result.try(store.rows(
-        db,
-        "PRAGMA table_info(lcm_compaction_node)",
-        [],
-        decode.field(1, decode.string, decode.success),
-      ))
-      use _ <- result.try(case list.contains(columns, "narration") {
-        True -> Ok(Nil)
-        False ->
-          store.exec(
-            db,
-            "ALTER TABLE lcm_compaction_node ADD COLUMN narration TEXT",
-          )
+  use _ <- result.try(
+    store.query(ledger, fn(db) {
+      store.transaction(db, fn() {
+        use _ <- result.try(store.exec(
+          db,
+          "CREATE TABLE IF NOT EXISTS lcm_compaction_state(session TEXT PRIMARY KEY REFERENCES sessions(id),last_seq INTEGER NOT NULL CHECK(last_seq >= 0)); CREATE TABLE IF NOT EXISTS lcm_compaction_node(id INTEGER PRIMARY KEY AUTOINCREMENT,session TEXT NOT NULL REFERENCES sessions(id),depth INTEGER NOT NULL CHECK(depth >= 0),first_seq INTEGER NOT NULL,last_seq INTEGER NOT NULL,summary TEXT NOT NULL,narration TEXT,formation_id INTEGER); CREATE INDEX IF NOT EXISTS lcm_compaction_node_session ON lcm_compaction_node(session,first_seq); CREATE TABLE IF NOT EXISTS lcm_compaction_edge(child INTEGER PRIMARY KEY REFERENCES lcm_compaction_node(id),parent INTEGER NOT NULL REFERENCES lcm_compaction_node(id),position INTEGER NOT NULL CHECK(position >= 0)); CREATE INDEX IF NOT EXISTS lcm_compaction_edge_parent ON lcm_compaction_edge(parent,position);",
+        ))
+        use columns <- result.try(store.rows(
+          db,
+          "PRAGMA table_info(lcm_compaction_node)",
+          [],
+          decode.field(1, decode.string, decode.success),
+        ))
+        use _ <- result.try(case list.contains(columns, "narration") {
+          True -> Ok(Nil)
+          False ->
+            store.exec(
+              db,
+              "ALTER TABLE lcm_compaction_node ADD COLUMN narration TEXT",
+            )
+        })
+        use _ <- result.try(case list.contains(columns, "formation_id") {
+          True -> Ok(Nil)
+          False ->
+            store.exec(
+              db,
+              "ALTER TABLE lcm_compaction_node ADD COLUMN formation_id INTEGER; UPDATE lcm_compaction_node SET formation_id=id",
+            )
+        })
+        use _ <- result.try(store.exec(
+          db,
+          "CREATE INDEX IF NOT EXISTS lcm_compaction_node_narrator_formation ON lcm_compaction_node(json_extract(narration,'$.narrator.subject'),formation_id DESC,id) WHERE narration IS NOT NULL",
+        ))
+        initialise_inventory_in(db)
       })
-      use _ <- result.try(case list.contains(columns, "formation_id") {
-        True -> Ok(Nil)
-        False ->
-          store.exec(
-            db,
-            "ALTER TABLE lcm_compaction_node ADD COLUMN formation_id INTEGER; UPDATE lcm_compaction_node SET formation_id=id",
-          )
-      })
-      store.exec(
-        db,
-        "CREATE INDEX IF NOT EXISTS lcm_compaction_node_narrator_formation ON lcm_compaction_node(json_extract(narration,'$.narrator.subject'),formation_id DESC,id) WHERE narration IS NOT NULL",
-      )
-    })
-  })
+    }),
+  )
+  backfill_inventory(ledger)
 }
 
 /// Deletes a session's summary graph, edges first: they reference its nodes.
@@ -81,9 +91,10 @@ pub fn forget_session(
       [sqlight.text(session)],
     ),
   )
+  use _ <- result.try(projection_state.forget_in(db, session))
   store.forget_session(
     db,
-    ["lcm_compaction_state", "lcm_compaction_node"],
+    ["lcm_compaction_state", "lcm_compaction_node", "lcm_inventory_state"],
     session,
   )
 }
@@ -268,14 +279,27 @@ fn inherit_nodes(
         seq_map,
         node_map,
       ))
-      store.run(db, "UPDATE lcm_compaction_node SET narration=? WHERE id=?", [
-        case frame {
-          None -> sqlight.null()
-          Some(value) ->
-            sqlight.text(json.to_string(narration.frame_json(value)))
-        },
-        sqlight.int(copied),
-      ])
+      use _ <- result.try(
+        store.run(db, "UPDATE lcm_compaction_node SET narration=? WHERE id=?", [
+          case frame {
+            None -> sqlight.null()
+            Some(value) ->
+              sqlight.text(json.to_string(narration.frame_json(value)))
+          },
+          sqlight.int(copied),
+        ]),
+      )
+      index_node_in(
+        db,
+        branch,
+        Node(
+          ..node,
+          id: copied,
+          first_seq: result.unwrap(dict.get(seq_map, node.first_seq), 0),
+          last_seq: result.unwrap(dict.get(seq_map, node.last_seq), 0),
+          frame: frame,
+        ),
+      )
     }),
   )
   use edges <- result.try(
@@ -447,14 +471,19 @@ fn insert_node(
     [id] -> {
       // One global original formation ordinal. Copying a node remaps local IDs
       // but preserves this fact; it is never inferred from narrative prose.
-      use _ <- result.map(
+      use _ <- result.try(
         store.run(
           db,
           "UPDATE lcm_compaction_node SET formation_id=? WHERE id=?",
           [sqlight.int(id), sqlight.int(id)],
         ),
       )
-      id
+      use _ <- result.try(index_node_in(
+        db,
+        session,
+        Node(id, depth, first, last, summary, frame),
+      ))
+      Ok(id)
     }
     _ -> Error("LCM node insert returned no identity")
   }
@@ -907,4 +936,248 @@ pub fn commit_parent(
       }
     })
   })
+}
+
+fn initialise_inventory_in(db: sqlight.Connection) -> Result(Nil, String) {
+  use _ <- result.try(
+    store.add_columns(db, "lcm_compaction_node", [
+      #("inventory_indexed", "INTEGER NOT NULL DEFAULT 0"),
+    ]),
+  )
+  use _ <- result.try(store.exec(
+    db,
+    "CREATE TABLE IF NOT EXISTS lcm_inventory_state(session TEXT PRIMARY KEY REFERENCES sessions(id),revision INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS lcm_compaction_metadata(node_id INTEGER PRIMARY KEY REFERENCES lcm_compaction_node(id),content_identity TEXT NOT NULL,narrator_subject TEXT,own_tokens INTEGER NOT NULL,foreign_tokens INTEGER NOT NULL,own_total INTEGER NOT NULL,own_external INTEGER NOT NULL,foreign_total INTEGER NOT NULL,foreign_external INTEGER NOT NULL,legacy_frame INTEGER NOT NULL,error TEXT); CREATE INDEX IF NOT EXISTS lcm_inventory_pending ON lcm_compaction_node(id) WHERE inventory_indexed=0; CREATE TABLE IF NOT EXISTS lcm_inventory_versions(estimator INTEGER,renderer INTEGER,salience INTEGER)",
+  ))
+  use _ <- result.try(projection_state.initialise_in(db))
+  use _ <- result.try(
+    list.try_each(["INSERT", "UPDATE", "DELETE"], fn(action) {
+      let side = case action {
+        "DELETE" -> "OLD"
+        _ -> "NEW"
+      }
+      let columns = case action {
+        "UPDATE" ->
+          " OF session,depth,first_seq,last_seq,summary,narration,formation_id"
+        _ -> ""
+      }
+      let invalidate = case action {
+        "UPDATE" ->
+          " UPDATE lcm_compaction_node SET inventory_indexed=0 WHERE id=NEW.id;"
+        "DELETE" -> " DELETE FROM lcm_compaction_metadata WHERE node_id=OLD.id;"
+        _ -> ""
+      }
+      let old = case action {
+        "UPDATE" ->
+          " INSERT INTO lcm_inventory_state(session,revision) SELECT OLD.session,1 WHERE OLD.session<>NEW.session ON CONFLICT(session) DO UPDATE SET revision=revision+1;"
+        _ -> ""
+      }
+      use _ <- result.try(store.exec(
+        db,
+        "CREATE TRIGGER IF NOT EXISTS lcm_inventory_node_"
+          <> action
+          <> " AFTER "
+          <> action
+          <> columns
+          <> " ON lcm_compaction_node BEGIN INSERT INTO lcm_inventory_state(session,revision) VALUES("
+          <> side
+          <> ".session,1) ON CONFLICT(session) DO UPDATE SET revision=revision+1;"
+          <> old
+          <> invalidate
+          <> " END",
+      ))
+      let edge_sides = case action {
+        "UPDATE" -> ["OLD", "NEW"]
+        _ -> [side]
+      }
+      let edge_changes =
+        list.map(edge_sides, fn(s) {
+          " INSERT INTO lcm_inventory_state(session,revision) SELECT DISTINCT session,1 FROM lcm_compaction_node WHERE id IN ("
+          <> s
+          <> ".child,"
+          <> s
+          <> ".parent) ON CONFLICT(session) DO UPDATE SET revision=revision+1;"
+        })
+        |> string.concat
+      store.exec(
+        db,
+        "CREATE TRIGGER IF NOT EXISTS lcm_inventory_edge_"
+          <> action
+          <> " AFTER "
+          <> action
+          <> " ON lcm_compaction_edge BEGIN"
+          <> edge_changes
+          <> " END",
+      )
+    }),
+  )
+  use versions <- result.try(
+    store.rows(
+      db,
+      "SELECT estimator,renderer,salience FROM lcm_inventory_versions",
+      [],
+      {
+        use a <- decode.field(0, decode.int)
+        use b <- decode.field(1, decode.int)
+        use c <- decode.field(2, decode.int)
+        decode.success(#(a, b, c))
+      },
+    ),
+  )
+  case
+    versions
+    == [
+      #(
+        context_cost.estimator_version,
+        context_cost.renderer_version,
+        context_salience.policy_version,
+      ),
+    ]
+  {
+    True -> Ok(Nil)
+    False -> {
+      use _ <- result.try(store.exec(
+        db,
+        "UPDATE lcm_compaction_node SET inventory_indexed=0; DELETE FROM lcm_inventory_versions",
+      ))
+      store.run(db, "INSERT INTO lcm_inventory_versions VALUES(?,?,?)", [
+        sqlight.int(context_cost.estimator_version),
+        sqlight.int(context_cost.renderer_version),
+        sqlight.int(context_salience.policy_version),
+      ])
+    }
+  }
+}
+
+fn index_node_in(
+  db: sqlight.Connection,
+  session: String,
+  node: Node,
+) -> Result(Nil, String) {
+  let subject =
+    option.then(node.frame, fn(frame) {
+      option.map(frame.narrator, fn(n) { n.subject })
+    })
+  let own =
+    narration.recall_inputs(
+      session,
+      node.id,
+      node.first_seq,
+      node.last_seq,
+      node.summary,
+      node.frame,
+      subject,
+    )
+  let foreign =
+    narration.recall_inputs(
+      session,
+      node.id,
+      node.first_seq,
+      node.last_seq,
+      node.summary,
+      node.frame,
+      None,
+    )
+  let own_facts =
+    list.try_map(own, context_salience.measure)
+    |> result.map(context_salience.combine)
+  let foreign_facts =
+    list.try_map(foreign, context_salience.measure)
+    |> result.map(context_salience.combine)
+  let empty =
+    context_salience.SalienceFacts(0, 0, context_salience.policy_version)
+  let own_measure = result.unwrap(own_facts, empty)
+  let foreign_measure = result.unwrap(foreign_facts, empty)
+  let error = case own_facts, foreign_facts {
+    Error(e), _ | _, Error(e) -> Some(e)
+    _, _ -> None
+  }
+  use _ <- result.try(
+    store.run(
+      db,
+      "INSERT INTO lcm_compaction_metadata(node_id,content_identity,narrator_subject,own_tokens,foreign_tokens,own_total,own_external,foreign_total,foreign_external,legacy_frame,error) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET content_identity=excluded.content_identity,narrator_subject=excluded.narrator_subject,own_tokens=excluded.own_tokens,foreign_tokens=excluded.foreign_tokens,own_total=excluded.own_total,own_external=excluded.own_external,foreign_total=excluded.foreign_total,foreign_external=excluded.foreign_external,legacy_frame=excluded.legacy_frame,error=excluded.error",
+      [
+        sqlight.int(node.id),
+        sqlight.text(context_cost.fingerprint(#(session, node))),
+        sqlight.nullable(sqlight.text, subject),
+        sqlight.int(context_cost.estimate_inputs(own)),
+        sqlight.int(context_cost.estimate_inputs(foreign)),
+        sqlight.int(own_measure.total_utf16),
+        sqlight.int(own_measure.external_utf16),
+        sqlight.int(foreign_measure.total_utf16),
+        sqlight.int(foreign_measure.external_utf16),
+        sqlight.bool(node.frame == None),
+        sqlight.nullable(sqlight.text, error),
+      ],
+    ),
+  )
+  store.run(
+    db,
+    "UPDATE lcm_compaction_node SET inventory_indexed=1 WHERE id=?",
+    [sqlight.int(node.id)],
+  )
+}
+
+fn backfill_inventory(ledger: store.Store) -> Result(Nil, String) {
+  use count <- result.try(
+    store.query(ledger, fn(db) {
+      store.transaction(db, fn() {
+        use nodes <- result.try(
+          store.rows(
+            db,
+            "SELECT id,depth,first_seq,last_seq,summary,narration,session FROM lcm_compaction_node WHERE inventory_indexed=0 ORDER BY id LIMIT 128",
+            [],
+            {
+              use node <- decode.then(node_decoder())
+              use session <- decode.field(6, decode.string)
+              decode.success(#(node, session))
+            },
+          ),
+        )
+        use _ <- result.try(
+          list.try_each(nodes, fn(pair) { index_node_in(db, pair.1, pair.0) }),
+        )
+        Ok(list.length(nodes))
+      })
+    }),
+  )
+  case count == 128 {
+    True -> backfill_inventory(ledger)
+    False -> Ok(Nil)
+  }
+}
+
+/// Source, graph, configuration/profile and receipt stamps are one actor turn.
+pub fn capture_inventory(
+  ledger: store.Store,
+  session: String,
+  profile: context_cost.CostProfile,
+) -> Result(selection.ProjectionCapture, String) {
+  store.query(ledger, capture_inventory_in(_, session, profile))
+}
+
+pub fn capture_inventory_in(
+  db: sqlight.Connection,
+  session: String,
+  profile: context_cost.CostProfile,
+) -> Result(selection.ProjectionCapture, String) {
+  use archive <- result.try(inventory.capture_in(db, session, profile))
+  use previous <- result.try(projection_state.capture_in(db, session))
+  let previous = case previous.profile {
+    Some(saved) if saved == profile -> previous
+    None -> previous
+    _ ->
+      selection.empty_receipt(
+        previous.generation,
+        Some("receipt profile changed"),
+      )
+  }
+  let expected =
+    selection.ProjectionSnapshot(
+      archive.source,
+      archive.graph_revision,
+      previous.generation,
+      context_cost.profile_id(profile),
+      profile.identity,
+    )
+  Ok(selection.ProjectionCapture(archive, previous, expected))
 }

@@ -1,6 +1,8 @@
 //// Durable editable session state. Callers validate runtime policy before
 //// committing a candidate on the shared store connection.
 
+import albedo/daemon/context_source
+
 import albedo/text_scalars
 import gleam/bit_array
 
@@ -213,6 +215,7 @@ pub fn commit_in(
             ],
           ),
         )
+        use _ <- result.try(context_source.reindex_in(db, candidate.id))
         let pinned = candidate.preferences.pinned
         use pin_order <- result.try(case pinned, current.preferences.pinned {
           False, _ -> Ok(None)

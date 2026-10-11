@@ -13,29 +13,7 @@ import gleam/result
 import gleam/string
 
 pub fn cue(node: graph.Node, session: String) -> String {
-  let narrator = case node.frame {
-    Some(n.Frame(Some(who), perspective, _, _)) ->
-      who.name
-      <> " ("
-      <> who.subject
-      <> ", identity revision "
-      <> int.to_string(who.revision)
-      <> "; "
-      <> n.perspective(perspective)
-      <> ")"
-    _ -> "unknown narrator"
-  }
-  "[memory recall; narrator "
-  <> narrator
-  <> "; session "
-  <> session
-  <> "; node #"
-  <> int.to_string(node.id)
-  <> "; source rows "
-  <> int.to_string(node.first_seq)
-  <> ".."
-  <> int.to_string(node.last_seq)
-  <> "; generated fallible memory. Current-session details: lcm_describe/lcm_expand; other-session details: agents.messages/search_messages only when available.]"
+  n.recall_cue(session, node.id, node.first_seq, node.last_seq, node.frame)
 }
 
 pub fn render(
@@ -50,19 +28,15 @@ pub fn render_scoped(
   session: String,
   current_subject: Option(String),
 ) -> List(types.Input) {
-  case node.frame, current_subject {
-    Some(n.Frame(Some(who), _, _, _)), Some(subject) if who.subject == subject -> [
-      types.User(cue(node, session)),
-      types.Assistant(node.summary),
-    ]
-    _, _ -> [
-      types.User(
-        cue(node, session)
-        <> "\nAttributed historical evidence:\n"
-        <> node.summary,
-      ),
-    ]
-  }
+  n.recall_inputs(
+    session,
+    node.id,
+    node.first_seq,
+    node.last_seq,
+    node.summary,
+    node.frame,
+    current_subject,
+  )
 }
 
 /// Native summary calls are tool-free. Replay text/call descriptions remain

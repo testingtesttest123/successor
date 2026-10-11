@@ -1,0 +1,549 @@
+{
+  "provenance": {
+    "repository": "anima-research/context-manager",
+    "commit": "537d921d93fa40b99fff6bd0921e5bcb2cb6546f",
+    "source_path": "src/strategies/autobiographical.ts",
+    "source_sha256": "01a3aeea5653ad1ca77347cec7d54b5697f1bd7c07e99cf35a17bfde2017de31",
+    "method_sha256": "a01d55490598cf44ccd0d0c6c58bd99c2907a53b1c2052353940f5568d02fbd3",
+    "native_adapter": "whole native source unit, concatenate canonical block streams, clamp once"
+  },
+  "cases": [
+    {
+      "name": "empty",
+      "native": [
+        {
+          "kind": "user",
+          "text": ""
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": ""
+        }
+      ],
+      "expected_score": 1
+    },
+    {
+      "name": "conversation",
+      "native": [
+        {
+          "kind": "user",
+          "text": "ordinary conversation"
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "ordinary conversation"
+        }
+      ],
+      "expected_score": 1
+    },
+    {
+      "name": "unicode",
+      "native": [
+        {
+          "kind": "user",
+          "text": "👩‍💻é"
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "👩‍💻é"
+        }
+      ],
+      "expected_score": 1
+    },
+    {
+      "name": "fence",
+      "native": [
+        {
+          "kind": "user",
+          "text": "before```python\nprint(1)```after"
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "before```python\nprint(1)```after"
+        }
+      ],
+      "expected_score": 0.625
+    },
+    {
+      "name": "unclosed",
+      "native": [
+        {
+          "kind": "user",
+          "text": "before```typescript\nx"
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "before```typescript\nx"
+        }
+      ],
+      "expected_score": 0.5428571428571429
+    },
+    {
+      "name": "bare_url",
+      "native": [
+        {
+          "kind": "user",
+          "text": "﻿  https://example.test/a👩‍💻 "
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "﻿  https://example.test/a👩‍💻 "
+        }
+      ],
+      "expected_score": 0.3032258064516129
+    },
+    {
+      "name": "uppercase_url",
+      "native": [
+        {
+          "kind": "user",
+          "text": "HTTP://example.test"
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "HTTP://example.test"
+        }
+      ],
+      "expected_score": 1
+    },
+    {
+      "name": "url_with_space",
+      "native": [
+        {
+          "kind": "user",
+          "text": "https://example.test a"
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "https://example.test a"
+        }
+      ],
+      "expected_score": 1
+    },
+    {
+      "name": "url_inside_fence",
+      "native": [
+        {
+          "kind": "user",
+          "text": "```\nhttps://example.test/a\n```"
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "```\nhttps://example.test/a\n```"
+        }
+      ],
+      "expected_score": 0.2
+    },
+    {
+      "name": "ecma_space",
+      "native": [
+        {
+          "kind": "user",
+          "text": " https://example.test "
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": " https://example.test "
+        }
+      ],
+      "expected_score": 0.2727272727272727
+    },
+    {
+      "name": "tool_structured",
+      "native": [
+        {
+          "kind": "user",
+          "text": "ordinary conversation length"
+        },
+        {
+          "kind": "replay",
+          "protocol": "responses",
+          "raw": "{\"type\": \"function_call\", \"id\": \"item\", \"call_id\": \"call\", \"name\": \"run\", \"arguments\": \"{\\\"note\\\":\\\"👩‍💻\\\\n\\\\\\\"\\\",\\\"n\\\":1e-7,\\\"big\\\":1e20,\\\"huge\\\":1e21,\\\"zero\\\":-0,\\\"array\\\":[true,null]}\"}"
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "ordinary conversation length"
+        },
+        {
+          "type": "tool_use",
+          "input": {
+            "note": "👩‍💻\n\"",
+            "n": 1e-7,
+            "big": 100000000000000000000,
+            "huge": 1e+21,
+            "zero": 0,
+            "array": [
+              true,
+              null
+            ]
+          }
+        }
+      ],
+      "expected_score": 0.37637795275590546
+    },
+    {
+      "name": "tool_null",
+      "native": [
+        {
+          "kind": "user",
+          "text": "ordinary conversation length"
+        },
+        {
+          "kind": "replay",
+          "protocol": "responses",
+          "raw": "{\"type\": \"function_call\", \"id\": \"item\", \"call_id\": \"call\", \"name\": \"run\", \"arguments\": \"null\"}"
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "ordinary conversation length"
+        },
+        {
+          "type": "tool_use",
+          "input": null
+        }
+      ],
+      "expected_score": 0.9466666666666667
+    },
+    {
+      "name": "tool_malformed",
+      "native": [
+        {
+          "kind": "user",
+          "text": "ordinary conversation length"
+        },
+        {
+          "kind": "replay",
+          "protocol": "responses",
+          "raw": "{\"type\": \"function_call\", \"id\": \"item\", \"call_id\": \"call\", \"name\": \"run\", \"arguments\": \"{\\\"partial\\\":\"}"
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "ordinary conversation length"
+        },
+        {
+          "type": "tool_use",
+          "input": "{\"partial\":"
+        }
+      ],
+      "expected_score": 0.7209302325581395
+    },
+    {
+      "name": "tool_integer_rounding",
+      "native": [
+        {
+          "kind": "user",
+          "text": "ordinary conversation length"
+        },
+        {
+          "kind": "replay",
+          "protocol": "responses",
+          "raw": "{\"type\": \"function_call\", \"id\": \"item\", \"call_id\": \"call\", \"name\": \"run\", \"arguments\": \"{\\\"n\\\":9007199254740993}\"}"
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "ordinary conversation length"
+        },
+        {
+          "type": "tool_use",
+          "input": {
+            "n": 9007199254740992
+          }
+        }
+      ],
+      "expected_score": 0.6479999999999999
+    },
+    {
+      "name": "tool_result",
+      "native": [
+        {
+          "kind": "tool",
+          "id": "call",
+          "text": "👩‍💻\nresult",
+          "images": 0
+        }
+      ],
+      "blocks": [
+        {
+          "type": "tool_result",
+          "content": "👩‍💻\nresult"
+        }
+      ],
+      "expected_score": 0.2
+    },
+    {
+      "name": "user_images",
+      "native": [
+        {
+          "kind": "user_image",
+          "text": "look",
+          "images": 2
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "look"
+        },
+        {
+          "type": "image"
+        },
+        {
+          "type": "image"
+        }
+      ],
+      "expected_score": 0.20024992189940638
+    },
+    {
+      "name": "result_image",
+      "native": [
+        {
+          "kind": "tool",
+          "id": "call",
+          "text": "result",
+          "images": 1
+        }
+      ],
+      "blocks": [
+        {
+          "type": "tool_result",
+          "content": "result"
+        },
+        {
+          "type": "image"
+        }
+      ],
+      "expected_score": 0.2
+    },
+    {
+      "name": "chat_text_and_call",
+      "native": [
+        {
+          "kind": "replay",
+          "protocol": "chat_completions",
+          "raw": "{\"role\": \"assistant\", \"content\": \"portable 👩‍💻\", \"tool_calls\": [{\"id\": \"call\", \"type\": \"function\", \"function\": {\"name\": \"run\", \"arguments\": \"{\\\"x\\\":1e-7}\"}}]}"
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "portable 👩‍💻"
+        },
+        {
+          "type": "tool_use",
+          "input": {
+            "x": 1e-7
+          }
+        }
+      ],
+      "expected_score": 0.6666666666666666
+    },
+    {
+      "name": "whole_unit_clamp",
+      "native": [
+        {
+          "kind": "user",
+          "text": "```\nhttps://x\n```"
+        },
+        {
+          "kind": "assistant",
+          "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "```\nhttps://x\n```"
+        },
+        {
+          "type": "text",
+          "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "expected_score": 0.7922077922077922
+    },
+    {
+      "name": "combining_url",
+      "native": [
+        {
+          "kind": "user",
+          "text": "https://́"
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "https://́"
+        }
+      ],
+      "expected_score": 0.2
+    },
+    {
+      "name": "exponent_overflow",
+      "native": [
+        {
+          "kind": "user",
+          "text": "ordinary conversation length"
+        },
+        {
+          "kind": "call",
+          "arguments": "{\"x\":1e309}"
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "ordinary conversation length"
+        },
+        {
+          "type": "tool_use",
+          "id": "call",
+          "name": "run",
+          "input": {
+            "x": null
+          }
+        }
+      ],
+      "expected_score": 0.7894736842105263
+    },
+    {
+      "name": "integer_overflow",
+      "native": [
+        {
+          "kind": "user",
+          "text": "ordinary conversation length"
+        },
+        {
+          "kind": "call",
+          "arguments": "{\"x\":1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000}"
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "ordinary conversation length"
+        },
+        {
+          "type": "tool_use",
+          "id": "call",
+          "name": "run",
+          "input": {
+            "x": null
+          }
+        }
+      ],
+      "expected_score": 0.7894736842105263
+    },
+    {
+      "name": "lone_surrogate",
+      "native": [
+        {
+          "kind": "user",
+          "text": "ordinary conversation length"
+        },
+        {
+          "kind": "call",
+          "arguments": "{\"x\":\"\\ud800\"}"
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "ordinary conversation length"
+        },
+        {
+          "type": "tool_use",
+          "id": "call",
+          "name": "run",
+          "input": {
+            "x": "\ud800"
+          }
+        }
+      ],
+      "expected_score": 0.7333333333333334
+    },
+    {
+      "name": "duplicate_json_keys",
+      "native": [
+        {
+          "kind": "user",
+          "text": "ordinary conversation length"
+        },
+        {
+          "kind": "call",
+          "arguments": "{\"x\":1,\"x\":\"short\"}"
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "ordinary conversation length"
+        },
+        {
+          "type": "tool_use",
+          "id": "call",
+          "name": "run",
+          "input": {
+            "x": "short"
+          }
+        }
+      ],
+      "expected_score": 0.7463414634146341
+    },
+    {
+      "name": "surrogate_pair",
+      "native": [
+        {
+          "kind": "user",
+          "text": "ordinary conversation length"
+        },
+        {
+          "kind": "call",
+          "arguments": "{\"x\":\"\\ud83d\\ude00\"}"
+        }
+      ],
+      "blocks": [
+        {
+          "type": "text",
+          "text": "ordinary conversation length"
+        },
+        {
+          "type": "tool_use",
+          "id": "call",
+          "name": "run",
+          "input": {
+            "x": "😀"
+          }
+        }
+      ],
+      "expected_score": 0.7894736842105263
+    }
+  ]
+}
