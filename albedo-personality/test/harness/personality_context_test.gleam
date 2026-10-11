@@ -474,6 +474,7 @@ pub fn released_static_pin_rechecks_live_context_against_final_known_window_test
           compaction.Strategy("fixture", fn(catalog, _) {
             Ok(
               compaction.Resolved(
+                None,
                 catalog,
                 fn(_, history) {
                   Ok(compaction.View(
@@ -580,6 +581,7 @@ pub fn final_complete_request_refuses_large_history_after_pin_release_at_every_b
           compaction.Strategy("fixture", fn(catalog, _) {
             Ok(
               compaction.Resolved(
+                None,
                 catalog,
                 fn(_, history) {
                   Ok(compaction.View(
@@ -845,6 +847,7 @@ pub fn strategy_settings_resolve_once_before_capture_and_survive_forced_projecti
             process.send(calls, "resolve")
             Ok(
               compaction.Resolved(
+                None,
                 Some(compaction.Capacity(1000, "fixture configured")),
                 fn(context, history) {
                   context.capacity
@@ -974,6 +977,7 @@ pub fn synthetic_observation_is_not_promoted_to_known_final_capacity_test() -> N
           compaction.Strategy("fixture", fn(_, _) {
             Ok(
               compaction.Resolved(
+                None,
                 None,
                 fn(_, history) {
                   Ok(compaction.View(

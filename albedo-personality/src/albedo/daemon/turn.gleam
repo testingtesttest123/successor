@@ -103,7 +103,8 @@ pub fn latch() -> Latch {
   new_atomics(1, [])
 }
 
-fn raise(latch: Latch) -> Nil {
+/// Host cancellation latch, also used by independent native memory work.
+pub fn raise(latch: Latch) -> Nil {
   let _ = put(latch, 1, 1)
   Nil
 }

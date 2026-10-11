@@ -7,7 +7,7 @@ Rows are written by the worker that streams the call, one per upstream attempt (
 ## What a row holds
 
 - `session`, `seq` — the conversation, and the transcript row the call produced: the first assistant row of the response that turn committed (for a tool-call turn, the row carrying the call itself, not the tool output after it). `seq` is null when the call produced no transcript row: a failed call, or a compaction summary, which writes strategy state instead of the transcript.
-- `kind` — `turn` for the model/tool loop, `summarizer` for the compaction summary call, `background` for a call an extension sent on the idle session, such as a [cache-warming](cache-warming.md) ping. A `background` row never attaches a seq: background calls commit nothing.
+- `kind` — `turn` for the model/tool loop, `summarizer` for a compaction or autobiographical formation call, `background` for a call an extension sent on the idle session, such as a [cache-warming](cache-warming.md) ping. A `background` row never attaches a seq: background calls commit nothing.
 - `profile`, `provider`, `account`, `model` — the saved profile the request went through, `protocol:endpoint` as it was reached, the non-secret label of the account that served (an account id, email, or short key hash; null when the provider has no account pool), and the model.
 - `startedMs`, `finishedMs` — when the attempt ran.
 - `outcome`, `status`, `error` — `ok`, or `error` with the HTTP status and a truncated error body, so a 429 is a quota reading.
@@ -18,6 +18,13 @@ Providers report these differently and each adapter fills what it can: Anthropic
 ## Usage timing
 
 The session's usage for a turn's call reports the span of the attempt that succeeded as `elapsed_ms`, and its output tokens over that span as `tokens_per_second`. A re-emitted usage keeps its call's span; a compaction estimate made no call, so it has none.
+
+Background autobiographical jobs use the same native Summarizer request,
+attempt, account and usage recording as foreground compaction, with no tools or
+foreground call/status/warmer publication. A returned provider usage record is
+kept even when the graph result is stale or the response contains no usable
+summary text. Transport errors without returned usage do not invent counts.
+These calls leave `seq` null and do not replace the session's foreground usage.
 
 ## Prefix identity
 

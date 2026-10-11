@@ -12,6 +12,7 @@ import albedo/daemon/tool_results
 import albedo/daemon/transcript
 import albedo/harness/runtime
 import albedo/openai_api/types
+import gleam/erlang/process
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -172,7 +173,8 @@ pub fn remember_response(
   // A zero timestamp is a candidate projection, not a commit.
   case timestamp, inputs {
     0, _ | _, [] -> state
-    _, _ ->
+    _, _ -> {
+      process.send(state.self, state.memory_notify)
       publish_committed(
         state,
         list.length(entries),
@@ -189,6 +191,7 @@ pub fn remember_response(
           }
         }),
       )
+    }
   }
 }
 

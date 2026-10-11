@@ -3,6 +3,7 @@
 
 import albedo/daemon/conversation
 import albedo/daemon/store
+import albedo/daemon/tool_results
 import albedo/daemon/transcript
 import albedo/harness/compaction
 import albedo/harness/extension as harness_extension
@@ -217,7 +218,10 @@ fn compact(
         fn(rows, item) { conversation.Continue([item, ..rows]) },
       )
   })
-  let eligible = list.reverse(eligible)
+  let eligible =
+    list.reverse(eligible)
+    |> closed_source_units
+    |> list.flat_map(fn(unit) { unit.0 })
   use _ <- result.try(compaction.require(
     eligible != [] || frontier != [],
     "cannot compact without an older complete conversation unit",
@@ -473,6 +477,17 @@ fn source_units(
   })
 }
 
+/// Native result settlement can later move positions of an unanswered call.
+/// Never skip such a unit to cover later raw rows in the shared graph.
+fn closed_source_units(
+  sources: List(transcript.SourcedEntry),
+) -> List(#(List(transcript.SourcedEntry), Int)) {
+  source_units(sources)
+  |> list.take_while(fn(unit) {
+    tool_results.closed_unit(list.map(unit.0, fn(row) { row.entry.input }))
+  })
+}
+
 fn model_units(history: List(types.Input)) -> List(ModelUnit) {
   compaction.split_starts(history, compaction.is_user)
   |> list.map(fn(items) { ModelUnit(items, compaction.estimate_inputs(items)) })
@@ -669,6 +684,10 @@ fn strategy_with(
   compaction.Strategy(name, fn(catalog, _) {
     use config <- result.map(resolve())
     compaction.Resolved(
+      case name {
+        "personality" -> Some(prepare_ahead)
+        _ -> None
+      },
       rolling.configured_capacity(config.context_window_tokens, catalog),
       fn(context, history) { project(config, context, history) },
       fn(context, history) { compact(config, context, history) },
@@ -681,9 +700,107 @@ fn subject(context: compaction.Context) -> Option(String) {
 }
 
 fn commit_guard(context: compaction.Context) -> graph.CommitGuard {
-  case context.summary_policy {
+  let policy = case context.summary_policy {
     None -> graph.unguarded
     Some(policy) -> episodes.guard(policy, context.session)
+  }
+  fn(db) {
+    case context.active() {
+      False -> Ok(False)
+      True -> policy(db)
+    }
+  }
+}
+
+/// One native background step. Complete older source units form first;
+/// otherwise a pending frontier merge may still make progress. No overflow
+/// trigger, synthetic window or permanent background quota is involved.
+fn prepare_ahead(context: compaction.Context) -> Result(Bool, String) {
+  use _ <- result.try(compaction.require(
+    context.summary_policy != None,
+    "autobiographical preparation requires captured personality context",
+  ))
+  case context.active() {
+    False -> Ok(False)
+    True -> {
+      use expected <- result.try(graph.snapshot(context.store, context.session))
+      use snapshot <- result.try(conversation.snapshot(
+        context.store,
+        context.session,
+      ))
+      use covered <- result.try(graph.last_seq(context.store, context.session))
+      use frontier <- result.try(graph.frontier(context.store, context.session))
+      use _ <- result.try(compaction.require(
+        expected.covered == covered
+          && expected.frontier_ids == list.map(frontier, fn(node) { node.id })
+          && expected.source_through == snapshot.upper,
+        "LCM source planning snapshot changed",
+      ))
+      use window <- result.try(option.to_result(
+        context.capacity,
+        "no configured or catalogued context window for autobiographical preparation",
+      ))
+      use _ <- result.try(compaction.fits_pinned(context, window.tokens))
+      let limit =
+        int.min(
+          summary_tokens,
+          int.max(32, { window.tokens - context.pinned_tokens } / 4),
+        )
+      use first <- result.try(conversation.first_source_unit(
+        context.store,
+        snapshot,
+        covered,
+      ))
+      use rows <- result.try(case first {
+        Some(#(first, last)) ->
+          conversation.fold_sources(
+            context.store,
+            snapshot,
+            first,
+            last,
+            [],
+            fn(rows, row) { conversation.Continue([row, ..rows]) },
+          )
+          |> result.map(list.reverse)
+        None -> Ok([])
+      })
+      let next_unit = case closed_source_units(rows) {
+        [#(unit, _), ..] -> Some(unit)
+        _ -> None
+      }
+      case next_unit, frontier {
+        Some(unit), _ -> {
+          use leaves <- result.try(summarize_leaves(context, unit, limit))
+          graph.commit_leaves(
+            context.store,
+            context.session,
+            expected,
+            leaves,
+            commit_guard(context),
+          )
+        }
+        None, [_, _, ..] -> {
+          let group = condensation_group(context, frontier)
+          let assert Some(policy) = context.summary_policy
+          use #(summary, frame) <- result.try(formation.parent(
+            context,
+            group,
+            limit,
+            policy,
+          ))
+          graph.commit_parent(
+            context.store,
+            context.session,
+            expected,
+            group,
+            summary,
+            frame,
+            commit_guard(context),
+          )
+        }
+        _, _ -> Ok(False)
+      }
+    }
   }
 }
 

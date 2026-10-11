@@ -310,6 +310,7 @@ fn strategy_with(
           reader,
         ))
         compaction.Resolved(
+          None,
           rolling.capacity,
           fn(context, history) { text_project(rolling, context, history) },
           rolling.compact,
@@ -317,6 +318,7 @@ fn strategy_with(
       }
       _ ->
         Ok(compaction.Resolved(
+          None,
           // Visual snapcompact retains its existing catalog-first precedence.
           option.or(
             catalog,

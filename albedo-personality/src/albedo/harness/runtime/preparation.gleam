@@ -222,10 +222,19 @@ pub fn finish_commands(
   |> result.unwrap([])
   |> list.reverse
   |> list.each(fn(waiter) {
-    process.send(
-      waiter.reply,
-      outcome |> result.try(command_value(id, waiter.cwd, _)),
-    )
+    let outcome =
+      outcome
+      |> result.try(fn(cached) {
+        case cached.cwd == waiter.cwd {
+          True -> Ok(cached)
+          False -> Error("prepared composition belongs to another workspace")
+        }
+      })
+    waiter.answer(outcome)
+    case outcome {
+      Ok(_) -> waiter.adopted()
+      Error(_) -> Nil
+    }
   })
   runtime_state.State(..state, commands: dict.delete(state.commands, id))
 }
@@ -258,9 +267,23 @@ pub fn peek(
   cwd: String,
   reply: Subject(Result(#(List(command.Command), command.Context), String)),
 ) -> runtime_state.State {
+  prepare_composition(state, id, cwd, fn() { Nil }, fn(outcome) {
+    process.send(reply, outcome |> result.try(command_value(id, cwd, _)))
+  })
+}
+
+/// Join the existing composition-only preparation and lifetime ownership.
+/// Neither commands nor background memory need a Python kernel.
+pub fn prepare_composition(
+  state: runtime_state.State,
+  id: String,
+  cwd: String,
+  adopted: fn() -> Nil,
+  answer: fn(Result(runtime_state.Cached, String)) -> Nil,
+) -> runtime_state.State {
   case dict.get(state.compositions, id) {
     Ok(cached) if cached.cwd == cwd -> {
-      process.send(reply, command_value(id, cwd, cached))
+      answer(Ok(cached))
       state
     }
     _ -> {
@@ -269,7 +292,7 @@ pub fn peek(
         runtime_state.State(
           ..state,
           commands: dict.insert(state.commands, id, [
-            runtime_state.CommandWaiter(cwd, reply),
+            runtime_state.CommandWaiter(cwd, answer, adopted),
             ..waiters
           ]),
         )

@@ -17,41 +17,56 @@ import gleam/string
 pub fn configured_client(
   state: session_state.State(message),
 ) -> Result(#(session_state.State(message), extension.Upstream), String) {
-  use provider <- result.try(case state.info.provider {
-    "" -> {
-      use provider <- result.try(configuration.legacy(state.home))
-      use _ <- result.try(conversation.assign_session_provider(
-        runtime.ledger(state.host),
-        state.info.id,
-        provider.name,
-      ))
-      Ok(provider)
-    }
-    name -> configuration.named(state.home, name)
-  })
+  use #(profile, client) <- result.try(resolve_client(
+    state.host,
+    state.info,
+    state.home,
+  ))
   let state = case state.info.provider {
     "" ->
       session_state.State(
         ..state,
         history: option.map(state.history, session_history.tag_unknown_provider(
           _,
-          provider.name,
+          profile,
         )),
-        info: conversation.Info(..state.info, provider: provider.name),
+        info: conversation.Info(..state.info, provider: profile),
       )
     _ -> state
   }
-  use client <- result.try(runtime.upstream(
-    state.host,
-    state.info.id,
-    state.home,
+  Ok(#(state, client))
+}
+
+/// Native provider resolution shared by foreground and memory workers. The
+/// caller owns only immutable session facts, never the loaded actor transcript.
+pub fn resolve_client(
+  host: runtime.Runtime,
+  info: conversation.Info,
+  home: String,
+) -> Result(#(String, extension.Upstream), String) {
+  use provider <- result.try(case info.provider {
+    "" -> {
+      use provider <- result.try(configuration.legacy(home))
+      use _ <- result.try(conversation.assign_session_provider(
+        runtime.ledger(host),
+        info.id,
+        provider.name,
+      ))
+      Ok(provider)
+    }
+    name -> configuration.named(home, name)
+  })
+  use client <- result.map(runtime.upstream(
+    host,
+    info.id,
+    home,
     provider.name,
     provider.extension,
-    state.info.model,
-    state.info.protocol,
-    state.info.effort,
+    info.model,
+    info.protocol,
+    info.effort,
   ))
-  Ok(#(state, client))
+  #(provider.name, client)
 }
 
 /// The endpoint a profile is configured with, if any.

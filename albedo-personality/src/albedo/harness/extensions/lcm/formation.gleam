@@ -1,4 +1,4 @@
-//// Source-aware foreground LCM formation. All provider work precedes graph CAS.
+//// Shared foreground/background LCM formation. Provider work precedes graph CAS.
 //// Long units commit only after every reading portion and all folds succeed.
 
 import albedo/daemon/conversation

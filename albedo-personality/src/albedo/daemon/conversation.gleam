@@ -1276,6 +1276,45 @@ pub type FoldStep(a) {
   Stop(a)
 }
 
+/// Only the first uncovered whole native unit, bounded by indexed metadata.
+/// A leading assistant/tool continuation is valid; the final unit stays raw.
+pub fn first_source_unit(
+  ledger: store.Store,
+  snapshot: Snapshot,
+  covered: Int,
+) -> Result(Option(#(Int, Int)), String) {
+  store.query(ledger, fn(db) {
+    use first <- result.try(store.one(
+      db,
+      "SELECT MIN(seq) FROM transcript WHERE session=? AND seq>? AND seq<=?",
+      [
+        sqlight.text(snapshot.session),
+        sqlight.int(covered),
+        sqlight.int(snapshot.upper),
+      ],
+      decode.field(0, decode.optional(decode.int), decode.success),
+      "first uncovered source row",
+    ))
+    case first {
+      None -> Ok(None)
+      Some(first) -> {
+        use next <- result.map(store.one(
+          db,
+          "SELECT MIN(seq) FROM transcript WHERE session=? AND seq>? AND seq<=? AND row_class IN ('user','image_fit')",
+          [
+            sqlight.text(snapshot.session),
+            sqlight.int(first),
+            sqlight.int(snapshot.upper),
+          ],
+          decode.field(0, decode.optional(decode.int), decode.success),
+          "next native source unit",
+        ))
+        option.map(next, fn(next) { #(first, next - 1) })
+      }
+    }
+  })
+}
+
 type FitSchedule =
   List(#(Int, image_fit.Replacements))
 

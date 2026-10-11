@@ -203,7 +203,8 @@ pub type Preparation {
 pub type CommandWaiter {
   CommandWaiter(
     cwd: String,
-    reply: Subject(Result(#(List(command.Command), command.Context), String)),
+    answer: fn(Result(Cached, String)) -> Nil,
+    adopted: fn() -> Nil,
   )
 }
 
@@ -256,6 +257,12 @@ pub type Message {
     String,
     String,
     Subject(Result(#(List(command.Command), command.Context), String)),
+  )
+  PrepareComposition(
+    String,
+    String,
+    fn() -> Nil,
+    Subject(Result(Cached, String)),
   )
   Reload(String, String, selection.Change, Subject(Application))
   ReloadDesired(String, String, Subject(Application))

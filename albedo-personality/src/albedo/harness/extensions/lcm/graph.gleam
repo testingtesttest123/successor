@@ -725,6 +725,33 @@ pub fn commit_leaves(
             expected.covered,
             expected.source_through,
           ))
+          // Global sequence numbers can have gaps. Prove coverage over actual
+          // local rows, including empty rows, rather than numeric span lengths.
+          use rows <- result.try(store.rows(
+            db,
+            "SELECT seq,row_class FROM transcript WHERE session=? AND seq>? AND seq<=? ORDER BY seq",
+            [
+              sqlight.text(session),
+              sqlight.int(expected.covered),
+              sqlight.int(last.last_seq),
+            ],
+            source_boundary_decoder(),
+          ))
+          use next <- result.try(store.rows(
+            db,
+            "SELECT seq,row_class FROM transcript WHERE session=? AND seq>? AND seq<=? ORDER BY seq LIMIT 1",
+            [
+              sqlight.text(session),
+              sqlight.int(last.last_seq),
+              sqlight.int(expected.source_through),
+            ],
+            source_boundary_decoder(),
+          ))
+          use _ <- result.try(validate_prefix(
+            session,
+            leaves,
+            list.append(rows, next),
+          ))
           use _ <- result.try(
             list.try_each(leaves, fn(leaf) {
               insert_node(
@@ -752,6 +779,43 @@ pub fn commit_leaves(
       }
     })
   })
+}
+
+fn source_boundary_decoder() -> decode.Decoder(#(Int, String)) {
+  use seq <- decode.field(0, decode.int)
+  use kind <- decode.field(1, decode.string)
+  decode.success(#(seq, kind))
+}
+
+fn validate_prefix(
+  session: String,
+  leaves: List(Leaf),
+  rows: List(#(Int, String)),
+) -> Result(Nil, String) {
+  case leaves, rows {
+    [], _ -> Ok(Nil)
+    [leaf, ..rest], [#(first, _), ..] if first == leaf.first_seq -> {
+      let selected = list.take_while(rows, fn(row) { row.0 <= leaf.last_seq })
+      let remaining = list.drop(rows, list.length(selected))
+      let exact_frame = case leaf.frame {
+        None -> True
+        Some(frame) ->
+          list.map(frame.sources, fn(row) { #(row.session, row.seq) })
+          == list.map(selected, fn(row) { #(session, row.0) })
+      }
+      case list.last(selected), remaining {
+        Ok(#(last, _)), [#(_, kind), ..]
+          if last == leaf.last_seq && { kind == "user" || kind == "image_fit" }
+        ->
+          case exact_frame {
+            True -> validate_prefix(session, rest, remaining)
+            False -> Error("LCM narration does not match actual source prefix")
+          }
+        _, _ -> Error("LCM leaf must cover complete older source units")
+      }
+    }
+    _, _ -> Error("LCM leaf must start at the next actual source row")
+  }
 }
 
 fn validate_leaves(

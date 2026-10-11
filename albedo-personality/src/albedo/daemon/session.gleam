@@ -21,6 +21,7 @@ import albedo/daemon/session_configure
 import albedo/daemon/session_extensions
 import albedo/daemon/session_history
 import albedo/daemon/session_last_call
+import albedo/daemon/session_memory
 import albedo/daemon/session_namespace
 import albedo/daemon/session_prompt
 import albedo/daemon/session_provider
@@ -45,6 +46,7 @@ import albedo/harness/runtime
 import albedo/harness/ssh
 import albedo/openai_api/types
 import gleam/erlang/process.{type Subject}
+import gleam/io
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -260,6 +262,10 @@ pub type Message {
   )
   /// A background call's worker finished.
   BackgroundFinished(String, Int, Result(Option(types.Usage), String))
+  /// Private host-owned memory notifications/results, never a tool/HTTP input.
+  MemoryConsider
+  MemoryCompositionReady(Int, turn.Latch)
+  MemoryFinished(Int, process.Pid, Result(Bool, String))
   Compact(Option(String), Subject(Result(turn.CompactionReport, String)))
   ReloadData(Subject(Result(session_extensions.Reloaded, String)))
   /// An extension asks for a refresh and gives its reason; see
@@ -347,6 +353,7 @@ pub fn start(
       [] -> Nil
       _ -> process.send(self, StartQueued)
     }
+    process.send(self, MemoryConsider)
     let generation = new_generation()
     let state =
       session_state.State(
@@ -360,6 +367,8 @@ pub fn start(
         history: None,
         latest_usage: latest_usage,
         activity: activity,
+        memory: session_memory.new(captured.history_high_water),
+        memory_notify: MemoryConsider,
         steering: steering,
         active_submissions: [],
         sequence: 0,
@@ -1066,10 +1075,62 @@ fn handle(
       session_state.State(..state, last_touch: clock.monotonic_ms())
     _ -> state
   }
+  let state = case message {
+    ApplyIdle(..)
+    | ChangeConfiguration(..)
+    | ChangeModel(..)
+    | ChangeEffort(..)
+    | ReloadData(..)
+    | RefreshRequested(..)
+    | ChangeWorkspace(..)
+    | ApplyWorkspace(..)
+    | UpgradeKernel(..)
+    | Compact(Some(_), _) -> {
+      process.send(state.self, MemoryConsider)
+      session_state.State(
+        ..state,
+        memory: session_memory.invalidate(state.memory),
+      )
+    }
+    _ -> state
+  }
   // Runs end in finish_turn and background_finish, which follow at once; this
   // catches a turn that never started, such as one whose kernel failed to boot.
   let state = settle(state)
   case message {
+    MemoryConsider -> consider_memory(state)
+    MemoryCompositionReady(generation, stop) -> {
+      let memory =
+        session_memory.composition_ready(state.memory, generation, stop)
+      case memory == state.memory {
+        True -> Nil
+        False -> process.send(state.self, MemoryConsider)
+      }
+      actor.continue(session_state.State(..state, memory:))
+    }
+    MemoryFinished(generation, pid, outcome) -> {
+      case outcome {
+        Error(error) ->
+          io.println_error(
+            "autobiographical preparation for session "
+            <> state.info.id
+            <> ": "
+            <> error,
+          )
+        Ok(_) -> Nil
+      }
+      actor.continue(
+        session_state.State(
+          ..state,
+          memory: session_memory.finished(
+            state.memory,
+            generation,
+            pid,
+            outcome,
+          ),
+        ),
+      )
+    }
     ApplyIdle(run, reply) -> {
       answer(state, reply, session_configure.apply_idle(state, run))
     }
@@ -1699,7 +1760,13 @@ fn handle(
         Some(run) -> finish_run(state, run, outcome)
         _ -> actor.continue(state)
       }
-    Down(process.ProcessDown(_, pid, _)) -> {
+    Down(process.ProcessDown(_, pid, _) as down) -> {
+      let #(memory, consider) = session_memory.down(state.memory, down)
+      case consider {
+        True -> process.send(state.self, MemoryConsider)
+        False -> Nil
+      }
+      let state = session_state.State(..state, memory:)
       let state =
         session_state.State(
           ..state,
@@ -1803,6 +1870,15 @@ fn handle(
       answer(state, reply, claimed)
     }
     CloseForDeletion(reply) -> {
+      let closed =
+        session_memory.close(state.memory, runtime.ledger(state.host))
+      let state =
+        session_state.State(
+          ..state,
+          memory: session_memory.quiet(session_memory.new(
+            state.memory.watermark,
+          )),
+        )
       let state = session_state.State(..state, steering: [], booting: None)
       case turn.running(state.activity) {
         Some(run) -> {
@@ -1811,7 +1887,11 @@ fn handle(
         }
         None -> Nil
       }
-      case runtime.delete_session(state.host, state.info.id) {
+      case
+        result.try(closed, fn(_) {
+          runtime.delete_session(state.host, state.info.id)
+        })
+      {
         Error(error) -> answer(state, reply, Error(error))
         Ok(_) -> {
           active_output.revoke(state.home, state.info.id)
@@ -1823,6 +1903,7 @@ fn handle(
       }
     }
     Close(reply) -> {
+      let _ = session_memory.close(state.memory, runtime.ledger(state.host))
       case turn.running(state.activity) {
         Some(run) -> {
           interrupt_kernel(state)
@@ -1843,6 +1924,7 @@ fn handle(
         || state.steering != []
         || state.watchers != []
         || jobs > 0
+        || state.memory.job != None
         || children_working(state.host, state.info.id)
       {
         True -> answer(state, reply, False)
@@ -1854,6 +1936,102 @@ fn handle(
       }
     }
   }
+}
+
+/// Memory never occupies turn.Activity or opens Python. Successful durable
+/// notifications and normal actor load coalesce through one monitored slot.
+fn consider_memory(state: State) -> actor.Next(State, Message) {
+  let watermark =
+    conversation.last_seq(runtime.ledger(state.host), state.info.id)
+  let memory =
+    session_memory.notify(
+      state.memory,
+      result.unwrap(watermark, state.memory.watermark),
+    )
+  let state = session_state.State(..state, memory:)
+  case session_memory.needed(memory) {
+    False -> actor.continue(state)
+    True ->
+      case runtime.ahead_enabled(state.host, state.info.id) {
+        Ok(True) ->
+          case session_history.ensure_history(state) {
+            Error(error) -> {
+              io.println_error(
+                "autobiographical source settlement for session "
+                <> state.info.id
+                <> ": "
+                <> error,
+              )
+              actor.continue(
+                session_state.State(
+                  ..state,
+                  memory: session_memory.quiet(memory),
+                ),
+              )
+            }
+            Ok(state) -> start_memory(state)
+          }
+        _ ->
+          actor.continue(
+            session_state.State(..state, memory: session_memory.quiet(memory)),
+          )
+      }
+  }
+}
+
+fn start_memory(state: State) -> actor.Next(State, Message) {
+  let memory = state.memory
+  let host = state.host
+  let info = state.info
+  let home = state.home
+  let owner = state.self
+  let owner_pid = process.self()
+  let run_id = new_generation()
+  let memory =
+    session_memory.start(memory, fn(generation, stop) {
+      process.spawn_unlinked(fn() {
+        let active = fn() { session_memory.active(owner_pid, stop) }
+        let outcome = {
+          use cached <- result.try(
+            runtime.prepare_composition_notify(host, info.id, info.cwd, fn() {
+              process.send(owner, MemoryCompositionReady(generation, stop))
+            }),
+          )
+          use _ <- result.try(case active() {
+            True -> Ok(Nil)
+            False -> Error("autobiographical preparation cancelled")
+          })
+          use #(profile, client) <- result.try(session_provider.resolve_client(
+            host,
+            info,
+            home,
+          ))
+          let client = session_run.stoppable(client, owner, stop)
+          let context =
+            loop.CallContext(
+              runtime.ledger(host),
+              client,
+              info.id,
+              profile,
+              run_id,
+              None,
+            )
+          runtime.prepare_ahead(
+            host,
+            info.id,
+            cached,
+            info.model,
+            profile,
+            session_provider.profile_endpoint(home, profile),
+            loop.summarize_call(context, _),
+            client.images,
+            active,
+          )
+        }
+        process.send(owner, MemoryFinished(generation, process.self(), outcome))
+      })
+    })
+  actor.continue(session_state.State(..state, memory:))
 }
 
 /// Stop an idle session, keeping its kernel's variables first: a clean stop is
@@ -2243,10 +2421,13 @@ fn request_kernel(state: State) -> Nil {
 /// Adopting revives saved variables only for a session with history, so the
 /// history is loaded first, as the old synchronous open did.
 fn adopt(state: State, kernel: runtime.Session) -> State {
-  session_history.ensure_history(state)
-  |> result.unwrap(state)
-  |> session_namespace.adopt(kernel)
-  |> session_prompt.reconcile_prompt
+  let state =
+    session_history.ensure_history(state)
+    |> result.unwrap(state)
+    |> session_namespace.adopt(kernel)
+    |> session_prompt.reconcile_prompt
+  process.send(state.self, MemoryConsider)
+  session_state.State(..state, memory: session_memory.rearm(state.memory))
 }
 
 /// Records the head a prepared request reported. It moves when compaction

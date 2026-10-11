@@ -164,6 +164,12 @@ pub fn ranged_images_equal_full_history_with_later_fits_test() -> Nil {
   let assert Ok(stats) = conversation.source_stats(ledger, snapshot, 0)
   stats.uncovered_users |> should.equal(4)
   let assert Ok(full) = conversation.load_sources(ledger, "session")
+  conversation.first_source_unit(ledger, snapshot, 0)
+  |> should.equal(Ok(Some(#(1, 1))))
+  conversation.first_source_unit(ledger, snapshot, 2)
+  |> should.equal(Ok(Some(#(3, 3))))
+  conversation.first_source_unit(ledger, snapshot, 3)
+  |> should.equal(Ok(None))
   let assert Ok(range) =
     conversation.fold_sources(ledger, snapshot, 1, 3, [], fn(acc, row) {
       conversation.Continue([row, ..acc])

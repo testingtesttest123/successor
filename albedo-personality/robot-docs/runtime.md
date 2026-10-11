@@ -69,6 +69,44 @@ Kernel upgrade completion keeps its repeated wait until completion or owner
 death. Session closure also waits for owner termination after the acknowledgment.
 These lifetime protocols need more than a finite request/reply call.
 
+## autobiographical memory jobs
+
+`daemon/session_memory.gleam` owns one monitored background memory job per
+session, separate from foreground `turn.Activity` and cache-warming calls. The
+worker captures runtime/session handles and scalar configuration, not the actor's
+resident history. `runtime.prepare_composition` uses the existing owned
+composition preparation queue without opening Python; the same captured
+compaction policy/settings seam serves foreground and memory preparation.
+Native Summarizer calls run outside the session actor. Memory never emits
+foreground status or replaces foreground usage.
+
+`session_history.remember_response` notifies only after a durable nonempty
+commit; candidate/timestamp-zero projections do not schedule work. Actor start
+reconsiders the durable backlog. True graph progress yields another mailbox
+tick, while no progress/error quiets that source watermark. New durable input,
+configuration invalidation, or actual successful composition/kernel adoption
+can rearm it. Adoption preserves a retry even if an earlier timed-out job has
+not yet terminated. Errors and ignored kernel arrivals do not rearm. There is
+no daemon-wide scheduler or recurring failed-job timer.
+
+Composition-only preparation retains a host completion callback on its existing
+waiter. Actual successful asynchronous installation notifies the session even
+after its synchronous deadline; cached replies, failures, abandoned or stale
+preparations do not. The private session completion message checks the captured
+memory lifecycle generation and latch, so a cancelled or closed owner cannot
+start work from a late notification. Cached preparation never notifies, avoiding
+a no-progress rearm loop.
+
+Cancellation raises the host latch before teardown; the retiring worker still
+owns its slot until its exact monitor terminates. The graph's transaction guard
+checks that latch and actor liveness with its other stale-result checks. Closing
+waits briefly for native provider accounting, terminates any remaining worker,
+then places a no-op store fence before acknowledgment. Previously queued
+closures cannot commit after that acknowledgment, even when their callers died.
+A transaction already past its guard can finish only before the fence. Unload
+refuses a live memory worker. Normal actor/load recovery rebuilds pending work
+from durable source and the saved graph; jobs have no persistent table.
+
 ## registry host lookup
 
 `daemon/registry.host` owns the five-second runtime-host lookup. Callers retain

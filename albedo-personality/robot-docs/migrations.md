@@ -123,7 +123,12 @@ the upgraded schema. embedding hosts call
   every seq and moves row contents between them, and remaps `transcript_calls`,
   `submission_events`, `continuation_markers`, `provider_requests`,
   `operations.committed_seq`, and `transcript_quarantine` with them. LCM source
-  ranges are not remapped.
+  ranges are not remapped. Selected autobiographical actors settle retained
+  history before starting background formation. Both active LCM leaf planners
+  stop at the first source unit lacking chronological native answers for its
+  identified calls, so later recovery cannot remap an already covered open
+  exchange. A source append during provider work also invalidates the atomic
+  graph snapshot. This adds no migration or persistent job table.
 - `transcript_pending_class` indexes unclassified sequence IDs.
   `transcript_users` indexes `(session,seq)` for user and image-fit rows;
   `transcript_fits` indexes `(session,seq)` for image-fit rows alone. Completed

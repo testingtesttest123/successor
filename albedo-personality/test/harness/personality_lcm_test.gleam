@@ -516,7 +516,7 @@ pub fn copied_prefix_uses_exact_branch_rows_with_witnessed_attachment_test() -> 
     compaction.Context(
       ledger,
       "branch",
-      unused_kernel(),
+      fn() { True },
       "model",
       "fixture",
       0,
@@ -598,7 +598,7 @@ pub fn unbound_native_lcm_keeps_generic_instructions_and_no_persona_policy_test(
     compaction.Context(
       runtime.ledger(host),
       "ordinary",
-      unused_kernel(),
+      fn() { True },
       "model",
       "fixture",
       0,
@@ -1038,6 +1038,7 @@ pub fn rejected_summary_envelope_never_claims_a_provider_attempt_test() -> Nil {
           compaction.Strategy("fixture", fn(_, _) {
             Ok(
               compaction.Resolved(
+                None,
                 Some(compaction.Capacity(20_000, "fixture")),
                 fn(_, history) { Ok(compaction.View(history, None, False)) },
                 fn(context, _) {

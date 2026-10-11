@@ -12,7 +12,7 @@ A strategy has two halves. `project` returns the request its saved state makes o
 
 `Strategy(name, resolve)` resolves one read-only settings snapshot per request
 before dynamic request-context capture. `resolve(catalog_capacity, reader)`
-returns `Resolved(capacity, project, compact)`; its closures retain those exact
+returns `Resolved(prepare_ahead, capacity, project, compact)`; its closures retain those exact
 settings through initial projection, optional/forced compaction, and subsequent
 projection. Settings decoding remains in the strategy module. Preflight has no
 history, kernel, store or provider handle and performs no provider work.
@@ -35,6 +35,12 @@ The loop's final boundary checks the full actual request estimate after static
 pin settlement, including history selected under an older prefix, without a
 second capture or read-only summarizer call.
 
+`prepare_ahead` is an optional one-step saved-graph operation. Only personality
+supplies it; rolling, snapcompact and plain LCM have none. `Context.active` is a
+host-owned liveness check, evaluated with the other graph guards inside the
+transaction. Foreground preparation supplies True. It is not a tool argument or
+identity permission, and compaction context has no kernel handle.
+
 ## source references
 
 `conversation.load_sources` reads transcript rows with `SourceRef(session, seq)`. `conversation.source` resolves one reference. The sequence is SQLite's append-only transcript identity; a row's contents may move to another of its session's seqs when a tool result is settled beside its call (see `migrations.md`). A fork copies rows into a new session with new references. LCM copies saved nodes whose entire source range precedes the fork checkpoint and remaps their row and node IDs without a model call. LCM omits a node that crosses the checkpoint, but can reuse its complete child nodes. The branch may summarize the remaining rows if it later reaches the compaction trigger.
@@ -44,6 +50,35 @@ Provider projection can combine several durable rows into one model input, split
 `lcm` uses durable source rows for summary ranges and plain model inputs for its verbatim tail. It preserves every unsummarized user unit and the latest whole user/tool unit. Source references on live projected inputs would let future strategies cut history within those unit boundaries.
 
 Transcript rows carry an indexed `row_class`: `user`, `image_fit`, or `other`. Every user input, including notes and mail, starts a compaction unit; an image-fit notice does too. LCM counts uncovered units from this metadata before deciding whether to compact. It decodes eligible source payloads only when creating new leaf summaries. Reading saved LCM folds after a strategy switch also uses metadata rather than expanding the covered transcript.
+
+Active LCM leaf commits prove an actual leading source prefix after the saved
+cursor inside the transaction. They include empty rows, tolerate global sequence
+gaps, require existing local endpoints and complete native unit boundaries, and
+retain the newest unit. A narrated leaf's ordered source references must match
+every selected local row exactly. A cursor may precede an assistant/tool
+continuation; a leading user row is not required. Cursor/frontier, source append
+boundary, captured binding/configuration/selection and host liveness are checked
+atomically before any graph mutation. The older unqualified save entry exists
+only for migration and legacy test fixtures.
+
+Background planning finds only the first uncovered unit's boundary through
+indexed native transcript metadata before decoding that unit. It does not
+decode or estimate unrelated later raw units. The existing range reader still
+applies later image fits through the captured snapshot. Transactional prefix
+validation materializes only proposed rows through the last candidate endpoint
+plus exactly one following local boundary row, including global gaps. It does
+not scan the remaining raw backlog for each step.
+
+Leaf planning first requires chronological native call/result closure in every
+leading unit. Every identified call needs a later matching native tool output;
+error/cancellation results count as answers, not successful outcomes. Missing or
+empty call IDs defer the unit, duplicate occurrences need distinct answers, and
+prose or unrelated/earlier outputs cannot close it. The first unresolved unit
+blocks later raw units without skipping. Both explicit `/compact` and background
+formation use this rule; condensation of an already valid frontier remains
+available. Selected actor preparation settles retained legacy tool results once
+before starting work, so no covered source positions can later be remapped by
+an unresolved exchange's native recovery.
 
 `conversation.snapshot` captures a session's append boundary. `conversation.fold_sources` reads an inclusive source range in chronological pages of 128 rows and can stop before the next page. Indexed image-fit rows through the snapshot boundary supply replacements, including fits after the selected range. Fits affect only earlier occurrences, and replacement composition preserves chains and repeated source hashes.
 
@@ -166,6 +201,27 @@ Image bytes are never copied into the recap or the summarizer prompt; a recent i
 ## inspect
 
 `/context` shows the prepared request: its sections in order, their sources, and compaction status. After a provider completes that request, it shows the provider's measured input tokens (and cached tokens when reported); until then, or when usage is omitted, the strategy's local estimate is shown instead. The JSON retains `estimated_input_tokens` separately from `provider_input_tokens` so neither is mistaken for the other. A manual `/compact` sends no ordinary provider request, so its snapshot has only an estimate. See [the context inspector](context.md).
+
+### Background autobiographical formation
+
+A selected personality session also forms memory below the foreground overflow
+trigger. One job forms the first complete older unit, or condenses an eligible
+frontier when leaves are unavailable. Long reading units retain all chunk
+reflections through bounded folds before committing. The newest unit stays raw.
+Unknown capacity or missing captured personality policy performs no background
+work. Ordinary `/context` inspection remains read-only.
+
+The session actor owns a separate monitored memory slot. Durable nonempty native
+commits coalesce a source watermark; normal actor load reconsiders the durable
+backlog. Actual graph progress queues another actor tick, yielding between
+steps. No progress or an error stops that watermark until a newer commit or
+configuration change; there is no timer scan or daemon-wide scheduler. Provider
+work does not occupy foreground `turn.Activity` and never opens Python. Runtime
+composition-only preparation captures the same native policy/settings as a
+foreground request. Rebinding, selection/configuration changes, reload and
+close cancel the retiring job, which keeps its slot until exact termination.
+Close acknowledgment follows a store fence, including queued closures whose
+callers were cancelled. See [runtime](runtime.md#autobiographical-memory-jobs).
 
 ### Captured personality policy and LCM evidence
 

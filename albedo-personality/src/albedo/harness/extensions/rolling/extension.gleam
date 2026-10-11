@@ -116,6 +116,7 @@ fn strategy(resolve: fn() -> Result(Config, String)) -> compaction.Strategy {
   compaction.Strategy("rolling", fn(catalog, _) {
     use config <- result.map(resolve())
     compaction.Resolved(
+      None,
       configured_capacity(config.context_window_tokens, catalog),
       fn(context, history) { project(config, context, history) },
       fn(context, history) { compact(config, context, history) },

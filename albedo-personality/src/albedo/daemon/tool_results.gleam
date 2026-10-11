@@ -4,10 +4,83 @@ import albedo/daemon/message_content
 import albedo/daemon/transcript
 import albedo/openai_api/types
 import gleam/dict.{type Dict}
+import gleam/dynamic/decode
 import gleam/int
 import gleam/list
-import gleam/option.{Some}
+import gleam/option.{None, Some}
 import gleam/order
+import gleam/result
+import gleam/string
+
+/// A source unit is stable only after every identified native call has a
+/// later native answer. An earlier/reused ID or prose cannot close a call.
+/// Duplicate occurrences require distinct answers; malformed call records
+/// are deferred rather than guessed complete.
+pub fn closed_unit(inputs: List(types.Input)) -> Bool {
+  let #(valid, pending) =
+    list.fold(inputs, #(True, dict.new()), fn(state, input) {
+      let #(valid, pending) = state
+      case input {
+        types.ToolOutput(id, _, _) -> {
+          let pending = case dict.get(pending, id) {
+            Ok(1) -> dict.delete(pending, id)
+            Ok(count) -> dict.insert(pending, id, count - 1)
+            Error(_) -> pending
+          }
+          #(valid, pending)
+        }
+        _ -> {
+          let calls = message_content.calls(input)
+          let valid = valid && identified_calls(input, calls)
+          let pending =
+            list.fold(calls, pending, fn(pending, call) {
+              dict.insert(
+                pending,
+                call.id,
+                result.unwrap(dict.get(pending, call.id), 0) + 1,
+              )
+            })
+          #(valid, pending)
+        }
+      }
+    })
+  valid && dict.size(pending) == 0
+}
+
+fn identified_calls(input: types.Input, calls: List(types.ToolCall)) -> Bool {
+  let count = case input {
+    types.Replay(item) ->
+      case types.replay_protocol(item) {
+        types.Responses ->
+          types.inspect_item(
+            item,
+            decode.optional_field("type", "", decode.string, decode.success),
+          )
+          |> result.map(fn(kind) {
+            case kind {
+              "function_call" -> 1
+              _ -> 0
+            }
+          })
+        types.ChatCompletions ->
+          types.inspect_item(
+            item,
+            decode.optional_field(
+              "tool_calls",
+              None,
+              decode.optional(decode.list(decode.dynamic)),
+              decode.success,
+            ),
+          )
+          |> result.map(fn(calls) {
+            option.map(calls, list.length) |> option.unwrap(0)
+          })
+      }
+    _ -> Ok(0)
+  }
+  count == Ok(list.length(calls))
+  && list.all(calls, fn(call) { string.trim(call.id) != "" })
+}
 
 /// Scan state: each row's sort key and index (newest first), the block of
 /// consecutive provider items being read and whether only its results have

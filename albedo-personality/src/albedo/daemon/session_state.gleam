@@ -10,6 +10,7 @@ import albedo/daemon/events as view
 import albedo/daemon/mail
 import albedo/daemon/operations
 import albedo/daemon/session_activity
+import albedo/daemon/session_memory
 import albedo/daemon/store
 import albedo/daemon/tool_progress
 import albedo/daemon/transcript
@@ -43,6 +44,8 @@ pub type State(message) {
     history: Option(List(transcript.Entry)),
     latest_usage: Option(usage.Metadata),
     activity: turn.Activity,
+    memory: session_memory.Memory,
+    memory_notify: message,
     steering: List(Submission),
     active_submissions: List(Submission),
     sequence: Int,

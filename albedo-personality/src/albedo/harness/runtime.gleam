@@ -880,6 +880,13 @@ fn serve(
     }
     runtime_state.Peek(id, cwd, reply) ->
       actor.continue(preparation.peek(state, id, cwd, reply) |> boot.boot_next)
+    runtime_state.PrepareComposition(id, cwd, adopted, reply) ->
+      actor.continue(
+        preparation.prepare_composition(state, id, cwd, adopted, fn(outcome) {
+          process.send(reply, outcome)
+        })
+        |> boot.boot_next,
+      )
     runtime_state.Reset(id, reply) -> {
       kernels.drop_kernel_at(state, id, "session reset")
       process.send(reply, Nil)
@@ -1082,19 +1089,6 @@ pub fn prepare_history_with(
     types.any_images,
   )
   |> result.map(fn(prepared) { prepared.inputs })
-}
-
-/// Only a catalog answer becomes a capacity; an unknown model stays unknown.
-fn model_info(
-  session: Session,
-  model: String,
-  endpoint: Option(String),
-) -> Option(extension.ModelInfo) {
-  extension.model_info(
-    composition.extensions(session.composition),
-    model,
-    endpoint,
-  )
 }
 
 /// The extensions enabled with no session override: what services run with.
@@ -1396,10 +1390,104 @@ fn view_scoped(
   view: fn(compaction.Resolved, compaction.Context, List(types.Input)) ->
     Result(compaction.Prepared, String),
 ) -> Result(compaction.Prepared, String) {
-  use loaded <- result.try(required_capabilities(runtime, session))
-  let static_tokens = compaction.estimate_pinned(instructions, tools(session))
-  let enabled = composition.extensions(session.composition)
-  let info = model_info(session, model, endpoint)
+  use _ <- result.try(owned_by(runtime, session))
+  use scope <- result.try(
+    capture_compaction(
+      runtime,
+      session.id,
+      session.composition,
+      model,
+      source,
+      endpoint,
+      instructions,
+      summarize,
+      history,
+      force,
+      images,
+      observe,
+      fn() { True },
+    ),
+  )
+  let context = scope.context
+  let outcome = case scope.strategy {
+    None if force -> Error("no compaction strategy is enabled")
+    None ->
+      Ok(compaction.Prepared(
+        history,
+        Some(compaction.Observation(
+          "",
+          "not_configured",
+          source,
+          "durable transcript without a selected compaction strategy",
+          None,
+          option.map(context.capacity, fn(value) { value.tokens }),
+          Some(context.pinned_tokens + compaction.estimate_inputs(history)),
+          Some("local byte-based estimate; not provider token usage"),
+          Some(list.length(history)),
+          Some(list.length(history)),
+        )),
+        False,
+        request_context.no_context(),
+        None,
+      ))
+    Some(#(name, strategy)) ->
+      protect.guarded(fn() {
+        use prepared <- result.try(view(strategy, context, history))
+        list.try_fold(
+          extension.notes(composition.extensions(session.composition)),
+          prepared,
+          fn(prepared, layer) {
+            case prepared.compacted {
+              True -> layer.compact(context, history, prepared)
+              False -> layer.project(context, history, prepared)
+            }
+          },
+        )
+      })
+      |> result.map_error(fn(error) { "compaction " <> name <> ": " <> error })
+  }
+  let captured = scope.finish()
+  result.map(outcome, fn(prepared) {
+    compaction.Prepared(
+      ..prepared,
+      request_context: captured,
+      capacity: context.capacity,
+    )
+  })
+}
+
+type CapturedCompaction {
+  CapturedCompaction(
+    strategy: Option(#(String, compaction.Resolved)),
+    context: compaction.Context,
+    finish: fn() -> request_context.Prepared,
+  )
+}
+
+/// Foreground and prepare-ahead share this exact policy/settings capture.
+fn capture_compaction(
+  runtime: Runtime,
+  id: String,
+  composed: composition.Composition,
+  model: String,
+  source: String,
+  endpoint: Option(String),
+  instructions: String,
+  summarize: fn(compaction.SummaryRequest) -> Result(String, String),
+  history: List(types.Input),
+  force: Bool,
+  images: types.ImageLimits,
+  observe: fn(request_context.Prepared) -> Nil,
+  active: fn() -> Bool,
+) -> Result(CapturedCompaction, String) {
+  use loaded <- result.try(required_composition(runtime, id, composed))
+  let static_tokens =
+    compaction.estimate_pinned(
+      instructions,
+      list.map(composition.tools(composed), fn(tool) { tool.definition }),
+    )
+  let enabled = composition.extensions(composed)
+  let info = extension.model_info(enabled, model, endpoint)
   let catalog = capacity(info)
   use resolved <- result.try(case extension.compaction(enabled) {
     None -> Ok(None)
@@ -1415,10 +1503,10 @@ fn view_scoped(
     Some(#(_, strategy)) -> strategy.capacity
   }
   use captured <- result.try(request_context.prepare(
-    composition.request_context(session.composition),
+    composition.request_context(composed),
     request_context.Input(
       runtime.ledger,
-      session.id,
+      id,
       loaded,
       request_context.query(history),
       request_context.Budget(
@@ -1459,74 +1547,118 @@ fn view_scoped(
     let _ = protect.attempt(fn() { observe(observed) })
     summarize(request)
   }
-  let outcome = case resolved {
-    None if force -> Error("no compaction strategy is enabled")
-    None ->
-      Ok(compaction.Prepared(
-        history,
-        Some(compaction.Observation(
-          "",
-          "not_configured",
-          source,
-          "durable transcript without a selected compaction strategy",
-          None,
-          option.map(window, fn(value) { value.tokens }),
-          Some(pinned_tokens + compaction.estimate_inputs(history)),
-          Some("local byte-based estimate; not provider token usage"),
-          Some(list.length(history)),
-          Some(list.length(history)),
-        )),
-        False,
-        request_context.no_context(),
-        None,
-      ))
-    Some(#(name, strategy)) -> {
-      let context =
-        compaction.Context(
-          runtime.ledger,
-          session.id,
-          session.kernel,
-          model,
-          source,
-          pinned_tokens,
-          window,
-          force,
-          summarize,
-          compaction.compose_prior(
-            list.filter(extension.folds(enabled), fn(folds) {
-              folds.owner != name
-            }),
-            runtime.ledger,
-            session.id,
-          ),
-          reader(info),
-          images,
-          request_context.summary_policy(captured),
-        )
-      // A strategy that raises fails the turn the way one returning an error
-      // does, naming itself, rather than killing the turn's process.
-      protect.guarded(fn() {
-        use prepared <- result.try(view(strategy, context, history))
-        list.try_fold(extension.notes(enabled), prepared, fn(prepared, layer) {
-          case prepared.compacted {
-            True -> layer.compact(context, history, prepared)
-            False -> layer.project(context, history, prepared)
-          }
-        })
-      })
-      |> result.map_error(fn(error) { "compaction " <> name <> ": " <> error })
-    }
-  }
-  let assert Ok(#(count, calls)) = process.receive(summary_calls, 0)
-  let captured =
-    request_context.Prepared(
-      ..captured,
-      summary_calls: list.reverse(calls),
-      summary_calls_omitted: int.max(0, count - 32),
+  let owner = option.map(resolved, fn(pair) { pair.0 }) |> option.unwrap("")
+  let context =
+    compaction.Context(
+      runtime.ledger,
+      id,
+      active,
+      model,
+      source,
+      pinned_tokens,
+      window,
+      force,
+      summarize,
+      compaction.compose_prior(
+        list.filter(extension.folds(enabled), fn(folds) { folds.owner != owner }),
+        runtime.ledger,
+        id,
+      ),
+      reader(info),
+      images,
+      request_context.summary_policy(captured),
     )
-  result.map(outcome, fn(prepared) {
-    compaction.Prepared(..prepared, request_context: captured, capacity: window)
-  })
+  Ok(
+    CapturedCompaction(resolved, context, fn() {
+      let assert Ok(#(count, calls)) = process.receive(summary_calls, 0)
+      request_context.Prepared(
+        ..captured,
+        summary_calls: list.reverse(calls),
+        summary_calls_omitted: int.max(0, count - 32),
+      )
+    }),
+  )
+}
+
+/// Selection-only admission does not prepare a composition or provider for
+/// sessions whose native autobiographical strategy is suspended/unselected.
+pub fn ahead_enabled(runtime: Runtime, id: String) -> Result(Bool, String) {
+  use enabled <- result.map(enabled_for(runtime, id))
+  case extension.compaction(enabled) {
+    Some(strategy) -> strategy.name == "personality"
+    None -> False
+  }
+}
+
+/// Composition-only preparation through the runtime's existing queue.
+pub fn prepare_composition(
+  runtime: Runtime,
+  id: String,
+  cwd: String,
+) -> Result(runtime_state.Cached, String) {
+  prepare_composition_notify(runtime, id, cwd, fn() { Nil })
+}
+
+/// Host completion runs only on actual successful composition installation,
+/// including after the synchronous deadline. Cached replies and errors do not
+/// notify, so a no-progress memory attempt cannot rearm itself into a spin.
+pub fn prepare_composition_notify(
+  runtime: Runtime,
+  id: String,
+  cwd: String,
+  adopted: fn() -> Nil,
+) -> Result(runtime_state.Cached, String) {
+  ask(
+    runtime,
+    15_000,
+    runtime_state.PrepareComposition(id, cwd, adopted, _),
+    "composition preparation",
+  )
+}
+
+/// One native memory step. It captures the same request policy and settings
+/// as foreground preparation, with no Python, notes writes or turn events.
+pub fn prepare_ahead(
+  runtime: Runtime,
+  id: String,
+  cached: runtime_state.Cached,
+  model: String,
+  source: String,
+  endpoint: Option(String),
+  summarize: fn(compaction.SummaryRequest) -> Result(String, String),
+  images: types.ImageLimits,
+  active: fn() -> Bool,
+) -> Result(Bool, String) {
+  case extension.compaction(composition.extensions(cached.composition)) {
+    Some(strategy) if strategy.name == "personality" -> {
+      use scope <- result.try(capture_compaction(
+        runtime,
+        id,
+        cached.composition,
+        model,
+        source,
+        endpoint,
+        cached.instructions,
+        summarize,
+        [],
+        False,
+        images,
+        fn(_) { Nil },
+        active,
+      ))
+      let outcome = case scope.strategy {
+        Some(#(_, resolved)) ->
+          case resolved.prepare_ahead {
+            Some(ahead) -> protect.guarded(fn() { ahead(scope.context) })
+            None -> Ok(False)
+          }
+        None -> Ok(False)
+      }
+      let _ = scope.finish()
+      outcome
+    }
+    _ -> Ok(False)
+  }
 }
 
 pub fn inventory(host: Runtime) -> session_catalog.Inventory {
@@ -1586,16 +1718,24 @@ fn required_capabilities(
   session: Session,
 ) -> Result(List(String), String) {
   use _ <- result.try(owned_by(runtime, session))
+  required_composition(runtime, session.id, session.composition)
+}
+
+fn required_composition(
+  runtime: Runtime,
+  id: String,
+  composed: composition.Composition,
+) -> Result(List(String), String) {
   let loaded =
-    list.map(composition.extensions(session.composition), fn(item) { item.name })
+    list.map(composition.extensions(composed), fn(item) { item.name })
   let inventory = shared.read(runtime.installed)
   use _ <- result.map(selection.check_required(
     runtime.ledger,
     inventory.extensions,
     inventory.quarantined,
     inventory.default_enabled,
-    session.id,
-    session.composition,
+    id,
+    composed,
   ))
   loaded
 }

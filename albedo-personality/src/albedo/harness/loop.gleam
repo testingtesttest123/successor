@@ -870,11 +870,28 @@ fn summarize(
   state: Loop,
   request: compaction.SummaryRequest,
 ) -> Result(String, String) {
+  summarize_with(call_context(state), request, state.publish)
+}
+
+/// Background autobiographical work uses the same native Summarizer calls
+/// and accounting, without publishing foreground turn events.
+pub fn summarize_call(
+  context: CallContext,
+  request: compaction.SummaryRequest,
+) -> Result(String, String) {
+  summarize_with(context, request, fn(_) { True })
+}
+
+fn summarize_with(
+  context: CallContext,
+  request: compaction.SummaryRequest,
+  publish: fn(view.Event) -> Bool,
+) -> Result(String, String) {
   use summary_request <- result.try(summarizer_request(request))
   let instructions = option.unwrap(summary_request.instructions, "")
   use #(_, turn, _, _) <- result.try(
     call(
-      call_context(state),
+      context,
       requests.Summarizer,
       summary_request,
       // The summarizer's history is exactly what it says; nothing replaced.
@@ -883,13 +900,14 @@ fn summarize(
           requests.direct_prefix(instructions, [], summary_request.input)
         _ -> requests.summary_prefix(instructions, summary_request.input)
       },
-      state.publish,
+      publish,
       fn(_) { types.Continue },
       fn(_, _) { types.Continue },
       fn(_) { Nil },
     )
     |> result.map_error(fn(error) {
-      "summarizer provider request failed: " <> describe(state.upstream, error)
+      "summarizer provider request failed: "
+      <> describe(context.upstream, error)
     }),
   )
   let text =

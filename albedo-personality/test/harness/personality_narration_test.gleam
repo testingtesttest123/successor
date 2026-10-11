@@ -10,6 +10,7 @@ import albedo/daemon/turn
 import albedo/harness/compaction
 import albedo/harness/extension
 import albedo/harness/extension/composition
+import albedo/harness/extension/selection
 import albedo/harness/extensions
 import albedo/harness/extensions/agents/extension as agents
 import albedo/harness/extensions/lcm/extension as lcm
@@ -26,6 +27,7 @@ import albedo/harness/extensions/personality/ledger
 import albedo/harness/extensions/personality/types as p
 import albedo/harness/extensions/python/extension as python
 import albedo/harness/extensions/python/kernel
+import albedo/harness/extensions/python/link
 import albedo/harness/loop
 import albedo/harness/request_context
 import albedo/harness/runtime
@@ -76,7 +78,10 @@ fn setup_at(
         case plugin {
           extension.CompactionPlugin(_) ->
             extension.CompactionPlugin(
-              compaction.Strategy(..configured, name: "personality"),
+              compaction.Strategy("personality", fn(catalog, reader) {
+                use resolved <- result.try(configured.resolve(catalog, reader))
+                lcm.strategy("personality").resolve(resolved.capacity, reader)
+              }),
             )
           _ -> plugin
         }
@@ -426,8 +431,9 @@ pub fn list_page_frame_and_frontier_columns_are_independent_test() -> Nil {
 pub fn concurrent_graph_commit_is_atomic_test() -> Nil {
   let #(host, session, _) = setup()
   save(host, "old", "action")
+  save(host, "retained newest unit", "raw tail")
   let db = runtime.ledger(host)
-  let assert Ok([first, last]) = conversation.load_sources(db, "owner")
+  let assert Ok([first, last, _, _]) = conversation.load_sources(db, "owner")
   let assert Ok(snapshot) = graph.snapshot(db, "owner")
   let results = process.new_subject()
   let ready = process.new_subject()
@@ -511,7 +517,7 @@ fn context_for(
   compaction.Context(
     db,
     id,
-    unused_kernel(),
+    fn() { True },
     "model",
     "fixture",
     0,
@@ -1570,73 +1576,73 @@ pub fn legacy_native_graph_adds_optional_frame_without_rewriting_rows_test() -> 
 }
 
 pub fn reading_many_source_rows_preserves_whole_unit_and_atomicity_test() -> Nil {
-  list.each([32, 33, 97], fn(count) {
-    let #(host, session, _) = setup()
-    let db = runtime.ledger(host)
-    session_fixture.create(host, "gap-source", "/tmp")
-    let rows = list.index_map(list.repeat(Nil, count), fn(_, index) { index })
-    list.each(rows, fn(index) {
-      let mark = case index {
-        0 -> "FIRST-ASH-ORBIT"
-        _ if index == count / 2 -> "MIDDLE-ASH-QUAY"
-        _ if index == count - 1 -> "LAST-ASH-LARCH"
-        _ -> "ordinary source"
-      }
-      let text = mark <> string.repeat(" source background ", 300)
-      let input = case index {
-        0 -> types.User(text)
-        _ if count == 97 && index % 2 == 0 ->
-          types.ToolOutput("call-" <> int.to_string(index - 1), text, [])
-        _ if count == 97 -> {
-          let assert Ok(replay) =
-            json.parse(
-              json.to_string(
-                json.object([
-                  #("type", json.string("function_call")),
-                  #("call_id", json.string("call-" <> int.to_string(index))),
-                  #("name", json.string("read_source")),
-                  #("arguments", json.string(text)),
-                ]),
-              ),
-              types.replay_decoder(types.Responses),
-            )
-          types.Replay(replay)
+  list.each(
+    [#(32, False), #(33, False), #(97, False), #(33, True), #(97, True)],
+    fn(case_) {
+      let #(count, background) = case_
+      let #(host, session, _) = setup()
+      let db = runtime.ledger(host)
+      session_fixture.create(host, "gap-source", "/tmp")
+      let rows = list.index_map(list.repeat(Nil, count), fn(_, index) { index })
+      list.each(rows, fn(index) {
+        let mark = case index {
+          0 -> "FIRST-ASH-ORBIT"
+          _ if index == count / 2 -> "MIDDLE-ASH-QUAY"
+          _ if index == count - 1 -> "LAST-ASH-LARCH"
+          _ -> "ordinary source"
         }
-        _ -> types.Assistant(text)
-      }
-      conversation.commit_from(
-        db,
-        "owner",
-        case count {
-          97 -> [input, types.Assistant("")]
-          _ -> [input]
-        },
-        conversation.Idle,
-        None,
-      )
-      |> should.be_ok
-      // Global sequence gaps are not absent local source rows.
-      conversation.commit_from(
-        db,
-        "gap-source",
-        [types.Assistant("gap")],
-        conversation.Idle,
-        None,
-      )
-      |> should.be_ok
-    })
-    save(host, "retained", "tail")
-    let assert Ok(all) = conversation.load_sources(db, "owner")
-    let expected =
-      list.take(all, case count {
-        97 -> count * 2
-        _ -> count
+        let text = mark <> string.repeat(" source background ", 300)
+        let input = case index {
+          0 -> types.User(text)
+          _ if count == 97 && index % 2 == 0 ->
+            types.ToolOutput("call-" <> int.to_string(index - 1), text, [])
+          _ if count == 97 -> {
+            let assert Ok(replay) =
+              json.parse(
+                json.to_string(
+                  json.object([
+                    #("type", json.string("function_call")),
+                    #("call_id", json.string("call-" <> int.to_string(index))),
+                    #("name", json.string("read_source")),
+                    #("arguments", json.string(text)),
+                  ]),
+                ),
+                types.replay_decoder(types.Responses),
+              )
+            types.Replay(replay)
+          }
+          _ -> types.Assistant(text)
+        }
+        conversation.commit_from(
+          db,
+          "owner",
+          case count {
+            97 -> [input, types.Assistant("")]
+            _ -> [input]
+          },
+          conversation.Idle,
+          None,
+        )
+        |> should.be_ok
+        // Global sequence gaps are not absent local source rows.
+        conversation.commit_from(
+          db,
+          "gap-source",
+          [types.Assistant("gap")],
+          conversation.Idle,
+          None,
+        )
+        |> should.be_ok
       })
-    let failing =
-      prepared_result(
-        host,
-        session,
-        fn(request) {
+      save(host, "retained", "tail")
+      let assert Ok(all) = conversation.load_sources(db, "owner")
+      let expected =
+        list.take(all, case count {
+          97 -> count * 2
+          _ -> count
+        })
+      let failing =
+        formation_result(host, session, background, fn(request) {
           let assert Some(formed) = request.formation
           case formed.mode {
             "consolidation" -> Error("reading final fold refused")
@@ -1647,71 +1653,104 @@ pub fn reading_many_source_rows_preserves_whole_unit_and_atomicity_test() -> Nil
                 <> " in this portion.",
               )
           }
+        })
+      failing
+      |> should.equal(Error(
+        "compaction personality: reading final fold refused",
+      ))
+      graph.frontier(db, "owner") |> should.equal(Ok([]))
+      graph.last_seq(db, "owner") |> should.equal(Ok(0))
+      let calls = process.new_subject()
+      process.send(calls, [])
+      let _ =
+        formation_result(host, session, background, fn(request) {
+          let assert Some(formed) = request.formation
+          let assert Ok(actual) = loop.summarizer_request(request)
+          should.be_true(
+            compaction.estimate_pinned(
+              option.unwrap(actual.instructions, ""),
+              [],
+            )
+            + compaction.estimate_inputs(actual.input)
+            + request.max_output_tokens
+            <= formed.budget,
+          )
+          let assert Ok(seen) = process.receive(calls, 0)
+          process.send(calls, [request, ..seen])
+          Ok(
+            "I read "
+            <> facts(contents(request.evicted))
+            <> " in this portion."
+            <> case count {
+              97 -> string.repeat(" reflection detail ", 130)
+              _ -> ""
+            },
+          )
+        })
+      let assert Ok(seen) = process.receive(calls, 100)
+      let readings =
+        list.filter(seen, fn(call) {
+          let assert Some(formed) = call.formation
+          formed.mode == "reading"
+        })
+      list.length(readings) |> should.equal(count)
+      let folds =
+        list.filter(seen, fn(call) {
+          let assert Some(formed) = call.formation
+          formed.mode == "consolidation"
+        })
+      should.be_true(
+        list.length(folds)
+        >= case count {
+          97 -> 2
+          _ -> 1
         },
-        True,
       )
-    failing
-    |> should.equal(Error("compaction personality: reading final fold refused"))
-    graph.frontier(db, "owner") |> should.equal(Ok([]))
-    graph.last_seq(db, "owner") |> should.equal(Ok(0))
-    let calls = process.new_subject()
-    process.send(calls, [])
-    let _ =
-      prepare(host, session, fn(request) {
-        let assert Some(formed) = request.formation
-        let assert Ok(actual) = loop.summarizer_request(request)
-        should.be_true(
-          compaction.estimate_pinned(option.unwrap(actual.instructions, ""), [])
-          + compaction.estimate_inputs(actual.input)
-          + request.max_output_tokens
-          <= formed.budget,
+      let assert [final, ..] = folds
+      let assert Some(formed) = final.formation
+      list.map(formed.portions, fn(portion) { portion.seq })
+      |> should.equal(list.map(expected, fn(row) { row.source.seq }))
+      let assert Ok([node]) = graph.frontier(db, "owner")
+      facts(node.summary)
+      |> should.equal("FIRST-ASH-ORBIT; MIDDLE-ASH-QUAY; LAST-ASH-LARCH")
+      let assert Some(frame) = node.frame
+      list.map(frame.sources, fn(source) { source.seq })
+      |> should.equal(list.map(expected, fn(row) { row.source.seq }))
+      let assert Ok(last) = list.last(expected)
+      graph.last_seq(db, "owner") |> should.equal(Ok(last.source.seq))
+      conversation.load_sources(db, "owner") |> should.equal(Ok(all))
+      cleanup(host, session)
+    },
+  )
+}
+
+fn formation_result(
+  host: runtime.Runtime,
+  session: state.Session,
+  background: Bool,
+  summarize: fn(compaction.SummaryRequest) -> Result(String, String),
+) -> Result(Nil, String) {
+  case background {
+    False ->
+      prepared_result(host, session, summarize, True) |> result.replace(Nil)
+    True -> {
+      let context =
+        context_for(
+          runtime.ledger(host),
+          session.id,
+          policy_for(runtime.ledger(host), session.id),
+          summarize,
         )
-        let assert Ok(seen) = process.receive(calls, 0)
-        process.send(calls, [request, ..seen])
-        Ok(
-          "I read "
-          <> facts(contents(request.evicted))
-          <> " in this portion."
-          <> case count {
-            97 -> string.repeat(" reflection detail ", 130)
-            _ -> ""
-          },
-        )
-      })
-    let assert Ok(seen) = process.receive(calls, 100)
-    let readings =
-      list.filter(seen, fn(call) {
-        let assert Some(formed) = call.formation
-        formed.mode == "reading"
-      })
-    list.length(readings) |> should.equal(count)
-    let folds =
-      list.filter(seen, fn(call) {
-        let assert Some(formed) = call.formation
-        formed.mode == "consolidation"
-      })
-    should.be_true(
-      list.length(folds)
-      >= case count {
-        97 -> 2
-        _ -> 1
-      },
-    )
-    let assert [final, ..] = folds
-    let assert Some(formed) = final.formation
-    list.map(formed.portions, fn(portion) { portion.seq })
-    |> should.equal(list.map(expected, fn(row) { row.source.seq }))
-    let assert Ok([node]) = graph.frontier(db, "owner")
-    facts(node.summary)
-    |> should.equal("FIRST-ASH-ORBIT; MIDDLE-ASH-QUAY; LAST-ASH-LARCH")
-    let assert Some(frame) = node.frame
-    list.map(frame.sources, fn(source) { source.seq })
-    |> should.equal(list.map(expected, fn(row) { row.source.seq }))
-    let assert Ok(last) = list.last(expected)
-    graph.last_seq(db, "owner") |> should.equal(Ok(last.source.seq))
-    conversation.load_sources(db, "owner") |> should.equal(Ok(all))
-    cleanup(host, session)
-  })
+      use strategy <- result.try(lcm.strategy("personality").resolve(
+        context.capacity,
+        None,
+      ))
+      let assert Some(ahead) = strategy.prepare_ahead
+      ahead(context)
+      |> result.replace(Nil)
+      |> result.map_error(fn(error) { "compaction personality: " <> error })
+    }
+  }
 }
 
 fn invoke_lcm(db: store.Store, name: String, args: json.Json) -> String {
@@ -1860,23 +1899,28 @@ pub fn legitimately_formed_source_heavy_retrieval_is_bounded_and_complete_test()
         None,
       )
       |> should.be_ok
-      let assert Ok(rows) = conversation.load_sources(db, "owner")
-      let assert Ok(after) = graph.last_seq(db, "owner")
-      let rows = list.filter(rows, fn(row) { row.source.seq > after })
-      let policy = policy_for(db, "owner")
-      let context = context_for(db, "owner", policy, fn(_) { Ok(summary) })
-      let assert Ok(leaves) = formation.leaves(context, rows, 768, policy)
-      let assert Ok(snapshot) = graph.snapshot(db, "owner")
-      graph.commit_leaves(
-        db,
-        "owner",
-        snapshot,
-        leaves,
-        episodes.guard(policy, "owner"),
-      )
-      |> should.equal(Ok(True))
     },
   )
+  save(host, "retained newest unit", "raw tail")
+  list.each(list.repeat(Nil, 25), fn(_) {
+    let assert Ok(rows) = conversation.load_sources(db, "owner")
+    let assert Ok(after) = graph.last_seq(db, "owner")
+    let rows =
+      list.filter(rows, fn(row) { row.source.seq > after })
+      |> list.take(601)
+    let policy = policy_for(db, "owner")
+    let context = context_for(db, "owner", policy, fn(_) { Ok(summary) })
+    let assert Ok(leaves) = formation.leaves(context, rows, 768, policy)
+    let assert Ok(snapshot) = graph.snapshot(db, "owner")
+    graph.commit_leaves(
+      db,
+      "owner",
+      snapshot,
+      leaves,
+      episodes.guard(policy, "owner"),
+    )
+    |> should.equal(Ok(True))
+  })
   let one = invoke_lcm(db, "lcm_list", json.object([#("limit", json.int(1))]))
   let default = invoke_lcm(db, "lcm_list", json.object([]))
   should.be_true(string.byte_size(one) <= 4096)
@@ -1986,11 +2030,21 @@ pub fn legitimately_formed_source_heavy_retrieval_is_bounded_and_complete_test()
 }
 
 fn commit_memory(db: store.Store, id: String, text: String) -> Nil {
+  // Active native writers retain the newest complete unit.
+  conversation.commit_from(
+    db,
+    id,
+    [types.User("retained newer unit")],
+    conversation.Idle,
+    None,
+  )
+  |> should.be_ok
   let policy = policy_for(db, id)
   let context = context_for(db, id, policy, fn(_) { Ok(text) })
   let assert Ok(after) = graph.last_seq(db, id)
   let assert Ok(rows) = conversation.load_sources(db, id)
   let rows = list.filter(rows, fn(row) { row.source.seq > after })
+  let rows = list.take(rows, list.length(rows) - 1)
   let assert Ok(leaves) = formation.leaves(context, rows, 768, policy)
   let assert Ok(snapshot) = graph.snapshot(db, id)
   graph.commit_leaves(db, id, snapshot, leaves, episodes.guard(policy, id))
@@ -2245,4 +2299,536 @@ pub fn omitted_describe_paging_arguments_keep_native_defaults_test() -> Nil {
   summary |> should.equal(node.summary)
   graph.snapshot(db, "owner") |> should.equal(Ok(before))
   cleanup(host, session)
+}
+
+pub fn leaf_commit_proves_actual_complete_source_prefix_test() -> Nil {
+  list.each([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], fn(invalid) {
+    let #(host, session, _) = setup()
+    let db = runtime.ledger(host)
+    session_fixture.create(host, "prefix-gap", "/tmp")
+    list.each(
+      [
+        types.User(""),
+        types.Assistant(""),
+        types.ToolOutput("actual-call", "native result", []),
+        types.User("newest unit stays raw"),
+        types.Assistant("newest own action"),
+      ],
+      fn(input) {
+        conversation.commit_from(db, "owner", [input], conversation.Idle, None)
+        |> should.be_ok
+        conversation.commit_from(
+          db,
+          "prefix-gap",
+          [types.Assistant("foreign row")],
+          conversation.Idle,
+          None,
+        )
+        |> should.be_ok
+      },
+    )
+    let assert Ok([a, b, c, d, e]) = conversation.load_sources(db, "owner")
+    let assert Ok(source_snapshot) = conversation.snapshot(db, "owner")
+    conversation.first_source_unit(db, source_snapshot, 0)
+    |> should.equal(Ok(Some(#(a.source.seq, d.source.seq - 1))))
+    let assert Ok(snapshot) = graph.snapshot(db, "owner")
+    let policy = policy_for(db, "owner")
+    let context = context_for(db, "owner", policy, fn(_) { Ok("I remember.") })
+    let assert Ok([leaf]) = formation.leaves(context, [a, b, c], 768, policy)
+    let assert Some(frame) = leaf.frame
+    let assert [first_source, ..rest_sources] = frame.sources
+    let leaves = case invalid {
+      0 -> [graph.Leaf(..leaf, first_seq: b.source.seq)]
+      1 -> [graph.Leaf(..leaf, first_seq: c.source.seq)]
+      2 -> [
+        graph.Leaf(a.source.seq, a.source.seq, "cut inside unit", None),
+        graph.Leaf(c.source.seq, c.source.seq, "omitted empty row", None),
+      ]
+      3 -> [graph.Leaf(..leaf, last_seq: b.source.seq)]
+      4 -> [graph.Leaf(..leaf, first_seq: a.source.seq + 1)]
+      5 -> [graph.Leaf(..leaf, last_seq: c.source.seq + 1)]
+      6 -> [graph.Leaf(..leaf, last_seq: e.source.seq)]
+      8 -> [
+        graph.Leaf(
+          ..leaf,
+          frame: Some(
+            n.Frame(..frame, sources: [
+              n.Boundary(..first_source, session: "prefix-gap"),
+              ..rest_sources
+            ]),
+          ),
+        ),
+      ]
+      9 -> [graph.Leaf(..leaf, last_seq: c.source.seq + 2)]
+      _ -> [
+        graph.Leaf(
+          ..leaf,
+          frame: Some(
+            n.Frame(
+              ..frame,
+              sources: list.filter(frame.sources, fn(row) {
+                row.seq != b.source.seq
+              }),
+            ),
+          ),
+        ),
+      ]
+    }
+    graph.commit_leaves(db, "owner", snapshot, leaves, graph.unguarded)
+    |> should.be_error
+    graph.frontier(db, "owner") |> should.equal(Ok([]))
+    graph.last_seq(db, "owner") |> should.equal(Ok(0))
+    conversation.load_sources(db, "owner") |> should.equal(Ok([a, b, c, d, e]))
+    graph.commit_leaves(db, "owner", snapshot, [leaf], graph.unguarded)
+    |> should.equal(Ok(True))
+    graph.last_seq(db, "owner") |> should.equal(Ok(c.source.seq))
+    cleanup(host, session)
+  })
+}
+
+pub fn personality_ahead_forms_below_overflow_and_holds_newest_unit_test() -> Nil {
+  let #(host, session, _) = setup()
+  let db = runtime.ledger(host)
+  save(host, "older first task", "first own action")
+  save(host, "older second task", "second own action")
+  save(host, "newest raw task", "newest raw action")
+  let assert Ok([a, b, c, d, e, f]) = conversation.load_sources(db, "owner")
+  let calls = process.new_subject()
+  let context =
+    context_for(db, "owner", policy_for(db, "owner"), fn(request) {
+      process.send(calls, request)
+      Ok("I remember my earlier action.")
+    })
+  let assert Ok(strategy) =
+    lcm.strategy("personality").resolve(context.capacity, None)
+  let assert Some(ahead) = strategy.prepare_ahead
+  ahead(context) |> should.equal(Ok(True))
+  graph.last_seq(db, "owner") |> should.equal(Ok(b.source.seq))
+  let assert Ok(first) = process.receive(calls, 0)
+  let assert Some(formed) = first.formation
+  list.map(formed.frame.sources, fn(row) { row.seq })
+  |> should.equal([a.source.seq, b.source.seq])
+  ahead(context) |> should.equal(Ok(True))
+  graph.last_seq(db, "owner") |> should.equal(Ok(d.source.seq))
+  // Pending parent work is graph progress even though leaf production is held.
+  ahead(context) |> should.equal(Ok(True))
+  let assert Ok([parent]) = graph.frontier(db, "owner")
+  parent.depth |> should.equal(1)
+  ahead(context) |> should.equal(Ok(False))
+  conversation.load_sources(db, "owner") |> should.equal(Ok([a, b, c, d, e, f]))
+  let assert Ok(plain) = lcm.strategy("lcm").resolve(context.capacity, None)
+  plain.prepare_ahead |> should.equal(None)
+  cleanup(host, session)
+}
+
+@external(erlang, "albedo_session_memory_test_support", "count_reads")
+fn counted_source_reads(owner: process.Pid, work: fn() -> a) -> #(a, Int, Int)
+
+pub fn one_unit_ahead_reads_only_selected_payloads_and_prefix_lookahead_test() -> Nil {
+  list.each([10, 20, 40], fn(units) {
+    let #(host, session, _) = setup()
+    let db = runtime.ledger(host)
+    list.each(list.repeat(Nil, units + 1), fn(_) {
+      save(
+        host,
+        "Completed source unit with retained details",
+        "Actual completed action",
+      )
+    })
+    let context =
+      context_for(db, "owner", policy_for(db, "owner"), fn(_) {
+        Ok("I remember.")
+      })
+    let assert Ok(strategy) =
+      lcm.strategy("personality").resolve(context.capacity, None)
+    let assert Some(ahead) = strategy.prepare_ahead
+    let #(first, payloads, prefix_rows) =
+      counted_source_reads(store.owner(db), fn() { ahead(context) })
+    let #(rest, remaining_payloads, remaining_prefix_rows) =
+      counted_source_reads(store.owner(db), fn() {
+        list.try_each(list.repeat(Nil, units - 1), fn(_) {
+          ahead(context) |> result.replace(Nil)
+        })
+      })
+    cleanup(host, session)
+    first |> should.equal(Ok(True))
+    rest |> should.equal(Ok(Nil))
+    payloads |> should.equal(2)
+    prefix_rows |> should.equal(3)
+    payloads + remaining_payloads |> should.equal(2 * units)
+    prefix_rows + remaining_prefix_rows |> should.equal(3 * units)
+  })
+}
+
+pub fn background_preparation_uses_owned_composition_without_booting_kernel_test() -> Nil {
+  let #(host, session, _) = setup()
+  save(host, "actual older ask", "actual older own action")
+  save(host, "newest unit", "raw newest action")
+  selection.record_selected(
+    runtime.ledger(host),
+    "owner",
+    selection.SetSession("lcm-memory", True),
+    [],
+    runtime.installed(host),
+    runtime.installed(host),
+  )
+  |> should.be_ok
+  let assert Ok(cached) = runtime.prepare_composition(host, "owner", "/tmp")
+  let seen = process.new_subject()
+  runtime.prepare_ahead(
+    host,
+    "owner",
+    cached,
+    "model",
+    "fixture",
+    None,
+    fn(request) {
+      process.send(seen, request)
+      Ok("I remember my action.")
+    },
+    types.any_images,
+    fn() { True },
+  )
+  |> should.equal(Ok(True))
+  let assert Ok(request) = process.receive(seen, 0)
+  let assert Some(policy) = request.policy
+  policy.lineage.subject
+  |> should.equal(policy_for(runtime.ledger(host), "owner").lineage.subject)
+  store.query(runtime.ledger(host), link.apply) |> should.be_ok
+  let assert Ok(observed) = runtime.observe_loaded(host, "owner")
+  observed.kernel |> should.equal(None)
+  runtime.loaded_sessions(host) |> should.equal(["owner"])
+  cleanup(host, session)
+}
+
+pub fn shared_summarizer_keeps_native_usage_when_output_is_unusable_test() -> Nil {
+  let #(host, session, _) = setup()
+  let seen = process.new_subject()
+  let sent = process.new_subject()
+  let upstream =
+    extension.Upstream(
+      "native-test",
+      types.Responses,
+      fn(request, _) {
+        process.send(seen, request)
+        Ok(
+          types.Turn(
+            None,
+            [],
+            [],
+            Some(types.Usage(123, 7, Some(100), None, None, None, Some(2))),
+            types.Complete,
+            None,
+            [],
+          ),
+        )
+      },
+      fn(_) { None },
+      fn() { Some("verified-account") },
+      fn(_) { [] },
+      types.any_images,
+    )
+  let context =
+    loop.CallContext(
+      runtime.ledger(host),
+      upstream,
+      "owner",
+      "fixture",
+      "memory-call",
+      Some(fn(call) { process.send(sent, call) }),
+    )
+  loop.summarize_call(
+    context,
+    compaction.SummaryRequest(
+      "model",
+      None,
+      [types.User("native source")],
+      768,
+      "native summary instruction",
+      compaction.NoEvidence,
+      None,
+      None,
+    ),
+  )
+  |> should.equal(Error("summarizer provider returned no text"))
+  let assert Ok(request) = process.receive(seen, 0)
+  request.tools |> should.equal([])
+  request.max_output_tokens |> should.equal(Some(768))
+  process.receive(sent, 0) |> should.equal(Error(Nil))
+  store.read(
+    runtime.ledger(host),
+    "SELECT kind,input_tokens,output_tokens,account,seq FROM provider_requests WHERE session='owner'",
+    [],
+    {
+      use kind <- decode.field(0, decode.string)
+      use input <- decode.field(1, decode.int)
+      use output <- decode.field(2, decode.int)
+      use account <- decode.field(3, decode.string)
+      use seq <- decode.field(4, decode.optional(decode.int))
+      decode.success(#(kind, input, output, account, seq))
+    },
+  )
+  |> should.equal(Ok([#("summarizer", 123, 7, "verified-account", None)]))
+  conversation.load_sources(runtime.ledger(host), "owner")
+  |> should.equal(Ok([]))
+  cleanup(host, session)
+}
+
+pub fn incomplete_native_tool_unit_defers_leaves_but_not_faithful_parent_progress_test() -> Nil {
+  let #(host, session, _) = setup()
+  let db = runtime.ledger(host)
+  save(host, "first closed ask", "first own action")
+  save(host, "second closed ask", "second own action")
+  let assert Ok(call) =
+    json.parse(
+      "{\"type\":\"function_call\",\"call_id\":\"interrupted-native-call\",\"name\":\"read_file\",\"arguments\":\"{}\"}",
+      types.replay_decoder(types.Responses),
+    )
+  conversation.commit_from(
+    db,
+    "owner",
+    [
+      types.User("interrupted ask"),
+      types.Replay(call),
+      types.User("native capability note one"),
+      types.User("native capability note two"),
+    ],
+    conversation.Idle,
+    None,
+  )
+  |> should.be_ok
+  let assert Ok([a, b, c, d, _, _, _, _]) =
+    conversation.load_sources(db, "owner")
+  let policy = policy_for(db, "owner")
+  let context =
+    context_for(db, "owner", policy, fn(_) {
+      Ok("I remember my completed action.")
+    })
+  let assert Ok(left) = formation.leaves(context, [a, b], 768, policy)
+  let assert Ok(right) = formation.leaves(context, [c, d], 768, policy)
+  let assert Ok(snapshot) = graph.snapshot(db, "owner")
+  graph.commit_leaves(
+    db,
+    "owner",
+    snapshot,
+    list.append(left, right),
+    episodes.guard(policy, "owner"),
+  )
+  |> should.equal(Ok(True))
+  let calls = process.new_subject()
+  let context =
+    compaction.Context(..context, summarize: fn(request) {
+      process.send(calls, request)
+      Ok("I remember my completed actions.")
+    })
+  let assert Ok(strategy) =
+    lcm.strategy("personality").resolve(context.capacity, None)
+  let assert Some(ahead) = strategy.prepare_ahead
+  ahead(context) |> should.equal(Ok(True))
+  // Unanswered replay is still raw. The only permitted progress was a parent.
+  graph.last_seq(db, "owner") |> should.equal(Ok(d.source.seq))
+  let assert Ok([parent]) = graph.frontier(db, "owner")
+  parent.depth |> should.equal(1)
+  let assert Ok(merged) = process.receive(calls, 0)
+  let assert Some(formed) = merged.formation
+  formed.mode |> should.equal("consolidation")
+  ahead(context) |> should.equal(Ok(False))
+  process.receive(calls, 0) |> should.equal(Error(Nil))
+  // Native foreground recovery appends and settles the result. It cannot
+  // remap any already covered source position because that unit was deferred.
+  conversation.commit_from(
+    db,
+    "owner",
+    [
+      types.ToolOutput("interrupted-native-call", "native recovered result", []),
+      types.User("foreground newest ask"),
+    ],
+    conversation.Idle,
+    None,
+  )
+  |> should.be_ok
+  let assert Ok(rows) = conversation.load_sources(db, "owner")
+  let recovered = list.drop(rows, 4) |> list.take(3)
+  list.map(recovered, fn(row) { narration.source_role(row.entry.input) })
+  |> should.equal(["user", "assistant", "tool"])
+  ahead(context) |> should.equal(Ok(True))
+  let assert Ok(last) = list.last(recovered)
+  graph.last_seq(db, "owner") |> should.equal(Ok(last.source.seq))
+  let assert Ok([_, next]) = graph.frontier(db, "owner")
+  let assert Some(frame) = next.frame
+  list.map(frame.sources, fn(row) { row.seq })
+  |> should.equal(list.map(recovered, fn(row) { row.source.seq }))
+  cleanup(host, session)
+}
+
+pub fn forced_lcm_cannot_bypass_unresolved_leading_tool_unit_test() -> Nil {
+  list.each(["personality", "lcm"], fn(name) {
+    let #(host, session, _) = setup()
+    let db = runtime.ledger(host)
+    let assert Ok(call) =
+      json.parse(
+        "{\"type\":\"function_call\",\"call_id\":\"interrupted-call\",\"name\":\"read_file\",\"arguments\":\"{}\"}",
+        types.replay_decoder(types.Responses),
+      )
+    conversation.commit_from(
+      db,
+      "owner",
+      [
+        types.User("interrupted ask"),
+        types.Replay(call),
+        types.User("native capability note one"),
+        types.User("native capability note two"),
+      ],
+      conversation.Idle,
+      None,
+    )
+    |> should.be_ok
+    let assert Ok(rows) = conversation.load_sources(db, "owner")
+    let seen = process.new_subject()
+    let context =
+      context_for(db, "owner", policy_for(db, "owner"), fn(request) {
+        process.send(seen, request)
+        Ok("I remember the supplied history.")
+      })
+    let context = case name {
+      "lcm" -> compaction.Context(..context, summary_policy: None)
+      _ -> context
+    }
+    let assert Ok(strategy) = lcm.strategy(name).resolve(context.capacity, None)
+    compaction.prepare(
+      strategy,
+      context,
+      list.map(rows, fn(row) { row.entry.input }),
+    )
+    |> should.be_error
+    process.receive(seen, 0) |> should.equal(Error(Nil))
+    graph.last_seq(db, "owner") |> should.equal(Ok(0))
+    graph.frontier(db, "owner") |> should.equal(Ok([]))
+    conversation.load_sources(db, "owner") |> should.equal(Ok(rows))
+    cleanup(host, session)
+  })
+}
+
+pub fn active_prefix_accepts_actual_leading_assistant_tool_continuation_test() -> Nil {
+  let #(host, session, _) = setup()
+  let db = runtime.ledger(host)
+  conversation.commit_from(
+    db,
+    "owner",
+    [types.User("legacy covered ask")],
+    conversation.Idle,
+    None,
+  )
+  |> should.be_ok
+  let assert Ok([covered]) = conversation.load_sources(db, "owner")
+  graph.save_leaves(db, "owner", [
+    graph.Leaf(covered.source.seq, covered.source.seq, "legacy fold", None),
+  ])
+  |> should.be_ok
+  conversation.commit_from(
+    db,
+    "owner",
+    [
+      types.Assistant("actual continuation"),
+      types.ToolOutput("retained-native-answer", "actual answer", []),
+      types.User("newest"),
+    ],
+    conversation.Idle,
+    None,
+  )
+  |> should.be_ok
+  let assert Ok([_, assistant, tool, newest]) =
+    conversation.load_sources(db, "owner")
+  let policy = policy_for(db, "owner")
+  let context =
+    context_for(db, "owner", policy, fn(_) {
+      Ok("I remember the continuation.")
+    })
+  let assert Ok(leaves) =
+    formation.leaves(context, [assistant, tool], 768, policy)
+  let assert Ok(snapshot) = graph.snapshot(db, "owner")
+  let assert Ok(source_snapshot) = conversation.snapshot(db, "owner")
+  conversation.first_source_unit(db, source_snapshot, covered.source.seq)
+  |> should.equal(Ok(Some(#(assistant.source.seq, newest.source.seq - 1))))
+  graph.commit_leaves(
+    db,
+    "owner",
+    snapshot,
+    leaves,
+    episodes.guard(policy, "owner"),
+  )
+  |> should.equal(Ok(True))
+  graph.last_seq(db, "owner") |> should.equal(Ok(tool.source.seq))
+  conversation.load_sources(db, "owner")
+  |> should.equal(Ok([covered, assistant, tool, newest]))
+  cleanup(host, session)
+}
+
+pub fn forced_lcm_can_condense_valid_frontier_while_leading_raw_unit_is_unresolved_test() -> Nil {
+  list.each(["personality", "lcm"], fn(name) {
+    let #(host, session, _) = setup()
+    let db = runtime.ledger(host)
+    save(host, "first completed ask", "first actual action")
+    save(host, "second completed ask", "second actual action")
+    let assert Ok(call) =
+      json.parse(
+        "{\"type\":\"function_call\",\"call_id\":\"pending\",\"name\":\"read_file\",\"arguments\":\"{}\"}",
+        types.replay_decoder(types.Responses),
+      )
+    conversation.commit_from(
+      db,
+      "owner",
+      [
+        types.User("interrupted ask"),
+        types.Replay(call),
+        types.User("later note"),
+        types.User("newest note"),
+      ],
+      conversation.Idle,
+      None,
+    )
+    |> should.be_ok
+    let assert Ok(rows) = conversation.load_sources(db, "owner")
+    let assert [a, b, c, d, ..] = rows
+    // An existing oversized generic frontier can still be condensed without
+    // consuming or skipping the first unresolved raw source unit.
+    graph.save_leaves(db, "owner", [
+      graph.Leaf(
+        a.source.seq,
+        b.source.seq,
+        string.repeat("retained detail ", 5000),
+        None,
+      ),
+      graph.Leaf(
+        c.source.seq,
+        d.source.seq,
+        string.repeat("retained detail ", 5000),
+        None,
+      ),
+    ])
+    |> should.be_ok
+    let calls = process.new_subject()
+    let context =
+      context_for(db, "owner", policy_for(db, "owner"), fn(request) {
+        process.send(calls, request)
+        Ok("Completed earlier actions.")
+      })
+    let context = case name {
+      "lcm" -> compaction.Context(..context, summary_policy: None)
+      _ -> context
+    }
+    let assert Ok(strategy) = lcm.strategy(name).resolve(context.capacity, None)
+    compaction.prepare(
+      strategy,
+      context,
+      list.map(rows, fn(row) { row.entry.input }),
+    )
+    |> should.be_ok
+    let assert Ok([parent]) = graph.frontier(db, "owner")
+    parent.depth |> should.equal(1)
+    graph.last_seq(db, "owner") |> should.equal(Ok(d.source.seq))
+    process.receive(calls, 0) |> should.be_ok
+    conversation.load_sources(db, "owner") |> should.equal(Ok(rows))
+    cleanup(host, session)
+  })
 }

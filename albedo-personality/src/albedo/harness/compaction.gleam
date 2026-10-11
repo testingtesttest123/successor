@@ -3,7 +3,6 @@
 import albedo/daemon/note
 import albedo/daemon/store
 import albedo/harness/extensions/lcm/narration_types
-import albedo/harness/extensions/python/kernel
 import albedo/harness/request_context
 import albedo/openai_api/types
 import gleam/dynamic/decode
@@ -67,7 +66,8 @@ pub type Context {
   Context(
     store: store.Store,
     session: String,
-    kernel: kernel.Kernel,
+    /// Host-owned liveness. It never reads model text or calls another actor.
+    active: fn() -> Bool,
     model: String,
     source: String,
     pinned_tokens: Int,
@@ -365,6 +365,8 @@ pub type Strategy {
 /// forced compaction may derive a synthetic estimate later, after capture.
 pub type Resolved {
   Resolved(
+    /// One background graph step, when this strategy owns native preparation.
+    prepare_ahead: Option(fn(Context) -> Result(Bool, String)),
     capacity: Option(Capacity),
     /// Reads saved history projection without writes or model work.
     project: fn(Context, List(types.Input)) -> Result(View, String),
