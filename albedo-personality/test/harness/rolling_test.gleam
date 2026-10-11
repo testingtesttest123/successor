@@ -145,10 +145,18 @@ pub fn long_eviction_summarizes_in_chunks_test() -> Nil {
       },
       history,
     )
-  let assert Ok(compaction.SummaryRequest(_, None, first, _, _, _, _)) =
+  let assert Ok(compaction.SummaryRequest(_, None, first, _, _, _, _, None)) =
     process.receive(requests, 0)
-  let assert Ok(compaction.SummaryRequest(_, Some(previous), _, _, _, _, _)) =
-    process.receive(requests, 0)
+  let assert Ok(compaction.SummaryRequest(
+    _,
+    Some(previous),
+    _,
+    _,
+    _,
+    _,
+    _,
+    None,
+  )) = process.receive(requests, 0)
   previous |> should.equal("after " <> int.to_string(list.length(first)))
   should.be_true(compaction.estimate_inputs(first) <= 1000)
   runtime.stop(host)

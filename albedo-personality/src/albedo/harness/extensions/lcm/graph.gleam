@@ -1,9 +1,11 @@
 //// Derived summary tree. The transcript remains the authority for every leaf.
 
 import albedo/daemon/store
+import albedo/harness/extensions/lcm/narration_types as narration
 import gleam/dict.{type Dict}
 import gleam/dynamic/decode
 import gleam/int
+import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -11,19 +13,59 @@ import gleam/string
 import sqlight
 
 pub type Node {
-  Node(id: Int, depth: Int, first_seq: Int, last_seq: Int, summary: String)
+  Node(
+    id: Int,
+    depth: Int,
+    first_seq: Int,
+    last_seq: Int,
+    summary: String,
+    frame: Option(narration.Frame),
+  )
 }
 
 pub type Leaf {
-  Leaf(first_seq: Int, last_seq: Int, summary: String)
+  Leaf(
+    first_seq: Int,
+    last_seq: Int,
+    summary: String,
+    frame: Option(narration.Frame),
+  )
 }
 
 pub fn initialise(ledger: store.Store) -> Result(Nil, String) {
   store.query(ledger, fn(db) {
-    store.exec(
-      db,
-      "CREATE TABLE IF NOT EXISTS lcm_compaction_state(session TEXT PRIMARY KEY REFERENCES sessions(id),last_seq INTEGER NOT NULL CHECK(last_seq >= 0)); CREATE TABLE IF NOT EXISTS lcm_compaction_node(id INTEGER PRIMARY KEY AUTOINCREMENT,session TEXT NOT NULL REFERENCES sessions(id),depth INTEGER NOT NULL CHECK(depth >= 0),first_seq INTEGER NOT NULL,last_seq INTEGER NOT NULL,summary TEXT NOT NULL); CREATE INDEX IF NOT EXISTS lcm_compaction_node_session ON lcm_compaction_node(session,first_seq); CREATE TABLE IF NOT EXISTS lcm_compaction_edge(child INTEGER PRIMARY KEY REFERENCES lcm_compaction_node(id),parent INTEGER NOT NULL REFERENCES lcm_compaction_node(id),position INTEGER NOT NULL CHECK(position >= 0)); CREATE INDEX IF NOT EXISTS lcm_compaction_edge_parent ON lcm_compaction_edge(parent,position);",
-    )
+    store.transaction(db, fn() {
+      use _ <- result.try(store.exec(
+        db,
+        "CREATE TABLE IF NOT EXISTS lcm_compaction_state(session TEXT PRIMARY KEY REFERENCES sessions(id),last_seq INTEGER NOT NULL CHECK(last_seq >= 0)); CREATE TABLE IF NOT EXISTS lcm_compaction_node(id INTEGER PRIMARY KEY AUTOINCREMENT,session TEXT NOT NULL REFERENCES sessions(id),depth INTEGER NOT NULL CHECK(depth >= 0),first_seq INTEGER NOT NULL,last_seq INTEGER NOT NULL,summary TEXT NOT NULL,narration TEXT,formation_id INTEGER); CREATE INDEX IF NOT EXISTS lcm_compaction_node_session ON lcm_compaction_node(session,first_seq); CREATE TABLE IF NOT EXISTS lcm_compaction_edge(child INTEGER PRIMARY KEY REFERENCES lcm_compaction_node(id),parent INTEGER NOT NULL REFERENCES lcm_compaction_node(id),position INTEGER NOT NULL CHECK(position >= 0)); CREATE INDEX IF NOT EXISTS lcm_compaction_edge_parent ON lcm_compaction_edge(parent,position);",
+      ))
+      use columns <- result.try(store.rows(
+        db,
+        "PRAGMA table_info(lcm_compaction_node)",
+        [],
+        decode.field(1, decode.string, decode.success),
+      ))
+      use _ <- result.try(case list.contains(columns, "narration") {
+        True -> Ok(Nil)
+        False ->
+          store.exec(
+            db,
+            "ALTER TABLE lcm_compaction_node ADD COLUMN narration TEXT",
+          )
+      })
+      use _ <- result.try(case list.contains(columns, "formation_id") {
+        True -> Ok(Nil)
+        False ->
+          store.exec(
+            db,
+            "ALTER TABLE lcm_compaction_node ADD COLUMN formation_id INTEGER; UPDATE lcm_compaction_node SET formation_id=id",
+          )
+      })
+      store.exec(
+        db,
+        "CREATE INDEX IF NOT EXISTS lcm_compaction_node_narrator_formation ON lcm_compaction_node(json_extract(narration,'$.narrator.subject'),formation_id DESC,id) WHERE narration IS NOT NULL",
+      )
+    })
   })
 }
 
@@ -88,7 +130,7 @@ pub fn frontier(
 ) -> Result(List(Node), String) {
   store.read(
     ledger,
-    "SELECT n.id,n.depth,n.first_seq,n.last_seq,n.summary FROM lcm_compaction_node n LEFT JOIN lcm_compaction_edge e ON e.child=n.id WHERE n.session=? AND e.child IS NULL ORDER BY n.first_seq,n.id",
+    "SELECT n.id,n.depth,n.first_seq,n.last_seq,n.summary,n.narration FROM lcm_compaction_node n LEFT JOIN lcm_compaction_edge e ON e.child=n.id WHERE n.session=? AND e.child IS NULL ORDER BY n.first_seq,n.id",
     [sqlight.text(session)],
     node_decoder(),
   )
@@ -101,8 +143,25 @@ pub fn node(
 ) -> Result(Option(Node), String) {
   one_row(
     ledger,
-    "SELECT id,depth,first_seq,last_seq,summary FROM lcm_compaction_node WHERE session=? AND id=?",
+    "SELECT id,depth,first_seq,last_seq,summary,narration FROM lcm_compaction_node WHERE session=? AND id=?",
     [sqlight.text(session), sqlight.int(id)],
+    node_decoder(),
+  )
+}
+
+/// The latest actual generated memory by this stable narrator, including a
+/// child hidden beneath an unknown/multiple-narrator parent. This reads only
+/// native graph metadata and never resolves personality bindings or names.
+/// Original formation chronology survives forks; local IDs remain navigation.
+pub fn latest_narrated(
+  ledger: store.Store,
+  session: String,
+  subject: String,
+) -> Result(Option(Node), String) {
+  one_row(
+    ledger,
+    "SELECT id,depth,first_seq,last_seq,summary,narration FROM lcm_compaction_node WHERE session=? AND narration IS NOT NULL AND json_extract(narration,'$.narrator.subject')=? ORDER BY formation_id DESC,id ASC LIMIT 1",
+    [sqlight.text(session), sqlight.text(subject)],
     node_decoder(),
   )
 }
@@ -138,7 +197,7 @@ pub fn inherit_fork_prefix(
     [1] ->
       store.rows(
         db,
-        "SELECT id,depth,first_seq,last_seq,summary FROM lcm_compaction_node WHERE session=? AND last_seq<=? ORDER BY id",
+        "SELECT id,depth,first_seq,last_seq,summary,narration FROM lcm_compaction_node WHERE session=? AND last_seq<=? ORDER BY id",
         [sqlight.text(source), sqlight.int(checkpoint)],
         node_decoder(),
       )
@@ -173,6 +232,13 @@ fn inherit_nodes(
     list.try_fold(nodes, dict.new(), fn(node_map, node) {
       use first <- result.try(mapped(seq_map, node.first_seq))
       use last <- result.try(mapped(seq_map, node.last_seq))
+      use formed <- result.try(store.one(
+        db,
+        "SELECT COALESCE(formation_id,id) FROM lcm_compaction_node WHERE id=?",
+        [sqlight.int(node.id)],
+        decode.field(0, decode.int, decode.success),
+        "fork source memory chronology disappeared",
+      ))
       use id <- result.try(insert_node(
         db,
         branch,
@@ -180,8 +246,36 @@ fn inherit_nodes(
         first,
         last,
         node.summary,
+        node.frame,
       ))
+      use _ <- result.try(
+        store.run(
+          db,
+          "UPDATE lcm_compaction_node SET formation_id=? WHERE id=?",
+          [sqlight.int(formed), sqlight.int(id)],
+        ),
+      )
       Ok(dict.insert(node_map, node.id, id))
+    }),
+  )
+  use _ <- result.try(
+    list.try_each(nodes, fn(node) {
+      use copied <- result.try(mapped(node_map, node.id))
+      use frame <- result.try(remap_frame(
+        node.frame,
+        source,
+        branch,
+        seq_map,
+        node_map,
+      ))
+      store.run(db, "UPDATE lcm_compaction_node SET narration=? WHERE id=?", [
+        case frame {
+          None -> sqlight.null()
+          Some(value) ->
+            sqlight.text(json.to_string(narration.frame_json(value)))
+        },
+        sqlight.int(copied),
+      ])
     }),
   )
   use edges <- result.try(
@@ -254,6 +348,7 @@ pub fn save_leaves(
                 leaf.first_seq,
                 leaf.last_seq,
                 leaf.summary,
+                leaf.frame,
               )
               |> result.replace(Nil)
             }),
@@ -292,6 +387,7 @@ pub fn save_parent(
             first.first_seq,
             last.last_seq,
             summary,
+            None,
           ))
           children
           |> list.index_map(fn(child, position) { #(child.id, position) })
@@ -318,7 +414,8 @@ fn node_decoder() -> decode.Decoder(Node) {
   use first <- decode.field(2, decode.int)
   use last <- decode.field(3, decode.int)
   use summary <- decode.field(4, decode.string)
-  decode.success(Node(id, depth, first, last, summary))
+  use frame <- decode.field(5, narration.stored_decoder())
+  decode.success(Node(id, depth, first, last, summary, frame))
 }
 
 fn insert_node(
@@ -328,21 +425,37 @@ fn insert_node(
   first: Int,
   last: Int,
   summary: String,
+  frame: Option(narration.Frame),
 ) -> Result(Int, String) {
   use rows <- result.try(store.rows(
     db,
-    "INSERT INTO lcm_compaction_node(session,depth,first_seq,last_seq,summary) VALUES(?,?,?,?,?) RETURNING id",
+    "INSERT INTO lcm_compaction_node(session,depth,first_seq,last_seq,summary,narration) VALUES(?,?,?,?,?,?) RETURNING id",
     [
       sqlight.text(session),
       sqlight.int(depth),
       sqlight.int(first),
       sqlight.int(last),
       sqlight.text(summary),
+      case frame {
+        None -> sqlight.null()
+        Some(value) -> sqlight.text(json.to_string(narration.frame_json(value)))
+      },
     ],
     decode.field(0, decode.int, decode.success),
   ))
   case rows {
-    [id] -> Ok(id)
+    [id] -> {
+      // One global original formation ordinal. Copying a node remaps local IDs
+      // but preserves this fact; it is never inferred from narrative prose.
+      use _ <- result.map(
+        store.run(
+          db,
+          "UPDATE lcm_compaction_node SET formation_id=? WHERE id=?",
+          [sqlight.int(id), sqlight.int(id)],
+        ),
+      )
+      id
+    }
     _ -> Error("LCM node insert returned no identity")
   }
 }
@@ -370,11 +483,11 @@ pub fn list_page(
     use nodes <- result.try(
       store.rows(
         db,
-        "SELECT n.id,n.depth,n.first_seq,n.last_seq,n.summary,NOT EXISTS(SELECT 1 FROM lcm_compaction_edge e WHERE e.child=n.id) FROM lcm_compaction_node n WHERE n.session=? ORDER BY n.id LIMIT ? OFFSET ?",
+        "SELECT n.id,n.depth,n.first_seq,n.last_seq,n.summary,n.narration,NOT EXISTS(SELECT 1 FROM lcm_compaction_edge e WHERE e.child=n.id) FROM lcm_compaction_node n WHERE n.session=? ORDER BY n.id LIMIT ? OFFSET ?",
         [sqlight.text(session), sqlight.int(limit), sqlight.int(offset)],
         {
           use node <- decode.then(node_decoder())
-          use frontier <- decode.field(5, decode.int)
+          use frontier <- decode.field(6, decode.int)
           decode.success(#(node, frontier == 1))
         },
       ),
@@ -440,7 +553,7 @@ fn search_node_pages(
 ) -> Result(NodeSearchPage, String) {
   use nodes <- result.try(store.read(
     ledger,
-    "SELECT id,depth,first_seq,last_seq,summary FROM lcm_compaction_node WHERE "
+    "SELECT id,depth,first_seq,last_seq,summary,narration FROM lcm_compaction_node WHERE "
       <> where
       <> " AND id>? AND id<=? ORDER BY id LIMIT 128",
     list.append(arguments, [sqlight.int(after), sqlight.int(upper)]),
@@ -499,6 +612,235 @@ pub fn covering_nodes(
         [id] -> dict.insert(found, seq, id)
         _ -> found
       })
+    })
+  })
+}
+
+fn remap_frame(
+  frame: Option(narration.Frame),
+  source: String,
+  branch: String,
+  seqs: Dict(Int, Int),
+  nodes: Dict(Int, Int),
+) -> Result(Option(narration.Frame), String) {
+  case frame {
+    None -> Ok(None)
+    Some(frame) -> {
+      use sources <- result.try(
+        list.try_map(frame.sources, fn(row) {
+          case row.session == source {
+            False -> Ok(row)
+            True -> {
+              use seq <- result.map(mapped(seqs, row.seq))
+              narration.Boundary(..row, session: branch, seq:)
+            }
+          }
+        }),
+      )
+      use children <- result.try(
+        list.try_map(frame.children, fn(child) {
+          case child.session == source {
+            False -> Ok(child)
+            True -> {
+              use id <- result.try(mapped(nodes, child.id))
+              use first <- result.try(mapped(seqs, child.first_seq))
+              use last <- result.map(mapped(seqs, child.last_seq))
+              narration.Child(
+                ..child,
+                session: branch,
+                id:,
+                first_seq: first,
+                last_seq: last,
+              )
+            }
+          }
+        }),
+      )
+      Ok(Some(narration.Frame(..frame, sources:, children:)))
+    }
+  }
+}
+
+pub type Snapshot {
+  Snapshot(covered: Int, frontier_ids: List(Int), source_through: Int)
+}
+
+pub type CommitGuard =
+  fn(sqlight.Connection) -> Result(Bool, String)
+
+fn snapshot_in(
+  db: sqlight.Connection,
+  session: String,
+) -> Result(Snapshot, String) {
+  use covered <- result.try(store.one(
+    db,
+    "SELECT COALESCE((SELECT last_seq FROM lcm_compaction_state WHERE session=?),0)",
+    [sqlight.text(session)],
+    decode.field(0, decode.int, decode.success),
+    "LCM cursor unavailable",
+  ))
+  use frontier <- result.try(store.rows(
+    db,
+    "SELECT n.id FROM lcm_compaction_node n WHERE n.session=? AND NOT EXISTS(SELECT 1 FROM lcm_compaction_edge e WHERE e.child=n.id) ORDER BY n.first_seq,n.id",
+    [sqlight.text(session)],
+    decode.field(0, decode.int, decode.success),
+  ))
+  use upper <- result.map(store.one(
+    db,
+    "SELECT COALESCE(MAX(seq),0) FROM transcript WHERE session=?",
+    [sqlight.text(session)],
+    decode.field(0, decode.int, decode.success),
+    "LCM source boundary unavailable",
+  ))
+  Snapshot(covered, frontier, upper)
+}
+
+/// One store turn captures all three stale-result guards together.
+pub fn snapshot(
+  ledger: store.Store,
+  session: String,
+) -> Result(Snapshot, String) {
+  store.query(ledger, snapshot_in(_, session))
+}
+
+pub fn unguarded(_: sqlight.Connection) -> Result(Bool, String) {
+  Ok(True)
+}
+
+pub fn commit_leaves(
+  ledger: store.Store,
+  session: String,
+  expected: Snapshot,
+  leaves: List(Leaf),
+  guard: CommitGuard,
+) -> Result(Bool, String) {
+  store.query(ledger, fn(db) {
+    store.transaction(db, fn() {
+      use current <- result.try(snapshot_in(db, session))
+      use valid <- result.try(guard(db))
+      case current == expected && valid, list.last(leaves) {
+        True, Ok(last) -> {
+          use _ <- result.try(validate_leaves(
+            leaves,
+            expected.covered,
+            expected.source_through,
+          ))
+          use _ <- result.try(
+            list.try_each(leaves, fn(leaf) {
+              insert_node(
+                db,
+                session,
+                0,
+                leaf.first_seq,
+                leaf.last_seq,
+                leaf.summary,
+                leaf.frame,
+              )
+              |> result.replace(Nil)
+            }),
+          )
+          use _ <- result.try(
+            store.run(
+              db,
+              "INSERT INTO lcm_compaction_state(session,last_seq) VALUES(?,?) ON CONFLICT(session) DO UPDATE SET last_seq=excluded.last_seq",
+              [sqlight.text(session), sqlight.int(last.last_seq)],
+            ),
+          )
+          Ok(True)
+        }
+        _, _ -> Ok(False)
+      }
+    })
+  })
+}
+
+fn validate_leaves(
+  leaves: List(Leaf),
+  after: Int,
+  upper: Int,
+) -> Result(Nil, String) {
+  case leaves {
+    [] -> Ok(Nil)
+    [leaf, ..rest] ->
+      case
+        leaf.first_seq > after
+        && leaf.last_seq >= leaf.first_seq
+        && leaf.last_seq <= upper
+      {
+        False -> Error("LCM leaf exceeds captured source range")
+        True -> validate_leaves(rest, leaf.last_seq, upper)
+      }
+  }
+}
+
+pub fn commit_parent(
+  ledger: store.Store,
+  session: String,
+  expected: Snapshot,
+  children: List(Node),
+  summary: String,
+  frame: Option(narration.Frame),
+  guard: CommitGuard,
+) -> Result(Bool, String) {
+  store.query(ledger, fn(db) {
+    store.transaction(db, fn() {
+      use current <- result.try(snapshot_in(db, session))
+      use valid <- result.try(guard(db))
+      case current == expected && valid {
+        False -> Ok(False)
+        True -> {
+          // Require the actual contiguous frontier group, not caller-supplied spans.
+          use actual <- result.try(store.rows(
+            db,
+            "SELECT n.id,n.depth,n.first_seq,n.last_seq,n.summary,n.narration FROM lcm_compaction_node n WHERE n.session=? AND NOT EXISTS(SELECT 1 FROM lcm_compaction_edge e WHERE e.child=n.id) ORDER BY n.first_seq,n.id",
+            [sqlight.text(session)],
+            node_decoder(),
+          ))
+          case children, list.last(children) {
+            [first, _, ..], Ok(last) -> {
+              let candidate =
+                list.drop_while(actual, fn(node) { node.id != first.id })
+                |> list.take(list.length(children))
+              use _ <- result.try(case candidate == children {
+                True -> Ok(Nil)
+                False ->
+                  Error("LCM parent children do not match captured frontier")
+              })
+              let depth =
+                1
+                + list.fold(children, 0, fn(highest, child) {
+                  int.max(highest, child.depth)
+                })
+              use parent <- result.try(insert_node(
+                db,
+                session,
+                depth,
+                first.first_seq,
+                last.last_seq,
+                summary,
+                frame,
+              ))
+              use _ <- result.try(
+                children
+                |> list.index_map(fn(child, position) { #(child.id, position) })
+                |> list.try_each(fn(item) {
+                  store.run(
+                    db,
+                    "INSERT INTO lcm_compaction_edge(child,parent,position) VALUES(?,?,?)",
+                    [
+                      sqlight.int(item.0),
+                      sqlight.int(parent),
+                      sqlight.int(item.1),
+                    ],
+                  )
+                }),
+              )
+              Ok(True)
+            }
+            _, _ -> Error("LCM needs at least two nodes to condense")
+          }
+        }
+      }
     })
   })
 }

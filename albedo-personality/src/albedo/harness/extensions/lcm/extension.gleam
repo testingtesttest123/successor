@@ -4,12 +4,13 @@
 import albedo/daemon/conversation
 import albedo/daemon/store
 import albedo/daemon/transcript
-import albedo/daemon/transcript_attribution
 import albedo/harness/compaction
 import albedo/harness/extension as harness_extension
+import albedo/harness/extensions/lcm/formation
 import albedo/harness/extensions/lcm/graph
+import albedo/harness/extensions/lcm/narration
+import albedo/harness/extensions/personality/episodes
 import albedo/harness/extensions/rolling/extension as rolling
-import albedo/harness/request_context
 import albedo/harness/settings
 import albedo/openai_api/types
 import gleam/dynamic/decode
@@ -88,7 +89,7 @@ pub fn stored_prior(
         snapshot,
         covered,
       ))
-      Ok(split(frontier, history, stats, None, 0))
+      Ok(split(frontier, history, stats, None, 0, None, session))
     }
   }
 }
@@ -125,7 +126,16 @@ fn project(
   let window =
     rolling.effective_window(config.context_window_tokens, context, history)
   let current =
-    projection(frontier, history, stats, tail_budget(config, window), 1)
+    projection(
+      frontier,
+      history,
+      stats,
+      tail_budget(config, window),
+      1,
+      subject(context),
+      context.session,
+    )
+  use current <- result.try(continuity(context, frontier, current, window))
   let estimated = context.pinned_tokens + compaction.estimate_inputs(current)
   case window {
     None ->
@@ -174,7 +184,14 @@ fn compact(
   context: compaction.Context,
   history: List(types.Input),
 ) -> Result(Bool, String) {
+  use expected <- result.try(graph.snapshot(context.store, context.session))
   use Saved(snapshot, covered, frontier, stats) <- result.try(saved(context))
+  use _ <- result.try(compaction.require(
+    expected.covered == covered
+      && expected.frontier_ids == list.map(frontier, fn(node) { node.id })
+      && expected.source_through == snapshot.upper,
+    "LCM source planning snapshot changed",
+  ))
   let window =
     rolling.effective_window(config.context_window_tokens, context, history)
   use compaction.Capacity(tokens: capacity, ..) <- result.try(option.to_result(
@@ -211,7 +228,17 @@ fn compact(
       int.max(32, { capacity - context.pinned_tokens } / 4),
     )
   use leaves <- result.try(summarize_leaves(context, eligible, summary_limit))
-  use _ <- result.try(graph.save_leaves(context.store, context.session, leaves))
+  use committed <- result.try(graph.commit_leaves(
+    context.store,
+    context.session,
+    expected,
+    leaves,
+    commit_guard(context),
+  ))
+  use _ <- result.try(compaction.require(
+    committed || leaves == [],
+    "LCM generated result is stale; sources remain unchanged",
+  ))
   use frontier <- result.try(graph.frontier(context.store, context.session))
   use covered <- result.try(graph.last_seq(context.store, context.session))
   use stats <- result.try(conversation.source_stats(
@@ -229,7 +256,16 @@ fn compact(
     summary_limit,
     0,
   ))
-  let next = projection(frontier, history, stats, tail_budget, 1)
+  let next =
+    projection(
+      frontier,
+      history,
+      stats,
+      tail_budget,
+      1,
+      subject(context),
+      context.session,
+    )
   use _ <- result.try(compaction.require(
     context.pinned_tokens + compaction.estimate_inputs(next) < capacity
       || context.force,
@@ -310,9 +346,19 @@ fn projection(
   stats: conversation.SourceStats,
   tail_budget: Option(Int),
   minimum_tail_units: Int,
+  current_subject: Option(String),
+  session: String,
 ) -> List(types.Input) {
   let compaction.Prior(folds, rest) =
-    split(frontier, history, stats, tail_budget, minimum_tail_units)
+    split(
+      frontier,
+      history,
+      stats,
+      tail_budget,
+      minimum_tail_units,
+      current_subject,
+      session,
+    )
   list.append(folds, rest)
 }
 
@@ -322,6 +368,8 @@ fn split(
   stats: conversation.SourceStats,
   tail_budget: Option(Int),
   minimum_tail_units: Int,
+  current_subject: Option(String),
+  session: String,
 ) -> compaction.Prior {
   case frontier {
     [] -> compaction.Prior([], history)
@@ -339,7 +387,15 @@ fn split(
           int.max(minimum, stats.uncovered_users),
           tail_budget,
         )
-      compaction.Prior(list.map(nodes, node_input), tail)
+      compaction.Prior(
+        list.flat_map(nodes, fn(node) {
+          case current_subject {
+            None -> [node_input(node)]
+            Some(_) -> narration.render_scoped(node, session, current_subject)
+          }
+        }),
+        tail,
+      )
     }
   }
 }
@@ -365,13 +421,18 @@ fn summarize_leaves(
   eligible: List(transcript.SourcedEntry),
   summary_limit: Int,
 ) -> Result(List(graph.Leaf), String) {
-  // Reserve the complete instruction head and the maximum bounded evidence
-  // envelope before chunking. As before, never split an oversized whole unit.
-  let overhead = case context.summary_policy {
-    None -> 0
-    Some(_) ->
-      compaction.estimate_pinned(summary_instructions(context), []) + 1056
+  case context.summary_policy {
+    Some(policy) -> formation.leaves(context, eligible, summary_limit, policy)
+    None -> generic_leaves(context, eligible, summary_limit)
   }
+}
+
+fn generic_leaves(
+  context: compaction.Context,
+  eligible: List(transcript.SourcedEntry),
+  summary_limit: Int,
+) -> Result(List(graph.Leaf), String) {
+  let overhead = 0
   let chunks =
     rolling.chunk_units(
       source_units(eligible),
@@ -383,23 +444,14 @@ fn summarize_leaves(
     [first, ..rest] -> {
       let last = list.fold(rest, first, fn(_, item) { item })
       let inputs = list.map(chunk, fn(item) { item.entry.input })
-      let evidence = case context.summary_policy {
-        None -> compaction.NoEvidence
-        Some(policy) ->
-          compaction.Leaves(
-            context.session,
-            [#(first.source.seq, last.source.seq)],
-            Some(policy.lineage),
-            leaf_attributions(context, chunk, Some(policy.lineage)),
-          )
-      }
+      let evidence = compaction.NoEvidence
       use summary <- result.try(summarize_bounded(
         context,
         inputs,
         evidence,
         summary_limit,
       ))
-      Ok(graph.Leaf(first.source.seq, last.source.seq, summary))
+      Ok(graph.Leaf(first.source.seq, last.source.seq, summary, None))
     }
   }
 }
@@ -447,7 +499,16 @@ fn condense_until_fit(
   summary_limit: Int,
   attempts: Int,
 ) -> Result(List(graph.Node), String) {
-  let view = projection(frontier, history, stats, tail_budget, 1)
+  let view =
+    projection(
+      frontier,
+      history,
+      stats,
+      tail_budget,
+      1,
+      subject(context),
+      context.session,
+    )
   let estimated = context.pinned_tokens + compaction.estimate_inputs(view)
   case estimated < capacity || attempts >= 16, frontier {
     False, [_, _, ..] -> {
@@ -455,30 +516,30 @@ fn condense_until_fit(
         None -> list.take(frontier, 4)
         Some(_) -> condensation_group(context, frontier)
       }
-      let input = list.map(group, node_input)
-      let evidence = case context.summary_policy {
-        None -> compaction.NoEvidence
-        Some(policy) ->
-          compaction.Nodes(
-            context.session,
-            list.map(group, fn(node) {
-              #(node.id, node.first_seq, node.last_seq)
-            }),
-            Some(policy.lineage),
-            [],
+      use expected <- result.try(graph.snapshot(context.store, context.session))
+      use #(summary, frame) <- result.try(case context.summary_policy {
+        Some(policy) -> formation.parent(context, group, summary_limit, policy)
+        None ->
+          summarize_bounded(
+            context,
+            list.map(group, node_input),
+            compaction.NoEvidence,
+            summary_limit,
           )
-      }
-      use summary <- result.try(summarize_bounded(
-        context,
-        input,
-        evidence,
-        summary_limit,
-      ))
-      use _ <- result.try(graph.save_parent(
+          |> result.map(fn(summary) { #(summary, None) })
+      })
+      use committed <- result.try(graph.commit_parent(
         context.store,
         context.session,
+        expected,
         group,
         summary,
+        frame,
+        commit_guard(context),
+      ))
+      use _ <- result.try(compaction.require(
+        committed,
+        "LCM generated parent is stale; sources remain unchanged",
       ))
       use next <- result.try(graph.frontier(context.store, context.session))
       condense_until_fit(
@@ -539,6 +600,7 @@ pub fn attempt_summary(
         Some(_) -> evidence
       },
       context.summary_policy,
+      None,
     )),
   )
   let summary = string.trim(summary)
@@ -557,65 +619,6 @@ fn fits_summary(summary: String, original: Int, limit: Int) -> Bool {
 fn summary_instructions(context: compaction.Context) -> String {
   option.map(context.summary_policy, fn(policy) { policy.instructions })
   |> option.unwrap(compaction.summary_instructions)
-}
-
-/// Sequence/actor facts come only from retained rows and host metadata. No
-/// guessed parent mapping and no caller-chosen actor or authority is accepted.
-fn leaf_attributions(
-  context: compaction.Context,
-  rows: List(transcript.SourcedEntry),
-  lineage: Option(request_context.Lineage),
-) -> List(compaction.Attribution) {
-  case lineage {
-    None -> []
-    Some(lineage) -> {
-      case transcript_attribution.sourced(context.store, rows) {
-        Error(_) -> []
-        Ok(actors) -> {
-          let intervals =
-            list.map(actors, fn(row) {
-              let origin = case row.0 <= lineage.supplied_through {
-                True -> "imported"
-                False ->
-                  case row.1 {
-                    "unknown_origin" -> "imported"
-                    "tool_report"
-                    | "agent_report:" <> _
-                    | "external_report:" <> _ -> "reported"
-                    "system_note:" <> _ -> "imported"
-                    _ ->
-                      case lineage.role {
-                        "owner" -> "experienced"
-                        "delegate" -> "delegate_work"
-                        _ -> "unknown"
-                      }
-                  }
-              }
-              let actor = case row.1, lineage.role {
-                "owner_agent", "delegate" if row.0 > lineage.supplied_through ->
-                  "delegate_agent:" <> context.session
-                _, _ -> row.1
-              }
-              compaction.Attribution(row.0, row.0, origin, Some(actor))
-            })
-          list.fold(intervals, [], fn(acc: List(compaction.Attribution), next) {
-            case acc {
-              [previous, ..rest]
-                if previous.last_seq + 1 == next.first_seq
-                && previous.origin == next.origin
-                && previous.actor == next.actor
-              -> [
-                compaction.Attribution(..previous, last_seq: next.last_seq),
-                ..rest
-              ]
-              _ -> [next, ..acc]
-            }
-          })
-          |> list.reverse
-        }
-      }
-    }
-  }
 }
 
 /// Count the instruction head and full bounded envelope before combining nodes.
@@ -671,4 +674,52 @@ fn strategy_with(
       fn(context, history) { compact(config, context, history) },
     )
   })
+}
+
+fn subject(context: compaction.Context) -> Option(String) {
+  option.map(context.summary_policy, fn(policy) { policy.lineage.subject })
+}
+
+fn commit_guard(context: compaction.Context) -> graph.CommitGuard {
+  case context.summary_policy {
+    None -> graph.unguarded
+    Some(policy) -> episodes.guard(policy, context.session)
+  }
+}
+
+fn continuity(
+  context: compaction.Context,
+  frontier: List(graph.Node),
+  current: List(types.Input),
+  capacity: Option(compaction.Capacity),
+) -> Result(List(types.Input), String) {
+  case frontier, context.summary_policy {
+    [], Some(policy) -> {
+      use previous <- result.map(episodes.latest(
+        context.store,
+        context.session,
+        policy,
+      ))
+      case previous {
+        None -> current
+        Some(#(session, node)) -> {
+          let pair =
+            narration.render_scoped(node, session, Some(policy.lineage.subject))
+          let allowance =
+            option.map(capacity, fn(capacity) {
+              capacity.tokens
+              - context.pinned_tokens
+              - compaction.estimate_inputs(current)
+              - 256
+            })
+            |> option.unwrap(1024)
+          case compaction.estimate_inputs(pair) <= int.min(1024, allowance) {
+            True -> list.append(pair, current)
+            False -> current
+          }
+        }
+      }
+    }
+    _, _ -> Ok(current)
+  }
 }

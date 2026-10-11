@@ -193,3 +193,116 @@ reserve the entire instruction head and bounded evidence envelope. Whole oversiz
 condensation combines at least two whole children. Existing output/shrink
 limits, immutable rows, graph transactions and fork algorithms stay in charge.
 Summaries write only the LCM graph. Request-only recall is never summary evidence.
+
+## autobiographical native LCM
+
+The opt-in `personality` compaction bundle uses the same session-keyed LCM graph.
+It captures the living identity once, then forms memories in its narrator's
+voice. A node's optional immutable narration records stable narrator ID, display
+name and document revision, plus experienced/witnessed/reading/mixed/unknown
+perspective. Leaf boundaries retain actual source row IDs, semantic source roles,
+trusted host actors and original source pointers. Parents retain exact child
+pointers and their actual narrator/perspective facts. No claim ledger, second
+episodic database, source grant or memory acceptance step is involved.
+
+The optional `narration` column is added without rewriting legacy summaries;
+NULL remains unknown regardless of first-person prose. List/search/describe,
+frontier reads and forks preserve frames. The native `formation_id` column records
+an original global formation ordinal separately from local node navigation IDs.
+New formation records its node ordinal; fork copies preserve the original ordinal,
+including nested copies. Continuity orders by that chronology, with an original
+node preferred over its copies on ties, so branching old memory cannot displace a
+newer correction. Initialisation adds/backfills the column and its narrator index
+atomically; pre-narration legacy rows retain unknown narration. Forks remap local row/node references
+inside their existing transaction while retaining original source pointers,
+narrator facts and actors. The frame type owner is independent of the graph and
+rendering modules to avoid cyclic imports.
+
+On a personality request, known same-ID generated memory becomes a source cue
+followed by an actual Assistant recollection. This also applies to that
+narrator's honest witnessed or reading memory. Unknown or other-ID nodes remain
+attributed User evidence. A matching name or an author's first-person text is
+never trusted narrator evidence. Plain LCM and stored folds after switching to a
+non-personality strategy retain the existing User-summary rendering.
+
+Formation uses ordered actual user/assistant source roles, immutable source
+facts and an optional bounded preceding same-narrator recall pair. Provider
+Replay items become visible assistant text and tool-call descriptions; tool
+results become labeled source evidence, so tool-free summary requests contain
+no protocol-specific replay or orphan tool outputs. The normal provider-neutral
+summary boundary and both wire encoders are used. Summary evidence is derived
+and fallible and cannot grant tool or external-action permission.
+
+Long source units are read sequentially in UTF-8 byte slices ending at complete
+codepoints. These are offsets into the normalized source input text, not the
+rendered transcript tools' grapheme offsets. Each reading call records the
+original row and exact byte start/end/total, carries the preceding reflection as
+an actual Assistant input, and generates a reflection of this portion. Every
+successful reflection is retained. Bounded chronological intermediate folds and
+a final consolidation consume all portions; only the whole-unit leaf can then
+commit. A failed portion/fold advances no cursor and creates no partial leaf.
+The generic 16,000-grapheme summarizer cap is not used on this path. Aggregate
+token or metadata overflow triggers smaller chronological folds. Complete adjacent
+actual source rows use compact session-scoped inclusive ranges and actual row
+counts in the request envelope; partial row byte ranges remain explicit. Frame
+positions establish adjacency even across global sequence gaps. Full per-row
+boundary and portion facts remain available to formation, and every durable leaf
+keeps its complete attribution frame.
+
+The adapter's summary-call allowance is at most 12,000 estimated tokens and no
+more than the resolved capacity minus the captured pinned request. Actual
+captured identity/instructions, cues, prior recall, narration/source evidence,
+normalized source inputs and maximum output are all counted before calling the
+summarizer. Reading reserves room for the preceding bounded reflection. Optional
+ordinary prior pairs are omitted whole if they cannot fit. Mandatory context that
+cannot fit refuses explicitly. These bounds are Albedo adapter decisions, not
+claims of identical upstream chunk tuning.
+
+Consolidation rereads one level deeper when all actual deeper inputs fit: leaves
+supply original rows; parents supply their children. Otherwise every chosen
+child summary and its pointer/perspective is supplied with `source_only=true`.
+It never claims unprovided raw sources were read. Parent narrator/perspective
+is derived from actual children rather than replacing it with a new binding.
+
+A new empty owner frontier may include one bounded latest same-ID owner memory
+from deliberately bound history. Same names, unbound rows, delegate-only history
+and other permanent identities are excluded. An existing/copied frontier
+suppresses duplicate continuity. Cross-session cues provide pointers; expansion
+uses existing agents routes only when available. All four LCM tools remain
+current-session scoped, and explicit agents reads retain their existing native
+access behavior. Continuity adds no capability or identity confidentiality ACL.
+
+Foreground formation captures a graph snapshot (covered cursor, ordered frontier
+IDs and source watermark). Leaves and parents compare it again within their
+write transaction. A caller-supplied store-only guard also compares binding and
+native selection/config generation on personality requests. A stale result
+creates no node/edge/cursor fragments; statement errors roll back the whole
+transaction. Providers never run while the store transaction is held. Document
+edits refresh later requests but do not rewrite old frames or invalidate a
+captured formation merely because its document revision is historical. These
+commit seams are reusable by later work; this stage adds no background scheduler
+or automatic child identity lifecycle.
+
+
+### bounded native LCM retrieval metadata
+
+`lcm_list` returns narrator/perspective/count headers and UTF-8 bounded summary
+previews, never full source/child arrays. A page contains at most 20 nodes and
+12,000 encoded entry bytes; `next_offset` advances by the actual returned count.
+`lcm_describe` keeps a bounded header, source range, first 20 child IDs and child
+count. Its `metadata_content` is a UTF-8 byte page of serialized JSON containing
+the complete immutable `narration` frame and all native `children` IDs. Concatenate
+pages using `next_metadata_offset`, then parse the recovered JSON for exact actor,
+role, original-source and child facts. `metadata_offset` defaults to zero and
+`metadata_limit` to 1024 bytes. `summary_offset`/`summary_limit` page summary text
+independently (defaults zero/2048). Both limits are capped at 2048 bytes, offsets
+must be codepoint boundaries, and a limit too small for the next codepoint refuses
+rather than repeating an offset. The full durable frame and current-session-only
+tool scope are unchanged. Like the other optional-argument retrieval tools,
+`lcm_describe` advertises `strict=false`: omitted paging arguments use native
+defaults instead of an invalid strict schema whose properties are not all required.
+
+`commit_leaves` is an internal writer seam: its current foreground caller supplies
+an actual complete contiguous prefix of eligible uncovered session rows. Its
+numeric span validation alone does not prove that source-prefix invariant. Any
+additional writer must enforce actual prefix coverage before advancing the cursor.

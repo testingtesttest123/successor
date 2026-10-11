@@ -14,7 +14,7 @@ import albedo/openai_api/types
 import gleam/option.{None, Some}
 import gleeunit/should
 
-fn host(capacity: Int) -> #(runtime.Runtime, runtime.Session) {
+fn host(capacity: Int) -> runtime.Runtime {
   let installed = [
     memory.extension(),
     lcm.configured_extension(lcm.Config(Some(capacity), 90, 25)),
@@ -43,8 +43,7 @@ fn host(capacity: Int) -> #(runtime.Runtime, runtime.Session) {
         None,
       ),
     )
-  let assert Ok(session) = runtime.open_session(host, "lcm-test", "/tmp")
-  #(host, session)
+  host
 }
 
 fn save(host: runtime.Runtime, inputs: List(types.Input)) -> Nil {
@@ -60,7 +59,7 @@ fn save(host: runtime.Runtime, inputs: List(types.Input)) -> Nil {
 }
 
 pub fn lcm_fork_inside_summary_reuses_only_complete_child_nodes_test() -> Nil {
-  let #(host, _) = host(2000)
+  let host = host(2000)
   let ledger = runtime.ledger(host)
   let original = [
     types.User("first"),
@@ -75,9 +74,9 @@ pub fn lcm_fork_inside_summary_reuses_only_complete_child_nodes_test() -> Nil {
     conversation.load_sources(ledger, "lcm-test")
   let assert Ok(_) =
     graph.save_leaves(ledger, "lcm-test", [
-      graph.Leaf(first.source.seq, second.source.seq, "first unit"),
-      graph.Leaf(third.source.seq, fourth.source.seq, "second unit"),
-      graph.Leaf(fifth.source.seq, sixth.source.seq, "third unit"),
+      graph.Leaf(first.source.seq, second.source.seq, "first unit", None),
+      graph.Leaf(third.source.seq, fourth.source.seq, "second unit", None),
+      graph.Leaf(fifth.source.seq, sixth.source.seq, "third unit", None),
     ])
   let assert Ok([one, two, three]) = graph.frontier(ledger, "lcm-test")
   let assert Ok(_) =

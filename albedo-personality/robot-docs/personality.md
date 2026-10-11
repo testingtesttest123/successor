@@ -39,6 +39,12 @@ Model tools:
   replacement text, so individually bounded inputs cannot amplify into an
   oversized document inside the shared store.
 
+These document tools advertise `strict=false`, following the existing native
+optional-argument convention. Omitted revision, paging and `replace_all` values
+keep their decoder behavior. Both provider wire protocols carry valid non-strict
+schemas rather than marking optional properties as strict-but-not-required.
+Native document/binding authority and write receipts are unchanged.
+
 Native authenticated context supplies actor, session and call ID. Model inputs
 cannot supply these, permanent identity IDs, creation, rebinding, operation IDs,
 aggregate heads or reasons. A committed `(session, call_id)` receipt, document

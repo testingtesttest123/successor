@@ -19,6 +19,7 @@ import albedo/harness/extensions/lcm/graph
 import albedo/harness/extensions/lcm/memory
 import albedo/harness/extensions/personality/extension as personality
 import albedo/harness/extensions/personality/ledger
+import albedo/harness/extensions/personality/projection
 import albedo/harness/extensions/personality/types as p
 import albedo/harness/extensions/python/kernel
 import albedo/harness/loop
@@ -155,8 +156,12 @@ pub fn automatic_and_forced_lcm_receive_captured_policy_and_real_sources_test() 
     let assert Ok(actual) = loop.summarizer_request(request)
     actual.tools |> should.equal([])
     actual.instructions |> should.equal(Some(request.instructions))
-    let assert [types.User(prompt)] = actual.input
-    should.be_true(string.starts_with(prompt, envelope))
+    let assert [
+      types.User(cue),
+      types.User(_),
+      types.Assistant("an owner action"),
+    ] = actual.input
+    should.be_true(string.contains(cue, envelope))
     list.each([types.Responses, types.ChatCompletions], fn(protocol) {
       let assert Ok(wire) = provider_request.encode(protocol, actual)
       let encoded = string_tree.to_string(wire)
@@ -290,8 +295,7 @@ pub fn failed_summary_preserves_cursor_and_native_graph_test() -> Nil {
 }
 
 pub fn envelope_overflow_preserves_exact_identity_and_marks_unknown_test() -> Nil {
-  let lineage =
-    request_context.Lineage("persona", 2, "delegate", 20, Some("working"), [])
+  let lineage = request_context.Lineage("persona", 2, "delegate", 20)
   let policy =
     request_context.SummaryPolicy(
       "policy",
@@ -299,6 +303,8 @@ pub fn envelope_overflow_preserves_exact_identity_and_marks_unknown_test() -> Ni
       3,
       "instructions",
       lineage,
+      "fixture",
+      0,
     )
   let attrs =
     list.repeat(Nil, 40)
@@ -319,6 +325,7 @@ pub fn envelope_overflow_preserves_exact_identity_and_marks_unknown_test() -> Ni
       "instructions",
       compaction.Leaves("branch", [#(1, 40)], Some(lineage), attrs),
       Some(policy),
+      None,
     )
   let assert Ok(envelope) = compaction.summary_envelope(request)
   should.be_true(string.byte_size(envelope) <= 4096)
@@ -356,6 +363,7 @@ pub fn condensation_uses_actual_child_nodes_without_relabeling_old_provenance_te
         a.source.seq,
         b.source.seq,
         string.repeat("historical imported report ", 500),
+        None,
       )
     })
   graph.save_leaves(runtime.ledger(host), "owner", leaves) |> should.be_ok
@@ -463,13 +471,15 @@ pub fn host_chat_notes_and_prebinding_intervals_keep_real_actor_ceiling_test() -
   runtime.stop(host)
 }
 
-pub fn copied_prefix_uses_exact_branch_rows_and_temporary_lineage_without_parent_mapping_test() -> Nil {
+pub fn copied_prefix_uses_exact_branch_rows_with_witnessed_attachment_test() -> Nil {
   let #(host, session, persona) = setup(20_000, 80)
   let ledger = runtime.ledger(host)
   save_submission(host, turn.Chat, "parent report", "parent action")
   let assert Ok(parent_through) = conversation.last_seq(ledger, "owner")
   history.fork(ledger, "owner", "branch", parent_through) |> should.be_ok
   let assert Ok(through) = conversation.last_seq(ledger, "branch")
+  ledger.bind(ledger, "branch", persona.id, 0, through, runtime.installed(host))
+  |> should.be_ok
   conversation.commit_from(
     ledger,
     "branch",
@@ -485,21 +495,16 @@ pub fn copied_prefix_uses_exact_branch_rows_and_temporary_lineage_without_parent
   let assert Ok(rows) = conversation.load_sources(ledger, "branch")
   let assert [first, inherited_assistant, _, last, _] = rows
   should.be_true(first.source.seq > parent_through)
-  let policy =
-    request_context.SummaryPolicy(
-      "fixture",
-      "captured",
-      persona.identity_revision,
-      "persona temporary work",
-      request_context.Lineage(
-        persona.id,
-        1,
-        "delegate",
-        through,
-        Some("working"),
-        [],
-      ),
-    )
+
+  let assert Ok(contribution) =
+    projection.prepare(request_context.Input(
+      ledger,
+      "branch",
+      ["personality", "lcm-memory"],
+      "",
+      request_context.Budget(Some(20_000), Some("fixture"), 0, Some(20_000)),
+    ))
+  let assert Some(policy) = contribution.summary_policy
   let seen = process.new_subject()
   let assert Some(strategy) =
     extension.compaction([
@@ -532,10 +537,9 @@ pub fn copied_prefix_uses_exact_branch_rows_and_temporary_lineage_without_parent
   )
   |> should.be_ok
   let assert Ok(request) = process.receive(seen, 100)
-  let assert compaction.Leaves("branch", [range], Some(lineage), attrs) =
+  let assert compaction.Leaves("branch", [range], Some(_lineage), attrs) =
     request.evidence
   range |> should.equal(#(first.source.seq, last.source.seq))
-  lineage.grants |> should.equal([])
   let assert Ok(inherited_actor) =
     list.find(attrs, fn(attr) {
       attr.first_seq <= inherited_assistant.source.seq
@@ -547,7 +551,7 @@ pub fn copied_prefix_uses_exact_branch_rows_and_temporary_lineage_without_parent
     list.find(attrs, fn(attr) {
       attr.first_seq <= last.source.seq && attr.last_seq >= last.source.seq
     })
-  local_actor.actor |> should.equal(Some("delegate_agent:branch"))
+  local_actor.actor |> should.equal(Some("owner_agent"))
 
   should.be_true(
     list.any(attrs, fn(attr) {
@@ -556,8 +560,7 @@ pub fn copied_prefix_uses_exact_branch_rows_and_temporary_lineage_without_parent
   )
   should.be_true(
     list.any(attrs, fn(attr) {
-      attr.origin == "delegate_work"
-      && attr.actor == Some("delegate_agent:branch")
+      attr.origin == "experienced" && attr.actor == Some("owner_agent")
     }),
   )
   let assert Ok(envelope) = compaction.summary_envelope(request)
@@ -696,26 +699,13 @@ pub fn trusted_mail_reporter_survives_native_lcm_summary_evidence_test() -> Nil 
   runtime.stop(host)
 }
 
-pub fn grant_and_actor_intervals_share_the_exact_thirty_two_boundary_test() -> Nil {
-  let grants =
-    list.repeat(Nil, 16)
-    |> list.index_map(fn(_, seq) {
-      request_context.SourceGrant("parent", seq + 1, seq + 1, "digest")
-    })
+pub fn actor_intervals_share_the_exact_thirty_two_boundary_test() -> Nil {
   let attrs =
-    list.repeat(Nil, 16)
+    list.repeat(Nil, 32)
     |> list.index_map(fn(_, seq) {
       compaction.Attribution(seq + 1, seq + 1, "reported", Some("reporter"))
     })
-  let lineage =
-    request_context.Lineage(
-      "persona",
-      1,
-      "delegate",
-      16,
-      Some("temporary"),
-      grants,
-    )
+  let lineage = request_context.Lineage("persona", 1, "owner", 0)
   let policy =
     request_context.SummaryPolicy(
       "policy",
@@ -723,6 +713,8 @@ pub fn grant_and_actor_intervals_share_the_exact_thirty_two_boundary_test() -> N
       1,
       "instructions",
       lineage,
+      "fixture",
+      0,
     )
   let request =
     compaction.SummaryRequest(
@@ -731,24 +723,27 @@ pub fn grant_and_actor_intervals_share_the_exact_thirty_two_boundary_test() -> N
       [types.User("source")],
       32,
       "instructions",
-      compaction.Leaves("branch", [#(1, 16)], Some(lineage), attrs),
+      compaction.Leaves("owner", [#(1, 32)], Some(lineage), attrs),
       Some(policy),
+      None,
     )
-  let boundary =
-    request_context.Lineage(..lineage, grants: list.take(grants, 15))
   let assert Ok(exact) =
     compaction.summary_envelope(
       compaction.SummaryRequest(
         ..request,
-        evidence: compaction.Leaves("branch", [#(1, 16)], Some(boundary), attrs),
+        evidence: compaction.Leaves(
+          "owner",
+          [#(1, 32)],
+          Some(lineage),
+          list.take(attrs, 31),
+        ),
       ),
     )
   should.be_true(string.contains(exact, "trusted_host_metadata"))
   let assert Ok(overflow) = compaction.summary_envelope(request)
   should.be_true(string.byte_size(overflow) <= 4096)
   should.be_true(string.contains(overflow, "\"attribution\":\"unknown\""))
-  should.be_true(string.contains(overflow, "[1,16]"))
-  should.be_false(string.contains(overflow, "\"session\":\"parent\""))
+  should.be_true(string.contains(overflow, "[1,32]"))
 }
 
 fn inspection_loop(
@@ -1058,6 +1053,7 @@ pub fn rejected_summary_envelope_never_claims_a_provider_attempt_test() -> Nil {
                       [],
                     ),
                     context.summary_policy,
+                    None,
                   ))
                   |> result.map(fn(_) { True })
                 },
@@ -1148,6 +1144,7 @@ pub fn unbound_condensation_keeps_four_children_and_generic_request_accounting_t
         first.source.seq,
         last.source.seq,
         string.repeat("historical node ", 4000),
+        None,
       )
     })
   graph.save_leaves(db, session.id, leaves) |> should.be_ok

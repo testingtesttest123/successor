@@ -2,6 +2,7 @@
 
 import albedo/daemon/note
 import albedo/daemon/store
+import albedo/harness/extensions/lcm/narration_types
 import albedo/harness/extensions/python/kernel
 import albedo/harness/request_context
 import albedo/openai_api/types
@@ -22,6 +23,7 @@ pub type SummaryRequest {
     instructions: String,
     evidence: SummaryEvidence,
     policy: Option(request_context.SummaryPolicy),
+    formation: Option(narration_types.Formation),
   )
 }
 
@@ -664,20 +666,71 @@ pub fn fingerprint(value: a) -> String
 /// Typed trusted metadata is delimited as data. Never parse transcript prose
 /// for provenance. Mandatory exact local identities are retained on fallback.
 pub fn summary_envelope(request: SummaryRequest) -> Result(String, String) {
+  use legacy <- result.try(source_envelope(request))
+  case request.formation {
+    None -> Ok(legacy)
+    Some(value) -> {
+      let frame = narration_types.frame_json(value.frame) |> json.to_string
+      let metadata =
+        json.object([
+          #("mode", json.string(value.mode)),
+          #(
+            "prior_memory_pointer",
+            option.map(value.previous, fn(memory) { json.string(memory.cue) })
+              |> option.unwrap(json.null()),
+          ),
+          #(
+            "frame",
+            narration_types.frame_json(
+              narration_types.Frame(
+                ..value.frame,
+                sources: case string.byte_size(frame) <= 4096 {
+                  True -> value.frame.sources
+                  False -> []
+                },
+              ),
+            ),
+          ),
+          #(
+            "source_detail",
+            json.string(case string.byte_size(frame) <= 4096 {
+              True -> "complete formation facts"
+              False -> "exact durable frame; expand sources for actors"
+            }),
+          ),
+          #(
+            "portions",
+            narration_types.coverage_json(value.frame, value.portions),
+          ),
+          #("source_only", json.bool(value.source_only)),
+          #("budget_tokens", json.int(value.budget)),
+        ])
+        |> json.to_string
+      use _ <- result.try(require(
+        string.byte_size(metadata) <= 8192,
+        "LCM narration evidence exceeds bounded envelope",
+      ))
+      Ok(
+        legacy
+        <> "<narration-evidence>\n"
+        <> metadata
+        <> "\n</narration-evidence>\n",
+      )
+    }
+  }
+}
+
+fn source_envelope(request: SummaryRequest) -> Result(String, String) {
   case request.evidence {
     NoEvidence -> Ok("")
     evidence -> {
       let detailed =
         encode_evidence(evidence, request.policy, False) |> json.to_string
       let intervals = case evidence {
-        Leaves(_, ranges, lineage, attributions) ->
-          list.length(ranges)
-          + list.length(attributions)
-          + grant_intervals(lineage)
-        Nodes(_, nodes, lineage, attributions) ->
-          list.length(nodes)
-          + list.length(attributions)
-          + grant_intervals(lineage)
+        Leaves(_, ranges, _, attributions) ->
+          list.length(ranges) + list.length(attributions)
+        Nodes(_, nodes, _, attributions) ->
+          list.length(nodes) + list.length(attributions)
         NoEvidence -> 0
       }
       let content = case
@@ -699,11 +752,6 @@ pub fn summary_envelope(request: SummaryRequest) -> Result(String, String) {
       Ok("<summary-evidence>\n" <> content <> "\n</summary-evidence>\n")
     }
   }
-}
-
-fn grant_intervals(lineage: Option(request_context.Lineage)) -> Int {
-  option.map(lineage, fn(value) { list.length(value.grants) })
-  |> option.unwrap(0)
 }
 
 fn encode_evidence(
@@ -808,21 +856,6 @@ fn lineage_json(value: request_context.Lineage) -> json.Json {
     #("binding_revision", json.int(value.binding_revision)),
     #("role", json.string(value.role)),
     #("supplied_through", json.int(value.supplied_through)),
-    #(
-      "context_id",
-      option.map(value.context_id, json.string) |> option.unwrap(json.null()),
-    ),
-    #(
-      "grants",
-      json.array(value.grants, fn(grant) {
-        json.object([
-          #("session", json.string(grant.session)),
-          #("first_seq", json.int(grant.first_seq)),
-          #("last_seq", json.int(grant.last_seq)),
-          #("digest", json.string(grant.digest)),
-        ])
-      }),
-    ),
   ])
 }
 

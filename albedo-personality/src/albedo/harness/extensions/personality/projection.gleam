@@ -1,21 +1,33 @@
 //// One live document capture per request. Never writes a transcript copy.
 
+import albedo/daemon/store
 import albedo/harness/extensions/personality/domain
 import albedo/harness/extensions/personality/ledger
 import albedo/harness/request_context
+import gleam/dynamic/decode
 import gleam/int
 import gleam/json
-import gleam/option.{None, Some}
+import gleam/option.{Some}
 import gleam/result
 import gleam/string
+import sqlight
 
 pub fn prepare(
   input: request_context.Input,
 ) -> Result(request_context.Contribution, String) {
-  use captured <- result.try(
-    ledger.capture(input.store, input.session)
-    |> result.map_error(fn(error) {
-      "personality session " <> input.session <> ": " <> ledger.message(error)
+  use #(captured, selection_revision) <- result.try(
+    store.query(input.store, fn(db) {
+      use captured <- result.try(
+        ledger.capture_in(db, input.session) |> result.map_error(ledger.message),
+      )
+      use revision <- result.map(store.one(
+        db,
+        "SELECT config_revision FROM sessions WHERE id=?",
+        [sqlight.text(input.session)],
+        decode.field(0, decode.int, decode.success),
+        "personality selection revision unavailable",
+      ))
+      #(captured, revision)
     }),
   )
   let persona = captured.persona
@@ -73,9 +85,9 @@ pub fn prepare(
         binding.generation,
         binding.mode,
         binding.pre_binding_through,
-        None,
-        [],
       ),
+      persona.name,
+      selection_revision,
     )),
     case omitted {
       0 -> []

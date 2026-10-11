@@ -304,7 +304,9 @@ pub fn callback_errors_crashes_and_conflicting_summary_policies_stop_preparation
       "revision",
       1,
       "later policy",
-      request_context.Lineage("identity", 1, "owner", 0, None, []),
+      request_context.Lineage("identity", 1, "owner", 0),
+      "fixture",
+      0,
     )
   let with_policy = fn(_) {
     Ok(request_context.Contribution(

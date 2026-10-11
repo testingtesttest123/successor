@@ -13,6 +13,7 @@ import albedo/harness/cache_fade
 import albedo/harness/cache_ttl
 import albedo/harness/compaction
 import albedo/harness/extension
+import albedo/harness/extensions/lcm/narration
 import albedo/harness/extensions/python/cells as journal
 import albedo/harness/request_context
 import albedo/harness/runtime
@@ -918,7 +919,40 @@ pub fn summarizer_request(
     instructions,
     _,
     _,
+    _,
   ) = request
+  case request.policy {
+    Some(_) -> {
+      use inputs <- result.map(narration.summary_inputs(request))
+      types.Request(
+        model,
+        Some(instructions),
+        inputs,
+        [],
+        Some(max_output_tokens),
+        types.defaults,
+      )
+    }
+    None ->
+      generic_summary_request(
+        request,
+        model,
+        previous,
+        evicted,
+        max_output_tokens,
+        instructions,
+      )
+  }
+}
+
+fn generic_summary_request(
+  request: compaction.SummaryRequest,
+  model: String,
+  previous: Option(String),
+  evicted: List(types.Input),
+  max_output_tokens: Int,
+  instructions: String,
+) -> Result(types.Request, String) {
   let previous = option.unwrap(previous, "(none)")
   let transcript =
     evicted

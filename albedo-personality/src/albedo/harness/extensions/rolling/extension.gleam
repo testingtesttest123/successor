@@ -410,6 +410,7 @@ fn summarize_chunks(
         compaction.summary_instructions,
         compaction.NoEvidence,
         None,
+        None,
       ))
       |> result.map(string.trim)
       |> result.try(fn(value) {

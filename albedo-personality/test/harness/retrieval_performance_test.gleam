@@ -131,7 +131,7 @@ pub fn node_listing_decodes_only_page_and_source_read_stops_after_page_test() ->
       "wanted",
       list.map(
         list.index_map(list.repeat(Nil, 45), fn(_, index) { index + 1 }),
-        fn(seq) { graph.Leaf(seq, seq, "summary") },
+        fn(seq) { graph.Leaf(seq, seq, "summary", None) },
       ),
     )
   // Positive control: the tracer observes the old full node-read operation.

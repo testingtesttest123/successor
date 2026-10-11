@@ -4,11 +4,14 @@
 import albedo/daemon/conversation
 import albedo/daemon/family
 import albedo/daemon/store
+import albedo/harness/extension/composition
 import albedo/harness/extensions
 import albedo/harness/extensions/lcm/extension as lcm
 import albedo/harness/extensions/lcm/graph
 import albedo/harness/extensions/lcm/memory
+import albedo/harness/extensions/python/kernel
 import albedo/harness/runtime
+import albedo/harness/runtime/state
 import albedo/openai_api/types
 import gleam/erlang/process
 import gleam/list
@@ -18,6 +21,9 @@ import gleeunit/should
 
 @external(erlang, "albedo_lcm_preparation_test_support", "count_decodes")
 fn count_decodes(owner: process.Pid, run: fn() -> a) -> #(a, Int)
+
+@external(erlang, "erlang", "make_ref")
+fn unused_kernel() -> kernel.Kernel
 
 pub fn below_trigger_and_stored_prior_do_not_decode_archived_payloads_test() -> Nil {
   let installed = [
@@ -67,7 +73,7 @@ pub fn below_trigger_and_stored_prior_do_not_decode_archived_payloads_test() -> 
   let assert Ok(last) = list.last(list.take(rows, 800))
   let assert Ok(_) =
     graph.save_leaves(ledger, "preparation", [
-      graph.Leaf(first.source.seq, last.source.seq, "archived prefix"),
+      graph.Leaf(first.source.seq, last.source.seq, "archived prefix", None),
     ])
   let #(control, positive_decodes) =
     count_decodes(store.owner(ledger), fn() {
@@ -75,7 +81,17 @@ pub fn below_trigger_and_stored_prior_do_not_decode_archived_payloads_test() -> 
     })
   let assert Ok(_) = control
   should.be_true(positive_decodes >= 802)
-  let assert Ok(session) = runtime.open_session(host, "preparation", "/tmp")
+  let session =
+    state.Session(
+      "preparation",
+      "/tmp",
+      unused_kernel(),
+      ledger,
+      composition.compose(installed, ledger, "preparation", "/tmp"),
+      "",
+      [],
+      state.Fresh,
+    )
   let #(prepared, decodes) =
     count_decodes(store.owner(ledger), fn() {
       runtime.prepare_history_with(

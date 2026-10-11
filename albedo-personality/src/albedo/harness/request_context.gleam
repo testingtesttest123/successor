@@ -32,18 +32,12 @@ pub type Block {
   Block(name: String, content: String, mandatory: Bool, estimated_tokens: Int)
 }
 
-pub type SourceGrant {
-  SourceGrant(session: String, first_seq: Int, last_seq: Int, digest: String)
-}
-
 pub type Lineage {
   Lineage(
     subject: String,
     binding_revision: Int,
     role: String,
     supplied_through: Int,
-    context_id: Option(String),
-    grants: List(SourceGrant),
   )
 }
 
@@ -54,6 +48,8 @@ pub type SummaryPolicy {
     identity_revision: Int,
     instructions: String,
     lineage: Lineage,
+    narrator_name: String,
+    selection_revision: Int,
   )
 }
 
