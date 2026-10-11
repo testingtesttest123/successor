@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS mail (
  sender TEXT REFERENCES sessions(id) ON DELETE SET NULL,
  sender_name TEXT NOT NULL,
  kind TEXT NOT NULL CHECK(kind IN ('task','message','result','unreviewed','webhook')),
+ reporter TEXT,
  body TEXT NOT NULL,
  created_at INTEGER NOT NULL,
  delivered_at INTEGER,
@@ -87,6 +88,7 @@ pub fn initialise(db: store.Store) -> Result(Nil, String) {
         "delivery_owner",
         "TEXT NOT NULL DEFAULT 'mail' CHECK(delivery_owner IN ('mail','input'))",
       ),
+      #("reporter", "TEXT"),
     ])
   })
 }
@@ -236,10 +238,18 @@ pub fn insert(
 ) -> Result(Bool, String) {
   let Letter(id, recipient, sender, sender_name, kind, body, created_at) =
     letter
+  // Preserve original host facts before sender's FK can be nulled by deletion.
+  // This is historical attribution only; Letter and inbox access stay native.
+  let reporter = case sender, string.byte_size(sender_name) <= 128 {
+    Some(id), _ -> Some("agent_report:" <> id <> ":" <> kind_name(kind))
+    None, True ->
+      Some("external_report:" <> sender_name <> ":" <> kind_name(kind))
+    None, False -> None
+  }
   sqlight.query(
     "INSERT INTO mail("
       <> columns
-      <> ",delivery_owner) SELECT ?,?,?,?,?,?,?,? WHERE (SELECT count(*) FROM mail WHERE recipient=? AND delivered_at IS NULL AND delivery_owner='mail') < ? RETURNING id",
+      <> ",delivery_owner,reporter) SELECT ?,?,?,?,?,?,?,?,? WHERE (SELECT count(*) FROM mail WHERE recipient=? AND delivered_at IS NULL AND delivery_owner='mail') < ? RETURNING id",
     connection,
     [
       sqlight.text(id),
@@ -253,6 +263,7 @@ pub fn insert(
         Inbox -> "mail"
         IdentifiedInput -> "input"
       }),
+      sqlight.nullable(sqlight.text, reporter),
       sqlight.text(recipient),
       sqlight.int(pending_limit),
     ],

@@ -94,6 +94,50 @@ remains witnessed history. Children never create permanent identities. Pinning
 advances the native session configuration revision only when that choice changes;
 it does not introduce an identity-wide head.
 
+## Native delegated streams and forks
+
+Both native child creation paths and durable checkpoint forks copy an existing
+live persona reference inside their creation transaction. They create no persona
+or document revision. Task children begin with only their supplied native task;
+no parent transcript, graph, inferred promise or automatic owner continuity is
+copied. A fork retains its native prefix and graph as a parallel stream of that
+same identity. Its witnessed cut maps actual ordered rows onto branch seqs,
+including sequence gaps and checkpoints before the original binding boundary.
+Copied graph narrator/perspective and original formation chronology remain intact.
+
+These temporary streams use `delegate` provenance role, including forks without
+a family row. That role excludes automatic cross-session owner continuity; it
+does not prohibit document edits. Current document capture and the existing
+`writable` flag remain shared and live. A deliberate human fork rebind can still
+choose an owner binding. Permanent creation/default/rebinding remain human-only.
+Native agents discovery, message reads, mail, cancellation and close permissions
+are unchanged; identity membership supplies no access grant.
+
+The store-only `personality/bindings` primitive avoids a conversation/extension
+dependency cycle. Registry supplies only immutable native compaction declaration
+names, including quarantined declarations. The transaction reads current parent
+choices, so an explicitly selected competing strategy also suspends personality
+in task children even when native configuration removed the personality flag.
+Only the bundle's choice and an existing active required `lcm-memory` override
+follow a task; general parent capability configuration is not copied. Native
+forks already retain native selection. A suspended bound stream remains bound
+and suspended; ordinary native re-enable captures the current document.
+
+Binding/storage failure rolls back session, family, binding, creation receipt,
+task mail and pending input together. Unpinned unbound creation is independent
+of damaged optional personality storage. An explicit personality pin with a
+missing binding table fails conservatively: an explicitly disabled but unbound
+session may also be blocked because its corruption history cannot be recovered.
+Surviving binding history can prove an unpinned parent previously had a binding;
+missing required binding storage then refuses rather than inventing a new self.
+The creation-only optional binding probe does not change unselected provider
+preparation or introduce core identity state.
+
+Child results remain ordinary native attributed mail, including unreviewed
+returns. Parent memory formation receives the report as User source and its own
+reply as Assistant source. A child's reported promise remains reported content;
+there is no acceptance/adoption action, typed promise record or automatic schedule.
+
 ## Selected failures and storage
 
 Mandatory request context is declared with `required_when_selected=true`.
@@ -115,9 +159,8 @@ native graph cleaner and removes current session bindings; permanent identities,
 revisions and receipts remain.
 
 Native LCM remains the sole episodic store. Its tools, raw transcript, actor
-attribution and source boundaries remain intact. Narration/background/delegation
-corrections are separate stages; this document surface does not establish those
-later behaviors or real-model narrative quality.
+attribution and source boundaries remain intact. Native narration and delegation
+do not establish background scheduling or real-model narrative quality.
 
 ## Optional lessons
 

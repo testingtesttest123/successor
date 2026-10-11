@@ -4,6 +4,7 @@ import albedo/clock
 import albedo/daemon/store
 import albedo/harness/extension
 import albedo/harness/extension/selection
+import albedo/harness/extensions/personality/bindings
 import albedo/harness/extensions/personality/domain
 import albedo/harness/extensions/personality/migrations/schema
 import albedo/harness/extensions/personality/types as p
@@ -18,6 +19,17 @@ import sqlight
 
 pub fn initialise(ledger: store.Store) -> Result(Nil, String) {
   store.query(ledger, schema.apply)
+}
+
+/// Trusted native lifecycle only. The caller owns the creation transaction.
+/// Core callers use the acyclic primitive directly; no model route exposes it.
+pub fn inherit_binding_in(
+  db: sqlight.Connection,
+  parent: String,
+  child: String,
+  kind: bindings.Kind,
+) -> Result(Nil, String) {
+  bindings.inherit_in(db, parent, child, kind)
 }
 
 @external(erlang, "albedo_native", "new_id")

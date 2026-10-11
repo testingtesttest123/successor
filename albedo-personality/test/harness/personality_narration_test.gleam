@@ -929,8 +929,8 @@ pub fn cross_session_continuity_does_not_grant_access_test() -> Nil {
     ),
   ])
   |> should.be_ok
-  // A controlled delegate-only binding fixture exercises selection; automatic
-  // child binding/lifecycle is deliberately not implemented until Stage 3.
+  // A controlled delegate-only binding fixture isolates continuity selection;
+  // personality_delegation_test covers the native creation lifecycle.
   session_fixture.create(host, "delegate-only", "/tmp")
   store.query(db, fn(connection) {
     store.exec(
@@ -1048,16 +1048,9 @@ pub fn cross_session_continuity_does_not_grant_access_test() -> Nil {
   composition.close(with_agents)
   let assert Ok(through) = conversation.last_seq(db, "owner")
   history.fork(db, "owner", "copied-frontier", through) |> should.be_ok
-  let assert Ok(fork_through) = conversation.last_seq(db, "copied-frontier")
-  ledger.bind(
-    db,
-    "copied-frontier",
-    persona.id,
-    0,
-    fork_through,
-    runtime.installed(host),
-  )
-  |> should.be_ok
+  let assert Ok(fork_binding) = ledger.capture(db, "copied-frontier")
+  fork_binding.persona.id |> should.equal(persona.id)
+  fork_binding.binding.mode |> should.equal("delegate")
   let forked =
     state.Session(
       "copied-frontier",
@@ -2039,11 +2032,13 @@ pub fn old_fork_copy_cannot_replace_newer_correction_even_after_reopen_test() ->
   let assert Ok(through) = conversation.last_seq(db, "owner")
   history.fork(db, "owner", "old-fork", through) |> should.be_ok
   let assert Ok(branch_through) = conversation.last_seq(db, "old-fork")
+  // Deliberately select an owner source to keep this chronology falsifier
+  // meaningful. Ordinary Stage 3 forks instead remain delegate sources.
   ledger.bind(
     db,
     "old-fork",
     persona.id,
-    0,
+    1,
     branch_through,
     runtime.installed(host),
   )
@@ -2057,7 +2052,7 @@ pub fn old_fork_copy_cannot_replace_newer_correction_even_after_reopen_test() ->
     db,
     "nested-old-fork",
     persona.id,
-    0,
+    1,
     nested_through,
     runtime.installed(host),
   )

@@ -7,6 +7,7 @@ import albedo/daemon/session_configuration
 import albedo/daemon/store
 import albedo/daemon/usage
 import albedo/harness/extensions/lcm/graph as lcm_graph
+import albedo/harness/extensions/personality/bindings
 import albedo/openai_api/types
 import gleam/dynamic/decode
 import gleam/json
@@ -119,6 +120,12 @@ fn fork_in(
     list.map(rows, fn(row) { row.seq }),
   ))
   use _ <- result.try(copy_selection(db, source_id, branch_id))
+  use _ <- result.try(bindings.inherit_in(
+    db,
+    source_id,
+    branch_id,
+    bindings.Fork,
+  ))
   use _ <- result.try(append_incomplete_results(
     db,
     branch_id,
@@ -298,7 +305,7 @@ fn copy_input_metadata(
   use _ <- result.try(
     store.run(
       db,
-      "INSERT INTO submission_events(session,seq,operation_id,payload) SELECT ?,?,operation_id,payload FROM submission_events WHERE session=? AND seq=? ORDER BY rowid",
+      "INSERT INTO submission_events(session,seq,operation_id,payload,reporter) SELECT ?,?,operation_id,payload,reporter FROM submission_events WHERE session=? AND seq=? ORDER BY rowid",
       [
         sqlight.text(branch_id),
         sqlight.int(positions.1),

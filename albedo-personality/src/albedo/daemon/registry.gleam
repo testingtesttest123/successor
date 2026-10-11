@@ -25,6 +25,7 @@ import albedo/daemon/turn
 import albedo/daemon/usage
 import albedo/harness/credentials
 import albedo/harness/extension
+import albedo/harness/extension/selection
 import albedo/harness/extensions/python/kernel as python
 import albedo/harness/extensions/schedule/ledger as schedule
 import albedo/harness/location
@@ -845,6 +846,14 @@ fn child_model(
   }
 }
 
+// Immutable native declarations, including quarantined strategy declarations.
+// Selection is read transactionally by child creation, not captured here.
+fn compaction_names(host: runtime.Runtime) -> List(String) {
+  runtime.declarations(host)
+  |> list.filter(selection.is_compaction)
+  |> list.map(fn(item) { item.name })
+}
+
 /// A child of `parent`, linked, running, and handed its task.
 fn create_child(
   state: State,
@@ -889,7 +898,13 @@ fn create_child(
         protocol: provider.protocol,
         effort: extension.default_effort(efforts),
       )
-    conversation.create_child(db, info, parent, name)
+    conversation.create_child(
+      db,
+      info,
+      parent,
+      name,
+      compaction_names(state.host),
+    )
   }
   case created {
     Error(error) -> #(state, Error(error))
@@ -1254,6 +1269,7 @@ fn create_identified(
                   input,
                   session_submission.encode(submitted),
                   letter,
+                  compaction_names(state.host),
                 ),
               )
             }

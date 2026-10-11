@@ -49,6 +49,14 @@ Transcript rows carry an indexed `row_class`: `user`, `image_fit`, or `other`. E
 
 Text or list positions cannot identify rows reliably because messages can repeat and provider projection can change item counts. An excursion marker belongs to its parent session. The branch has different row references, so returning its outcome requires an explicit link to the parent marker.
 
+Forks of a bound personality stream inherit its live identity reference and a
+mapped pre-binding witnessed cut in the native transaction. Raw copied mail uses
+retained host reporter facts, including after sender/source deletion. Legacy
+rows can use only the exact surviving mail ID; quoted wrappers are never proof.
+Temporary fork/delegate history remains readable through ordinary native source
+tools but is excluded from automatic owner continuity. This provenance role is
+separate from configured document writes and native source-access permissions.
+
 ## notes
 
 `notes` is a layer over whichever strategy is active, enabled by default. At every compaction it asks the model, through the same summarizer call the strategies use, to rewrite its notes from the previous notes and the history that compaction just evicted. The instructions tell the model the budget (`budgetTokens`, default 2000) and say that the archive or summary already carries the story, so the notes keep exact identifiers, decisions, what is verified, open work and the next step, and drop what is finished. The output limit sits a quarter above the budget so a model slightly over is not cut off mid-sentence; nothing else truncates the notes.
@@ -280,8 +288,7 @@ creates no node/edge/cursor fragments; statement errors roll back the whole
 transaction. Providers never run while the store transaction is held. Document
 edits refresh later requests but do not rewrite old frames or invalidate a
 captured formation merely because its document revision is historical. These
-commit seams are reusable by later work; this stage adds no background scheduler
-or automatic child identity lifecycle.
+commit seams are reusable by later work; no background scheduler is added.
 
 
 ### bounded native LCM retrieval metadata

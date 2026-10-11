@@ -36,27 +36,56 @@ pub fn actors_in(
   let mail_ids =
     list.filter_map(rows, fn(row) {
       case row.display, row.operation_id {
+        Some(display), Some("host-note:" <> _) if display.operation_id == None ->
+          Error(Nil)
         Some(display), Some(id)
           if display.source == "mail" || display.source == "webhook"
         -> Ok(id)
         _, _ -> Error(Nil)
       }
     })
-  use senders <- result.try(case mail_ids {
+  use retained <- result.try(case mail_ids {
     [] -> Ok([])
     _ ->
       store.rows(
         db,
-        "SELECT id,sender,CASE WHEN length(CAST(sender_name AS BLOB))<=128 THEN sender_name ELSE NULL END,kind FROM mail WHERE recipient=? AND id IN ("
+        "SELECT seq,operation_id,CASE WHEN length(CAST(reporter AS BLOB))<=512 THEN reporter ELSE NULL END FROM submission_events WHERE session=? AND reporter IS NOT NULL AND operation_id IN ("
           <> string.join(list.map(mail_ids, fn(_) { "?" }), ",")
           <> ")",
         [sqlight.text(session), ..list.map(mail_ids, sqlight.text)],
         {
+          use seq <- decode.field(0, decode.int)
+          use id <- decode.field(1, decode.string)
+          use reporter <- decode.field(2, decode.optional(decode.string))
+          decode.success(#(seq, id, reporter))
+        },
+      )
+      |> result.map_error(Storage)
+  })
+  let legacy_ids =
+    list.filter(mail_ids, fn(id) {
+      !list.any(retained, fn(record) { record.1 == id })
+    })
+  use senders <- result.try(case legacy_ids {
+    [] -> Ok([])
+    _ ->
+      store.rows(
+        db,
+        // Host-owned submission_events retain a globally unique immutable mail
+        // ID, including after native forks. Its original recipient need not be
+        // this branch. Read only reporter metadata, never another inbox/body;
+        // actual mail delivery/access retains its recipient checks.
+        "SELECT id,sender,CASE WHEN length(CAST(reporter AS BLOB))<=512 THEN reporter ELSE NULL END,kind,reporter IS NOT NULL FROM mail WHERE id IN ("
+          <> string.join(list.map(legacy_ids, fn(_) { "?" }), ",")
+          <> ")",
+        list.map(legacy_ids, sqlight.text),
+        {
           use id <- decode.field(0, decode.string)
           use sender <- decode.field(1, decode.optional(decode.string))
-          use name <- decode.field(2, decode.optional(decode.string))
+          use reporter <- decode.field(2, decode.optional(decode.string))
           use kind <- decode.field(3, decode.string)
-          decode.success(#(id, sender, name, kind))
+          use retained <- decode.field(4, sqlight.decode_bool())
+          decode.success(#(id, sender, reporter, kind, retained))
         },
       )
       |> result.map_error(Storage)
@@ -76,16 +105,12 @@ pub fn actors_in(
               "chat" -> Ok(actor(row.input))
               "mail" | "webhook" ->
                 case
-                  list.find(senders, fn(sender) {
-                    Some(sender.0) == row.operation_id
+                  list.find(retained, fn(record) {
+                    record.0 == row.seq && Some(record.1) == row.operation_id
                   })
                 {
-                  Ok(#(_, Some(sender), _, kind)) ->
-                    Ok("agent_report:" <> sender <> ":" <> kind)
-                  Ok(#(_, None, Some(name), kind)) ->
-                    Ok("external_report:" <> name <> ":" <> kind)
-                  _ ->
-                    Error(Unavailable("source reporter metadata unavailable"))
+                  Ok(#(_, _, reporter)) -> retained_reporter(reporter)
+                  Error(_) -> legacy_reporter(row.operation_id, senders)
                 }
               source -> note_actor(source)
             }
@@ -93,6 +118,38 @@ pub fn actors_in(
     })
     Ok(#(row.seq, actor))
   })
+}
+
+fn retained_reporter(value: Option(String)) -> Result(String, Error) {
+  case value {
+    Some(label) ->
+      case
+        {
+          string.starts_with(label, "agent_report:")
+          || string.starts_with(label, "external_report:")
+        }
+        && list.any(
+          ["task", "message", "result", "unreviewed", "webhook"],
+          fn(kind) { string.ends_with(label, ":" <> kind) },
+        )
+      {
+        True -> Ok(label)
+        False -> Error(Unavailable("source reporter metadata unavailable"))
+      }
+    None -> Error(Unavailable("source reporter metadata unavailable"))
+  }
+}
+
+fn legacy_reporter(
+  id: Option(String),
+  senders: List(#(String, Option(String), Option(String), String, Bool)),
+) -> Result(String, Error) {
+  case list.find(senders, fn(sender) { Some(sender.0) == id }) {
+    Ok(#(_, _, reporter, _, True)) -> retained_reporter(reporter)
+    Ok(#(_, Some(sender), _, kind, False)) ->
+      Ok("agent_report:" <> sender <> ":" <> kind)
+    _ -> Error(Unavailable("source reporter metadata unavailable"))
+  }
 }
 
 fn note_actor(origin: String) -> Result(String, Error) {

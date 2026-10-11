@@ -8,6 +8,7 @@ import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
+import gleam/string
 import sqlight
 
 /// Hash the canonical submitted descriptor, preserving retained fingerprints.
@@ -115,6 +116,13 @@ pub fn initialise(db: sqlight.Connection) -> Result(Nil, String) {
       #("turn_id", "TEXT"),
     ]),
   )
+  // Retain original verified reporter facts even if mail/session deletion later
+  // removes or nulls the inbox row. Legacy records remain nullable.
+  use _ <- result.try(
+    store.add_columns(db, "submission_events", [
+      #("reporter", "TEXT"),
+    ]),
+  )
   use _ <- result.try(scope_display_metadata(db))
   use _ <- result.try(store.exec(
     db,
@@ -136,8 +144,8 @@ fn scope_display_metadata(db: sqlight.Connection) -> Result(Nil, String) {
       [
         #(
           "submission_events",
-          "session,seq,operation_id,payload",
-          "session TEXT NOT NULL REFERENCES sessions(id),seq INTEGER NOT NULL,operation_id TEXT NOT NULL,payload BLOB NOT NULL,UNIQUE(session,operation_id)",
+          "session,seq,operation_id,payload,reporter",
+          "session TEXT NOT NULL REFERENCES sessions(id),seq INTEGER NOT NULL,operation_id TEXT NOT NULL,payload BLOB NOT NULL,reporter TEXT,UNIQUE(session,operation_id)",
         ),
         #(
           "continuation_markers",
@@ -591,16 +599,18 @@ pub fn committed(
 ) -> Result(Nil, String) {
   list.try_each(submissions, fn(submission) {
     let Commit(id, offset, display) = submission
+    use reporter <- result.try(reporter_in(db, session, id, display))
     case display.operation_id, offset {
       None, Some(offset) ->
         store.run(
           db,
-          "INSERT INTO submission_events(session,seq,operation_id,payload) VALUES(?,?,?,?)",
+          "INSERT INTO submission_events(session,seq,operation_id,payload,reporter) VALUES(?,?,?,?,?)",
           [
             sqlight.text(session),
             sqlight.int(first_seq + offset),
             sqlight.text(id),
             sqlight.blob(encode_display(display)),
+            sqlight.nullable(sqlight.text, reporter),
           ],
         )
       _, _ ->
@@ -610,6 +620,7 @@ pub fn committed(
           id,
           offset,
           display,
+          reporter,
           first_seq,
           last_seq,
           turn_id,
@@ -618,12 +629,59 @@ pub fn committed(
   })
 }
 
+fn reporter_in(
+  db: sqlight.Connection,
+  session: String,
+  id: String,
+  display: Display,
+) -> Result(Option(String), String) {
+  case display.operation_id, id, display.source {
+    None, "host-note:" <> _, _ -> Ok(None)
+    _, _, "mail" | _, _, "webhook" -> {
+      // Real delivery ran in this same transaction, with recipient checks.
+      // Neither display text nor caller-provided sender facts supply attribution.
+      use stored <- result.try(store.one(
+        db,
+        "SELECT CASE WHEN reporter IS NOT NULL AND length(CAST(reporter AS BLOB))<=512 THEN reporter WHEN reporter IS NULL AND sender IS NOT NULL THEN 'agent_report:'||sender||':'||kind ELSE NULL END,reporter IS NOT NULL,kind FROM mail WHERE id=? AND recipient=? AND delivered_at IS NOT NULL",
+        [sqlight.text(id), sqlight.text(session)],
+        {
+          use reporter <- decode.field(0, decode.optional(decode.string))
+          use retained <- decode.field(1, sqlight.decode_bool())
+          use kind <- decode.field(2, decode.string)
+          decode.success(#(reporter, retained, kind))
+        },
+        "source reporter metadata unavailable at delivery",
+      ))
+      case stored {
+        #(Some(label), _, kind) ->
+          case
+            {
+              string.starts_with(label, "agent_report:")
+              || string.starts_with(label, "external_report:")
+            }
+            && string.ends_with(label, ":" <> kind)
+          {
+            True -> Ok(Some(label))
+            False -> Error("source reporter metadata unavailable at delivery")
+          }
+        #(None, True, _) ->
+          Error("source reporter metadata unavailable at delivery")
+        // Legacy NULL sender cannot prove internal versus external origin.
+        // Delivery remains native; exact attribution is honestly unavailable.
+        #(None, False, _) -> Ok(None)
+      }
+    }
+    _, _, _ -> Ok(None)
+  }
+}
+
 fn commit_operation(
   db: sqlight.Connection,
   session: String,
   id: String,
   offset: Option(Int),
   display: Display,
+  reporter: Option(String),
   first_seq: Int,
   last_seq: Int,
   turn_id: Option(String),
@@ -643,12 +701,13 @@ fn commit_operation(
     Some(_) ->
       store.run(
         db,
-        "INSERT INTO submission_events(session,seq,operation_id,payload) VALUES(?,?,?,?)",
+        "INSERT INTO submission_events(session,seq,operation_id,payload,reporter) VALUES(?,?,?,?,?)",
         [
           sqlight.text(session),
           sqlight.int(seq),
           sqlight.text(id),
           sqlight.blob(encode_display(display)),
+          sqlight.nullable(sqlight.text, reporter),
         ],
       )
     None ->

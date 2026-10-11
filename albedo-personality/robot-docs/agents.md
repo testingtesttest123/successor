@@ -28,11 +28,34 @@ await agents.progress("on turn.gleam now")    # shows in /agents, starts no turn
 - any session may look up and read any other: `get`, `messages`, and `search_messages` resolve names and ids the way mail does, and closed agents stay readable. cancel and close work on your own children only. `cancel(tree=True)` and `cancel_all()` stop parents before their children, so a stopped agent cannot answer by spawning, and answer the sessions that were running; they never close or delete anything. the model cannot delete an agent; it asks the user.
 - limits: 3 deep, 12 open children per parent, 1 MiB per letter, 1000 undelivered letters per session.
 
+When a parent already has a personality binding, both native creation paths
+reuse that live identity reference transactionally. Task children receive their
+supplied task rather than inherited parent history or inferred promises. Native
+checkpoint forks retain the source prefix and graph as another stream of the
+same identity. Temporary child/fork bindings use delegate provenance role; no
+permanent identity is created. Document mutation still follows the shared
+configured writable flag and ordinary native tool permissions. A suspended
+bundle stays suspended, including when another explicit compaction choice had
+removed its flag. Only required bundle selection follows task creation.
+
 ## mail delivery
 
 a letter is stored first and marked delivered in the same transaction that writes it into the recipient's transcript. an idle recipient accepts it for a turn (kernel preparation may still be pending); a running one reads it at its next step.
 
 the Python receipt `delivered` means accepted by an idle recipient, not that a provider request has started; `queued` means it waits behind a turn, and `pending` means it is stored for retry. undelivered letters retry every 15 seconds, so a restart or a session that is not running yet loses nothing. Closed children keep their undelivered letters but do not run them; close also prevents pending kernel preparation from admitting them. webhook deliveries are letters from outside, and wait for an idle session.
+
+Original reporter facts are retained on the existing mail row at native enqueue,
+before sender deletion can null its access foreign key. Matching-recipient
+delivery copies them into host-owned submission metadata in that transaction.
+Message/tool/display text cannot set these snapshots; native Letter fields and
+access checks are unchanged.
+Forks copy this metadata without creating another delivery. Sender or original
+recipient deletion therefore does not relabel retained new reports. Older rows
+without snapshots resolve only their exact retained mail ID. A surviving legacy
+sender can prove agent origin; a legacy NULL sender cannot prove external origin
+from its display name. Native delivery still works, with unavailable historical
+attribution when evidence is lost. This historical attribution grants no inbox,
+identity or tool access and creates no report-acceptance step.
 
 ## the orchestrator view
 

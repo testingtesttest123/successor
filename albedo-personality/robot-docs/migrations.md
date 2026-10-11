@@ -212,6 +212,30 @@ removes at most 128 expired receipts per call. Durable display metadata in
 display text, and echo identity. Continuations commit a `continuation_markers`
 row in the same transaction without adding a user-text transcript row. These
 markers also remain until session deletion and survive receipt cleanup.
+`mail.initialise` adds nullable `mail.reporter`, captured only at native enqueue
+from the host's sender/kind. Old rows remain NULL without prose-based backfill;
+native Letter decoding and access foreign keys do not change. Sender deletion
+may still null the access field but cannot change retained original provenance.
+
+`operations.initialise` adds nullable `submission_events.reporter` without
+rewriting display payloads. The existing old globally unique display-table
+upgrade also preserves this field. New native Mail/Webhook commits capture only
+the retained original sender/kind label from matching delivered mail in the
+same transaction as transcript, display and delivery. Anonymous Chat/Note rows
+remain unchanged. This internal historical fact is not a new display wire field
+or a user/tool parameter. The reader bounds it to 512 UTF-8 bytes and never treats
+it as current access or identity authority.
+
+Legacy snapshots stay NULL; attribution falls back only to the exact surviving
+mail ID. A surviving legacy sender can still prove agent origin; a NULL legacy
+sender does not prove external origin from its display name. Such mail still
+delivers normally, with unavailable attribution. Malformed or oversized retained
+enqueue provenance refuses delivery atomically rather than falling back to text.
+Missing legacy reporter evidence is explicitly unavailable, without a
+prose-based backfill. Native fork copies retain snapshots independently of the
+original inbox or sender's lifetime. Session cleanup removes its own display
+metadata; no second provenance store or fabricated mail delivery is introduced.
+
 Forks copy this historical metadata with its original input IDs, timestamps,
 and turn IDs at the branch's remapped transcript positions. A continuation
 follows its anchor row, so only markers anchored strictly before the selected

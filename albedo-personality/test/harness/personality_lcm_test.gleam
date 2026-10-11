@@ -402,7 +402,7 @@ fn save_submission(
     [session_submission.input(submission), types.Assistant(answer)],
     conversation.Idle,
     None,
-    [],
+    turn.letters([submission]),
     session_submission.commits([submission], 0),
     "source-unit",
     "/tmp",
@@ -478,7 +478,8 @@ pub fn copied_prefix_uses_exact_branch_rows_with_witnessed_attachment_test() -> 
   let assert Ok(parent_through) = conversation.last_seq(ledger, "owner")
   history.fork(ledger, "owner", "branch", parent_through) |> should.be_ok
   let assert Ok(through) = conversation.last_seq(ledger, "branch")
-  ledger.bind(ledger, "branch", persona.id, 0, through, runtime.installed(host))
+  // Deliberate human attachment replaces the inherited delegate generation.
+  ledger.bind(ledger, "branch", persona.id, 1, through, runtime.installed(host))
   |> should.be_ok
   conversation.commit_from(
     ledger,

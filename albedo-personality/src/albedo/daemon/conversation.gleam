@@ -15,6 +15,7 @@ import albedo/daemon/tool_results
 import albedo/daemon/transcript
 import albedo/daemon/usage
 import albedo/harness/cache_fade
+import albedo/harness/extensions/personality/bindings
 import albedo/harness/extensions/python/cells as journal
 import albedo/openai_api/types
 import gleam/bool
@@ -170,6 +171,7 @@ pub type ChildCreation {
     input: operations.Request,
     payload: BitArray,
     task: mail.Letter,
+    compactions: List(String),
   )
 }
 
@@ -308,6 +310,12 @@ pub fn create_child_identified(
             child.info.id,
             child.parent_id,
             child.name,
+          ))
+          use _ <- result.try(bindings.inherit_in(
+            db,
+            child.parent_id,
+            child.info.id,
+            bindings.Task(child.compactions),
           ))
           use _ <- result.try(record_creation_in(db, child.info.id, creation))
           use inserted <- result.try(mail.insert(
@@ -1083,6 +1091,7 @@ pub fn create_child(
   info: Info,
   parent: String,
   name: String,
+  compactions: List(String),
 ) -> Result(#(Info, family.Member), String) {
   store.query(ledger, fn(db) {
     store.transaction(db, fn() {
@@ -1091,6 +1100,12 @@ pub fn create_child(
       let info = Info(..info, cwd: above.workspace)
       use _ <- result.try(create_in(db, info))
       use member <- result.try(family.link_in(db, info.id, parent, name))
+      use _ <- result.try(bindings.inherit_in(
+        db,
+        parent,
+        info.id,
+        bindings.Task(compactions),
+      ))
       Ok(#(info, member))
     })
   })
