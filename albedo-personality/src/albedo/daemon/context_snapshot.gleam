@@ -666,35 +666,28 @@ pub fn summary(snapshot: Snapshot) -> json.Json {
             #("compaction", compaction_json(compacted)),
             #("sections", json.array(sections, section_json)),
             #("request_context", request_context_json(captured)),
-            #(
-              "summary_calls",
-              json.array(
-                list.index_map(captured.summary_calls, fn(call, index) {
-                  json.object([
-                    #(
-                      "section_id",
-                      json.string("summary-" <> int.to_string(index)),
-                    ),
-                    #("status", json.string("attempted")),
-                    #("max_output_tokens", json.int(call.max_output_tokens)),
-                    #(
-                      "evidence_bytes",
-                      json.int(string.byte_size(call.envelope)),
-                    ),
-                    #(
-                      "instruction_bytes",
-                      json.int(string.byte_size(call.instructions)),
-                    ),
-                  ])
-                }),
-                fn(value) { value },
-              ),
-            ),
+            #("summary_calls", summary_calls_json(captured)),
             #("summary_calls_omitted", json.int(captured.summary_calls_omitted)),
           ],
         ]),
       )
   }
+}
+
+/// Bounded captured attempts shared by native and HTTP resource encoders.
+pub fn summary_calls_json(captured: request_context.Prepared) -> json.Json {
+  json.array(
+    list.index_map(captured.summary_calls, fn(call, index) {
+      json.object([
+        #("section_id", json.string("summary-" <> int.to_string(index))),
+        #("status", json.string("attempted")),
+        #("max_output_tokens", json.int(call.max_output_tokens)),
+        #("evidence_bytes", json.int(string.byte_size(call.envelope))),
+        #("instruction_bytes", json.int(string.byte_size(call.instructions))),
+      ])
+    }),
+    fn(value) { value },
+  )
 }
 
 /// Metadata shared by the internal and public HTTP inspector encoders.

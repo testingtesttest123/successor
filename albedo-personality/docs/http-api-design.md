@@ -870,6 +870,13 @@ candidate/selected/excluded counts and diagnostics. Personality snapshot IDs
 encode identity, aggregate and binding revisions; rendered sections expose their
 named fields. Metadata and pages describe the actual assembled request without
 calling a callback, querying its ledger or preparing another request.
+Ready snapshots also expose `summary_calls`: bounded captured native summary
+attempts with section IDs, `status: "attempted"`, output limits, and evidence
+and instruction byte counts. `summary_calls_omitted` counts attempts beyond the
+capture cap. These describe captured preparation, not provider completion;
+`view=requests` supplies the durable outcome for each actual upstream attempt.
+Background memory calls keep their durable request accounting without replacing
+the foreground request snapshot.
 
 `view=section` requires `snapshot_id`, `section_id`, and a zero-based `page`.
 A page has `text`, omitted-content explanation, page index, and page count.

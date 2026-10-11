@@ -434,6 +434,8 @@ pub fn context(snapshot: context_snapshot.Snapshot) -> json.Json {
       json.object([
         #("state", json.string("ready")),
         #("request_context", context_snapshot.request_context_json(captured)),
+        #("summary_calls", context_snapshot.summary_calls_json(captured)),
+        #("summary_calls_omitted", json.int(captured.summary_calls_omitted)),
         #("snapshot_id", json.string(id)),
         #("captured_at", json.nullable(captured_at, timestamp)),
         #("provider", json.nullable(provider, json.string)),
