@@ -910,6 +910,20 @@ fn summarize_with(
       <> describe(context.upstream, error)
     }),
   )
+  // Accounting above retains the attempt even when its returned text cannot
+  // become canonical memory. Validate disposition before text extraction.
+  use _ <- result.try(case turn.finish, turn.tool_calls {
+    types.Complete, [] -> Ok(Nil)
+    finish, _ ->
+      Error(
+        "summarizer provider must complete without tool calls: "
+        <> string.inspect(finish),
+      )
+  })
+  use _ <- result.try(compaction.require(
+    !list.any(turn.output, summary_refused),
+    "summarizer provider returned refusal or malformed content",
+  ))
   let text =
     turn.output
     |> list.filter_map(fn(item) {
@@ -922,6 +936,35 @@ fn summarize_with(
     "" -> Error("summarizer provider returned no text")
     value -> Ok(value)
   }
+}
+
+fn summary_refused(item: types.ReplayItem) -> Bool {
+  case types.replay_protocol(item) {
+    types.ChatCompletions ->
+      types.inspect_item(item, {
+        use refusal <- decode.optional_field(
+          "refusal",
+          None,
+          decode.optional(decode.string),
+        )
+        decode.success(case refusal {
+          Some(text) -> text != ""
+          None -> False
+        })
+      })
+    types.Responses ->
+      types.inspect_item(item, {
+        use parts <- decode.optional_field(
+          "content",
+          None,
+          decode.optional(
+            decode.list(decode.field("type", decode.string, decode.success)),
+          ),
+        )
+        decode.success(list.contains(option.unwrap(parts, []), "refusal"))
+      })
+  }
+  |> result.unwrap(True)
 }
 
 /// Pure native provider boundary, shared by the actual call and socket-free
