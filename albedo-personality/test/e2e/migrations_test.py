@@ -388,13 +388,11 @@ class MigrationsTest(unittest.TestCase):
             finally:
                 app.restart(prepare=restore)
 
-    def test_personality_fresh_install_creates_schema_without_creating_or_binding_identity(
-        self,
-    ):
-        provider = Provider(lambda _request: text("done"))
+    def test_personality_fresh_schema_has_no_identity_or_global_admission_table(self):
+        provider = Provider(lambda _request: text("unused"))
         self.addCleanup(provider.close)
         with Albedo(provider) as app:
-            session = app.session()
+            app.session()
             with sqlite3.connect(app.home / "albedo.sqlite") as db:
                 self.assertEqual(
                     db.execute("SELECT COUNT(*) FROM personality_persona").fetchone(),
@@ -406,29 +404,58 @@ class MigrationsTest(unittest.TestCase):
                 )
                 self.assertEqual(
                     db.execute(
-                        "SELECT COUNT(*) FROM session_requirements WHERE session=?",
-                        (session,),
-                    ).fetchone(),
-                    (0,),
+                        "SELECT name FROM sqlite_master WHERE name='session_requirements'"
+                    ).fetchall(),
+                    [],
+                )
+                self.assertEqual(
+                    db.execute(
+                        "SELECT name FROM sqlite_master WHERE name IN ('personality_source','personality_memory','personality_capacity','personality_controls')"
+                    ).fetchall(),
+                    [],
                 )
 
-    def test_personality_upgrade_preserves_existing_transcript_bytes_and_lcm_rows(self):
-        provider = Provider(lambda _request: text("done"))
+    def test_personality_legacy_quarantine_leaves_all_seeded_data_unchanged(self):
+        provider = Provider(lambda _request: text("unused"))
         self.addCleanup(provider.close)
         with Albedo(provider) as app:
             session = app.session()
             database = app.home / "albedo.sqlite"
             before = {}
 
-            def prepare(_app):
+            def legacy(_app):
                 with sqlite3.connect(database) as db:
+                    for table in (
+                        "personality_lesson_receipt",
+                        "personality_lesson_revision",
+                        "personality_lesson",
+                        "personality_tool_receipt",
+                        "personality_setup_receipt",
+                        "personality_binding_revision",
+                        "personality_session",
+                        "personality_default",
+                        "personality_revision",
+                        "personality_persona",
+                        "personality_meta",
+                    ):
+                        db.execute(f"DROP TABLE {table}")
+                    db.execute(
+                        "CREATE TABLE personality_persona(id TEXT PRIMARY KEY, abandoned_claim TEXT)"
+                    )
+                    db.execute(
+                        "INSERT INTO personality_persona VALUES('legacy','retain exact experimental data')"
+                    )
                     seq = db.execute(
                         "INSERT INTO transcript(session,payload,row_class,summary_indexed,calls_indexed) VALUES(?,?,'user',1,1)",
                         (session, LEGACY_TRANSCRIPT),
                     ).lastrowid
                     db.execute(
-                        "INSERT INTO lcm_compaction_node(session,depth,first_seq,last_seq,summary) VALUES(?,0,?,?,'existing summary')",
+                        "INSERT INTO lcm_compaction_node(session,depth,first_seq,last_seq,summary) VALUES(?,0,?,?,'retained native summary')",
                         (session, seq, seq),
+                    )
+                    db.execute(
+                        "INSERT INTO session_extensions VALUES(?,'personality',1)",
+                        (session,),
                     )
                     before["transcript"] = db.execute(
                         "SELECT * FROM transcript WHERE session=?", (session,)
@@ -436,29 +463,30 @@ class MigrationsTest(unittest.TestCase):
                     before["lcm"] = db.execute(
                         "SELECT * FROM lcm_compaction_node WHERE session=?", (session,)
                     ).fetchall()
-                    for table in (
-                        "personality_memory_source",
-                        "personality_memory_revision",
-                        "personality_memory",
-                        "personality_source",
-                        "personality_tool_receipt",
-                        "personality_capacity",
-                        "personality_controls",
-                        "personality_session",
-                        "personality_event",
-                        "personality_operation",
-                        "personality_default",
-                        "personality_revision",
-                        "personality_persona",
-                    ):
-                        db.execute(f"DROP TABLE IF EXISTS {table}")
-                    db.execute("DROP TABLE session_requirements")
                     db.execute(
-                        "DELETE FROM migrations WHERE name='session_requirements'"
+                        "CREATE TABLE session_requirements(session TEXT, capability TEXT)"
                     )
+                    db.execute("DROP TABLE session_requirements")
 
-            app.restart(prepare=prepare)
+            app.restart(prepare=legacy)
+            app.restart()
+            with app.api(f"/sessions/{session}") as response:
+                quarantine = json.load(response)["composition"]["quarantine"]
+            self.assertTrue(any(item["id"] == "personality" for item in quarantine))
+            ordinary = app.session()
+            with app.api(f"/sessions/{ordinary}?view=configuration") as response:
+                self.assertEqual(response.status, 200)
             with sqlite3.connect(database) as db:
+                self.assertEqual(
+                    db.execute("SELECT * FROM personality_persona").fetchall(),
+                    [("legacy", "retain exact experimental data")],
+                )
+                self.assertEqual(
+                    db.execute(
+                        "SELECT name FROM sqlite_master WHERE name LIKE 'personality_%'"
+                    ).fetchall(),
+                    [("personality_persona",)],
+                )
                 self.assertEqual(
                     db.execute(
                         "SELECT * FROM transcript WHERE session=?", (session,)
@@ -471,250 +499,3 @@ class MigrationsTest(unittest.TestCase):
                     ).fetchall(),
                     before["lcm"],
                 )
-                self.assertEqual(
-                    db.execute("SELECT COUNT(*) FROM personality_persona").fetchone(),
-                    (0,),
-                )
-                self.assertEqual(
-                    db.execute("SELECT COUNT(*) FROM session_requirements").fetchone(),
-                    (0,),
-                )
-
-    def test_interrupted_personality_schema_rolls_back_and_retries_without_losing_guard(
-        self,
-    ):
-        provider = Provider(lambda _request: text("done"))
-        self.addCleanup(provider.close)
-        with Albedo(provider) as app:
-            session = app.session()
-            database = app.home / "albedo.sqlite"
-
-            def interrupt(_app):
-                with sqlite3.connect(database) as db:
-                    db.execute(
-                        "INSERT INTO session_requirements(session,capability) VALUES(?,'personality')",
-                        (session,),
-                    )
-                    for table in (
-                        "personality_memory_source",
-                        "personality_memory_revision",
-                        "personality_memory",
-                        "personality_source",
-                        "personality_tool_receipt",
-                        "personality_capacity",
-                        "personality_controls",
-                        "personality_session",
-                        "personality_event",
-                        "personality_operation",
-                        "personality_default",
-                        "personality_revision",
-                        "personality_persona",
-                    ):
-                        db.execute(f"DROP TABLE {table}")
-                    db.execute(
-                        "CREATE VIEW personality_revision AS SELECT 'blocked' AS persona_id"
-                    )
-
-            app.restart(prepare=interrupt)
-            with sqlite3.connect(database) as db:
-                self.assertEqual(
-                    db.execute(
-                        "SELECT capability FROM session_requirements WHERE session=?",
-                        (session,),
-                    ).fetchall(),
-                    [("personality",)],
-                )
-                self.assertIsNone(
-                    db.execute(
-                        "SELECT name FROM sqlite_master WHERE name='personality_persona'"
-                    ).fetchone()
-                )
-
-            def restore(_app):
-                with sqlite3.connect(database) as db:
-                    db.execute("DROP VIEW personality_revision")
-
-            app.restart(prepare=restore)
-            with sqlite3.connect(database) as db:
-                self.assertEqual(
-                    db.execute("SELECT COUNT(*) FROM personality_persona").fetchone(),
-                    (0,),
-                )
-                self.assertEqual(
-                    db.execute(
-                        "SELECT capability FROM session_requirements WHERE session=?",
-                        (session,),
-                    ).fetchall(),
-                    [("personality",)],
-                )
-
-    def test_applied_core_admission_missing_on_restart_is_not_recreated_empty(self):
-        provider = Provider(lambda _request: text("done"))
-        self.addCleanup(provider.close)
-        with Albedo(provider) as app:
-            session = app.session()
-            database = app.home / "albedo.sqlite"
-            saved = {}
-
-            def remove_guard(_app):
-                with sqlite3.connect(database) as db:
-                    saved["schema"] = db.execute(
-                        "SELECT sql FROM sqlite_master WHERE name='session_requirements'"
-                    ).fetchone()[0]
-                    db.execute(
-                        "INSERT INTO session_requirements(session,capability) VALUES(?,'personality')",
-                        (session,),
-                    )
-                    saved["rows"] = db.execute(
-                        "SELECT session,capability FROM session_requirements"
-                    ).fetchall()
-                    db.execute("DROP TABLE session_requirements")
-
-            def restore_guard(_app):
-                with sqlite3.connect(database) as db:
-                    db.execute("DROP TABLE IF EXISTS session_requirements")
-                    db.execute(saved["schema"])
-                    db.executemany(
-                        "INSERT INTO session_requirements(session,capability) VALUES(?,?)",
-                        saved["rows"],
-                    )
-
-            try:
-                with self.assertRaises(AssertionError) as failure:
-                    app.restart(prepare=remove_guard)
-                self.assertIn("session admission", str(failure.exception))
-                with sqlite3.connect(database) as db:
-                    self.assertIsNone(
-                        db.execute(
-                            "SELECT name FROM sqlite_master WHERE name='session_requirements'"
-                        ).fetchone()
-                    )
-            finally:
-                app.restart(prepare=restore_guard)
-            with sqlite3.connect(database) as db:
-                self.assertEqual(
-                    db.execute(
-                        "SELECT capability FROM session_requirements WHERE session=?",
-                        (session,),
-                    ).fetchall(),
-                    [("personality",)],
-                )
-
-    def test_all_personality_tables_and_used_columns_are_required_for_installation(
-        self,
-    ):
-        provider = Provider(lambda _request: text("done"))
-        self.addCleanup(provider.close)
-        with Albedo(provider) as app:
-            session = app.session()
-            database = app.home / "albedo.sqlite"
-            columns = {
-                "personality_persona": "id,name,state,revision,identity_revision,creation_operation,agent_identity_edits,agent_memory_edits",
-                "personality_revision": "persona_id,revision,self_description,values_text,communication,instructions,author,origin_session,reason,created_at",
-                "personality_default": "singleton,persona_id",
-                "personality_session": "session,persona_id,mode,binding_revision,pre_binding_through,authority",
-                "personality_event": "id,persona_id,operation_id,actor,origin_session,event_type,base_revision,head_revision,reason,created_at",
-                "personality_operation": "operation_id,request,result,created_at",
-                "personality_controls": "persona_id,field_locks",
-                "personality_capacity": "persona_id,ordinary_bytes,corrective_bytes,ordinary_limit,corrective_limit,memory_bytes,record_limit",
-                "personality_memory": "id,persona_id,revision,lifecycle,importance,tags,temporal_scope,unresolved",
-                "personality_memory_revision": "persona_id,memory_id,revision,text,provenance,uncertainty,author,origin_session,event_id,reason,lifecycle,importance,tags,temporal_scope,unresolved",
-                "personality_source": "id,persona_id,session,first_seq,last_seq,digest,actors,origin,binding_revision,pre_binding_through,lcm_hint,availability",
-                "personality_memory_source": "persona_id,memory_id,revision,source_id,relation",
-                "personality_tool_receipt": "persona_id,session,call_id,operation_key,result",
-            }
-            cases = [
-                (
-                    table,
-                    "table",
-                    f"CREATE TABLE {table}(wrong TEXT); INSERT INTO {table}(wrong) VALUES('retained')",
-                )
-                for table in columns
-            ]
-            cases += [
-                (
-                    table,
-                    "view",
-                    f"CREATE VIEW {table} AS SELECT "
-                    + ",".join(f"NULL AS {column}" for column in names.split(","))
-                    + " WHERE 0",
-                )
-                for table, names in columns.items()
-            ]
-            cases.append(
-                (
-                    "personality_revision",
-                    "table",
-                    "CREATE TABLE personality_revision(persona_id TEXT,revision INTEGER,self_description TEXT,values_text TEXT,communication TEXT,instructions TEXT,author TEXT,reason TEXT,created_at INTEGER)",
-                )
-            )
-            for table, kind, sql in cases:
-                with self.subTest(table=table, kind=kind, definition=sql):
-
-                    def malformed(_app):
-                        with sqlite3.connect(database) as db:
-                            for owned in (
-                                "personality_memory_source",
-                                "personality_memory_revision",
-                                "personality_memory",
-                                "personality_source",
-                                "personality_tool_receipt",
-                                "personality_capacity",
-                                "personality_controls",
-                                "personality_session",
-                                "personality_event",
-                                "personality_operation",
-                                "personality_default",
-                                "personality_revision",
-                                "personality_persona",
-                            ):
-                                db.execute(f"DROP TABLE IF EXISTS {owned}")
-                            db.executescript(sql)
-                            db.execute(
-                                "INSERT OR IGNORE INTO session_requirements(session,capability) VALUES(?,'personality')",
-                                (session,),
-                            )
-
-                    def restore(_app):
-                        with sqlite3.connect(database) as db:
-                            db.execute(f"DROP {kind.upper()} {table}")
-
-                    try:
-                        app.restart(prepare=malformed)
-                        with app.api(f"/sessions/{session}") as response:
-                            quarantine = json.load(response)["composition"][
-                                "quarantine"
-                            ]
-                        self.assertTrue(
-                            any(item["id"] == "personality" for item in quarantine),
-                            quarantine,
-                        )
-                        with sqlite3.connect(database) as db:
-                            self.assertEqual(
-                                db.execute(
-                                    "SELECT type FROM sqlite_master WHERE name=?",
-                                    (table,),
-                                ).fetchone(),
-                                (kind,),
-                            )
-                            self.assertEqual(
-                                db.execute(
-                                    "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'personality_%' AND name<>?",
-                                    (table,),
-                                ).fetchall(),
-                                [],
-                            )
-                            self.assertEqual(
-                                db.execute(
-                                    "SELECT capability FROM session_requirements WHERE session=?",
-                                    (session,),
-                                ).fetchall(),
-                                [("personality",)],
-                            )
-                            if "wrong TEXT" in sql:
-                                self.assertEqual(
-                                    db.execute(f"SELECT wrong FROM {table}").fetchall(),
-                                    [("retained",)],
-                                )
-                    finally:
-                        app.restart(prepare=restore)

@@ -2,7 +2,6 @@
 
 import albedo/actor_call
 import albedo/daemon/configuration
-import albedo/daemon/session_requirements
 import albedo/daemon/store
 import albedo/harness/command
 import albedo/harness/compaction
@@ -1127,6 +1126,15 @@ pub fn quarantined(runtime: Runtime) -> List(extension.Quarantined) {
   shared.read(runtime.installed).quarantined
 }
 
+/// Original declarations from one native registry snapshot, including failures.
+pub fn declarations(runtime: Runtime) -> List(extension.Extension) {
+  let installed = shared.read(runtime.installed)
+  list.append(
+    installed.extensions,
+    list.map(installed.quarantined, fn(item) { item.declaration }),
+  )
+}
+
 pub fn base_defaults(runtime: Runtime) -> List(String) {
   shared.read(runtime.installed).default_enabled
 }
@@ -1580,10 +1588,14 @@ fn required_capabilities(
   use _ <- result.try(owned_by(runtime, session))
   let loaded =
     list.map(composition.extensions(session.composition), fn(item) { item.name })
-  use _ <- result.map(session_requirements.check(
+  let inventory = shared.read(runtime.installed)
+  use _ <- result.map(selection.check_required(
     runtime.ledger,
+    inventory.extensions,
+    inventory.quarantined,
+    inventory.default_enabled,
     session.id,
-    loaded,
+    session.composition,
   ))
   loaded
 }

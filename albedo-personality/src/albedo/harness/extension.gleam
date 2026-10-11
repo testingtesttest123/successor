@@ -280,6 +280,7 @@ pub type Plugin {
   RequestContextPlugin(
     prepare: fn(request_context.Input) ->
       Result(request_context.Contribution, String),
+    required_when_selected: Bool,
   )
   ContextPlugin(load: fn(String) -> Result(String, String))
   ToolPlugin(
@@ -375,6 +376,8 @@ pub type Daemon {
     /// Catalog model ids for a provider extension and endpoint.
     models: fn(String, Option(String)) -> List(String),
     sessions: fn() -> List(conversation.Info),
+    /// Original native declarations, including quarantined extensions, read-only.
+    declarations: fn() -> List(Extension),
     /// Opens only the session actor and invokes its serialized state bridge.
     state: fn(String, command.StateOp) -> Result(json.Json, String),
     searches: fn() -> Result(List(web_search.Provider), String),
@@ -414,7 +417,12 @@ pub type Summary {
 /// An installed extension the daemon will not run, with the reason. No
 /// session selects it; it is listed so the failure is visible.
 pub type Quarantined {
-  Quarantined(name: String, description: String, reason: String)
+  Quarantined(
+    name: String,
+    description: String,
+    reason: String,
+    declaration: Extension,
+  )
 }
 
 /// The initialiser of an extension that keeps no tables.
@@ -467,7 +475,7 @@ pub fn install(
 }
 
 fn quarantined(extension: Extension, reason: String) -> Quarantined {
-  Quarantined(extension.name, extension.description, reason)
+  Quarantined(extension.name, extension.description, reason, extension)
 }
 
 /// Split `installed` in order: each extension `check` accepts is kept, and
@@ -948,4 +956,15 @@ fn overlapping_routes(routes: List(String)) -> Bool {
       })
       || overlapping_routes(rest)
   }
+}
+
+/// Ordinary request contributors are optional. A selected mandatory contributor
+/// cannot disappear through quarantine, composition failure or dependency loss.
+pub fn required_when_selected(item: Extension) -> Bool {
+  list.any(item.plugins, fn(plugin) {
+    case plugin {
+      RequestContextPlugin(_, required) -> required
+      _ -> False
+    }
+  })
 }

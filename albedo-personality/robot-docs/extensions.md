@@ -3,7 +3,7 @@
 Persisted preferences are owned by the daemon and changed through the [settings API](settings.md). The CLI refreshes them on use and never writes settings files.
 
 
-an extension is a named bundle of plugins. it can contribute any number of context, tool, command, managed, models, provider, login, service, migration, compaction, notes, clean, fold, or [search](web-search.md) plugins. `python`, `run`, `work`, `mail`, `agents`, `schedule`, `paperclips`, `files`, `memory`, `links`, `instructions`, `commands`, `skills`, `models`, `openai`, `codex`, `antigravity`, `alibaba`, `bedrock`, `claude`, `vertex`, `rolling`, `snapcompact-memory`, `lcm-memory`, `notes`, `remote`, `browser`, [`warm`](cache-warming.md), `exa`, and [`web-search`](web-search.md) are enabled by default; `mcp`, `view`, [`proxy`](proxy.md), `webhooks`, `personality`, and the `snapcompact` and `lcm` compaction strategies are installed and disabled until enabled. plugin contributions compose inside them.
+an extension is a named bundle of plugins. it can contribute any number of context, tool, command, managed, models, provider, login, service, migration, compaction, notes, clean, fold, or [search](web-search.md) plugins. `python`, `run`, `work`, `mail`, `agents`, `schedule`, `paperclips`, `files`, `memory`, `links`, `instructions`, `commands`, `skills`, `models`, `openai`, `codex`, `antigravity`, `alibaba`, `bedrock`, `claude`, `vertex`, `rolling`, `snapcompact-memory`, `lcm-memory`, `notes`, `remote`, `browser`, [`warm`](cache-warming.md), `exa`, and [`web-search`](web-search.md) are enabled by default; `mcp`, `view`, [`proxy`](proxy.md), `webhooks`, `personality`, `personality-lessons`, and the `snapcompact` and `lcm` compaction strategies are installed and disabled until enabled. plugin contributions compose inside them.
 
 ## select extensions
 
@@ -277,11 +277,12 @@ a `CleanPlugin` is how an extension that keeps rows per session deletes them wit
 
 ## Durable request admission and personality setup
 
-`personality` is installed but disabled by default. Enabling it selects a
-capability, never creates or binds an identity. Its human-only setup and
+`personality` is installed but disabled by default. Enabling it selects a native LCM
+bundle. Managed preparation reuses the configured default for fresh owner sessions
+before first transcript admission; it never creates a permanent identity. Its human-only setup and
 `/personality` resource page are described in [personality](personality.md).
 
-`RequestContextPlugin` declares a bounded read-only callback over
+`RequestContextPlugin(prepare, required_when_selected)` declares a bounded read-only callback over
 `request_context.Input(store, session, loaded, query, budget)`. Composition
 returns callbacks only from complete loaded-active bundles. The generic values
 are independent of compaction and include named instruction/data blocks,
@@ -308,14 +309,13 @@ policy contributors fail composition. The policy/lineage types are carried for
 later LCM policy integration; this identity-only slice does not change summary
 bodies or retrieve curated records.
 
-Before invoking these callbacks, runtime preparation reads the core-owned
-`session_requirements` table and checks loaded capability names. A missing or
-unreadable table is an error, never an empty requirement list. Managed background
-requests use the same core guard plus loaded callbacks' binding/store validation
-before provider dispatch, including released compositions. That validation is
-not a new preparation: it preserves the complete already assembled replay
-payload, rather than replacing its captured revision. This remains effective
-when a required extension is absent or quarantined.
+Mandatory contributors declare `required_when_selected=true`; ordinary callbacks
+use false. Native admission reads raw saved selection and original declarations,
+including quarantined metadata, then compares requested and loaded bundles.
+Selected mandatory context cannot silently disappear in quarantine. Unselected
+sessions do not query extension-owned identity storage or a global guard table.
+Managed replay validates the selected loaded callbacks while preserving the
+already assembled payload and its captured revision.
 
 `command.ApplyIdle` serializes a trusted adapter's bounded local transaction
 callback through the session actor. It refuses running and booting sessions.

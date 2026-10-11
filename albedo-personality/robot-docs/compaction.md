@@ -161,7 +161,9 @@ Image bytes are never copied into the recap or the summarizer prompt; a recent i
 
 ### Captured personality policy and LCM evidence
 
-Bound-session LCM uses the request contribution's captured identity revision and
+The opt-in personality bundle reuses native LCM settings through its shared
+strategy resolver and requires `lcm-memory`. Plain LCM and rolling retain their
+own configurations. Its request contribution captures the free-form document revision and
 summary policy. Forced compaction uses that same preparation boundary. A persona
 edit during generation affects the next preparation; transport and shrink
 retries keep their original instructions, lineage and evidence. Unbound LCM

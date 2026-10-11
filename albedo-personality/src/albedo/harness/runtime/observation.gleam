@@ -241,7 +241,7 @@ pub fn observe_composition_value(
         fn(failure) {
           list.find(inventory.installed, fn(item) { item.name == failure.0 })
           |> result.map(fn(item) {
-            extension.Quarantined(item.name, item.description, failure.1)
+            extension.Quarantined(item.name, item.description, failure.1, item)
           })
         },
       ),

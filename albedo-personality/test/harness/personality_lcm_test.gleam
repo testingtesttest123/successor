@@ -8,7 +8,6 @@ import albedo/daemon/history
 import albedo/daemon/http_wire
 import albedo/daemon/mail
 import albedo/daemon/requests
-import albedo/daemon/session_requirements
 import albedo/daemon/session_submission
 import albedo/daemon/turn
 import albedo/harness/compaction
@@ -18,10 +17,8 @@ import albedo/harness/extensions
 import albedo/harness/extensions/lcm/extension as lcm
 import albedo/harness/extensions/lcm/graph
 import albedo/harness/extensions/lcm/memory
-import albedo/harness/extensions/personality/domain
 import albedo/harness/extensions/personality/extension as personality
 import albedo/harness/extensions/personality/ledger
-import albedo/harness/extensions/personality/sources
 import albedo/harness/extensions/personality/types as p
 import albedo/harness/extensions/python/kernel
 import albedo/harness/loop
@@ -49,21 +46,38 @@ fn setup(
   trigger: Int,
 ) -> #(runtime.Runtime, state.Session, p.Persona) {
   let installed = [
-    personality.extension(),
+    extension.Extension(
+      ..personality.extension(),
+      plugins: list.filter(personality.extension().plugins, fn(plugin) {
+        case plugin {
+          extension.CompactionPlugin(_) -> False
+          _ -> True
+        }
+      }),
+    ),
     memory.extension(),
     lcm.configured_extension(lcm.Config(Some(capacity), trigger, 25)),
   ]
   let assert Ok(host) =
     runtime.start_with_config(":memory:", extensions.Config(installed, []))
   session_fixture.initialise(host)
-  session_requirements.initialise(runtime.ledger(host)) |> should.be_ok
   session_fixture.create(host, "owner", "/tmp")
   let assert Ok(persona) =
     ledger.create(
       runtime.ledger(host),
-      p.Creation("create", "LCM persona", False, False, True),
+      "LCM persona",
+      "Living identity",
+      True,
+      True,
     )
-  ledger.bind(runtime.ledger(host), "owner", p.Bind("bind", persona.id, 0, 0))
+  ledger.bind(
+    runtime.ledger(host),
+    "owner",
+    persona.id,
+    0,
+    0,
+    runtime.installed(host),
+  )
   |> should.be_ok
   let session =
     state.Session(
@@ -101,7 +115,7 @@ pub fn automatic_and_forced_lcm_receive_captured_policy_and_real_sources_test() 
     ]
     save(host, history)
     let calls = process.new_subject()
-    let assert Ok(before) = ledger.capture(runtime.ledger(host), "owner", "")
+    let assert Ok(before) = ledger.capture(runtime.ledger(host), "owner")
     let assert Ok(prepared) =
       runtime.prepare_view_scoped(
         host,
@@ -119,7 +133,6 @@ pub fn automatic_and_forced_lcm_receive_captured_policy_and_real_sources_test() 
         types.any_images,
       )
     let assert Ok(request) = process.receive(calls, 100)
-    should.be_true(string.contains(request.instructions, "persona"))
     let assert Some(policy) = request.policy
     policy.identity_revision |> should.equal(before.persona.identity_revision)
     let assert compaction.Leaves("owner", [range], Some(lineage), attrs) =
@@ -148,7 +161,6 @@ pub fn automatic_and_forced_lcm_receive_captured_policy_and_real_sources_test() 
       let assert Ok(wire) = provider_request.encode(protocol, actual)
       let encoded = string_tree.to_string(wire)
       should.be_true(string.contains(encoded, "source_ranges"))
-      should.be_false(string.contains(encoded, "personality recall"))
     })
     let snapshot =
       context_snapshot.from_prepared(
@@ -172,8 +184,8 @@ pub fn automatic_and_forced_lcm_receive_captured_policy_and_real_sources_test() 
     let encoded = context_snapshot.summary(snapshot) |> json.to_string
     should.be_true(string.contains(encoded, "summary_calls"))
     let assert Ok(page) = context_snapshot.page(snapshot, "summary-0", 0)
-    should.be_true(string.contains(page.text, "Captured current identity"))
-    let assert Ok(after) = ledger.capture(runtime.ledger(host), "owner", "")
+    should.be_true(string.contains(page.text, before.persona.document))
+    let assert Ok(after) = ledger.capture(runtime.ledger(host), "owner")
     after.persona |> should.equal(before.persona)
     composition.close(session.composition)
     runtime.stop(host)
@@ -210,7 +222,7 @@ pub fn captured_policy_survives_concurrent_edit_and_shrink_retry_then_advances_t
     types.User("retained"),
   ]
   save(host, history)
-  let assert Ok(before) = ledger.capture(runtime.ledger(host), "owner", "")
+  let assert Ok(before) = ledger.capture(runtime.ledger(host), "owner")
   let calls = process.new_subject()
   process.send(calls, [])
   let assert Ok(prepared) =
@@ -218,17 +230,13 @@ pub fn captured_policy_survives_concurrent_edit_and_shrink_retry_then_advances_t
       let assert Ok(seen) = process.receive(calls, 0)
       case seen {
         [] -> {
-          let mutation =
-            p.Mutation(
-              "concurrent",
-              before.persona.revision,
-              before.persona.identity_revision,
-              [#("values", "new revision")],
-              "during summary",
-              None,
-              [],
-            )
-          domain.mutate(runtime.ledger(host), "owner", p.User, mutation)
+          ledger.write_document(
+            runtime.ledger(host),
+            "owner",
+            p.User("concurrent"),
+            "new revision",
+            Some(before.persona.identity_revision),
+          )
           |> should.be_ok
           Nil
         }
@@ -246,7 +254,7 @@ pub fn captured_policy_survives_concurrent_edit_and_shrink_retry_then_advances_t
   policy.identity_revision |> should.equal(before.persona.identity_revision)
   let assert [a, b] = prepared.request_context.summary_calls
   a.envelope |> should.equal(b.envelope)
-  let assert Ok(after) = ledger.capture(runtime.ledger(host), "owner", "")
+  let assert Ok(after) = ledger.capture(runtime.ledger(host), "owner")
   after.persona.identity_revision
   |> should.equal(before.persona.identity_revision + 1)
   let next =
@@ -367,10 +375,6 @@ pub fn condensation_uses_actual_child_nodes_without_relabeling_old_provenance_te
   )
   let assert Ok(envelope) = compaction.summary_envelope(request)
   should.be_true(string.contains(envelope, "\"attribution\":\"unknown\""))
-  should.be_true(string.contains(
-    request.instructions,
-    "does not relabel old nodes",
-  ))
   let assert Ok(after) = graph.frontier(runtime.ledger(host), "owner")
   should.be_true(list.length(after) < list.length(before))
   composition.close(session.composition)
@@ -411,7 +415,10 @@ pub fn host_chat_notes_and_prebinding_intervals_keep_real_actor_ceiling_test() -
   ledger.bind(
     runtime.ledger(host),
     "owner",
-    p.Bind("rebind", persona.id, 1, through),
+    persona.id,
+    1,
+    through,
+    runtime.installed(host),
   )
   |> should.be_ok
   save_submission(host, turn.Chat, "real user assertion", "owner action")
@@ -640,7 +647,7 @@ pub fn summary_inspection_collection_is_bounded_and_reports_omissions_test() -> 
   runtime.stop(host)
 }
 
-pub fn trusted_mail_reporter_is_shared_with_exact_source_validation_test() -> Nil {
+pub fn trusted_mail_reporter_survives_native_lcm_summary_evidence_test() -> Nil {
   let #(host, session, _) = setup(20_000, 80)
   let db = runtime.ledger(host)
   mail.initialise(db) |> should.be_ok
@@ -685,25 +692,6 @@ pub fn trusted_mail_reporter_is_shared_with_exact_source_validation_test() -> Ni
       && attr.actor == Some("agent_report:reporter:result")
     }),
   )
-  let assert Ok(snapshot) = ledger.capture(db, "owner", "")
-  let assert Ok([source]) =
-    sources.resolve(db, snapshot.binding, [
-      p.SourceRef(
-        "",
-        "",
-        row.source.seq,
-        row.source.seq,
-        "",
-        [],
-        "",
-        0,
-        0,
-        None,
-        "",
-      ),
-    ])
-  source.actors |> should.equal(["agent_report:reporter:result"])
-  source.origin |> should.equal("reported")
   composition.close(session.composition)
   runtime.stop(host)
 }
@@ -851,7 +839,7 @@ fn failure_snapshot(
   should.be_true(string.contains(encoded, "\"status\":\"attempted\""))
   should.be_true(string.contains(encoded, "ordinary request not admitted"))
   let assert Ok(page) = context_snapshot.page(snapshot, "summary-0", 0)
-  should.be_true(string.contains(page.text, "Captured current identity"))
+  should.be_true(string.contains(page.text, "Living identity"))
   should.be_true(string.byte_size(page.text) <= 8192)
   let encoded_page = http_wire.context_page(page) |> json.to_string
   should.be_true(string.contains(encoded_page, "summary-0"))
@@ -888,21 +876,13 @@ pub fn forced_and_ordinary_failed_summary_retain_captured_inspection_and_cursor_
       "summarizer provider request failed",
     ))
     process.receive(sent, 100) |> should.be_ok
-    let assert Ok(before_edit) =
-      ledger.capture(runtime.ledger(host), "owner", "")
-    domain.mutate(
+    let assert Ok(before_edit) = ledger.capture(runtime.ledger(host), "owner")
+    ledger.write_document(
       runtime.ledger(host),
       "owner",
-      p.User,
-      p.Mutation(
-        "after-failure",
-        before_edit.persona.revision,
-        before_edit.persona.identity_revision,
-        [#("values", "later policy")],
-        "after attempted summary",
-        None,
-        [],
-      ),
+      p.User("after-failure"),
+      "later policy",
+      Some(before_edit.persona.identity_revision),
     )
     |> should.be_ok
     failure_snapshot(snapshots, persona.identity_revision)
@@ -989,7 +969,7 @@ pub fn successful_summary_retains_inspection_when_later_preparation_or_admission
       failure_snapshot(snapshots, persona.identity_revision)
       let assert Ok(cursor) = graph.last_seq(runtime.ledger(host), "owner")
       should.be_true(cursor > 0)
-      let assert Ok(current) = ledger.capture(runtime.ledger(host), "owner", "")
+      let assert Ok(current) = ledger.capture(runtime.ledger(host), "owner")
       current.persona.identity_revision
       |> should.equal(persona.identity_revision)
       composition.close(session.composition)
@@ -1088,7 +1068,17 @@ pub fn rejected_summary_envelope_never_claims_a_provider_attempt_test() -> Nil {
       ],
       extension.no_initialise,
     )
-  let selected = [personality.extension(), malformed]
+  let identity_only =
+    extension.Extension(
+      ..personality.extension(),
+      plugins: list.filter(personality.extension().plugins, fn(plugin) {
+        case plugin {
+          extension.CompactionPlugin(_) -> False
+          _ -> True
+        }
+      }),
+    )
+  let selected = [memory.extension(), identity_only, malformed]
   let session =
     state.Session(
       ..original,

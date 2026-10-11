@@ -22,6 +22,7 @@ import albedo/harness/extensions/notes/extension as notes
 import albedo/harness/extensions/openai/extension as openai
 import albedo/harness/extensions/paperclips/extension as paperclips
 import albedo/harness/extensions/personality/extension as personality
+import albedo/harness/extensions/personality/lessons_extension as lessons
 import albedo/harness/extensions/proxy/extension as proxy
 import albedo/harness/extensions/python/extension as python
 import albedo/harness/extensions/remote/extension as remote
@@ -82,6 +83,7 @@ fn installed() -> Config {
       lcm.extension(),
       notes.extension(),
       personality.extension(),
+      lessons.extension(),
       mcp.configured_extension(),
       remote.extension(),
       colab.extension(),

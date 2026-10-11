@@ -221,27 +221,24 @@ Acceptance guarantees stored input or its committed or cancelled outcome.
 Commit means the input reached the transcript. Neither guarantee promises that
 assistant generation, tools, or external effects occur exactly once.
 
-## Explicit personality setup and capability admission
+## Experimental personality storage
 
-The installed personality extension contributes one atomic `SchemaMigration`
-from `personality/migrations/schema`. It creates only extension-owned identity,
-revision, default, binding, event and setup-receipt tables. Required-column
-validation also rejects malformed pre-existing tables/views. Failure rolls back
-installation and quarantines the bundle. Fresh and legacy upgrades create no
-persona, binding or copied state and do not change transcript bytes or LCM rows.
+The personality extension owns its fresh free-form identity schema, document and
+binding revisions, defaults and atomic receipts. Installation creates no persona
+or binding. Compatible schema validation is read-only; legacy or damaged schema
+is detected before any DDL and quarantined with retained data. No destructive
+experimental-ledger migration is supported. Optional lessons own separate tables
+and validate the core marker before touching their schema. Partial optional
+storage is refused rather than recreated as empty receipt/history state.
 
-`conversation.initialise` calls the core `session_requirements.initialise`
-after core schema work. The narrow core addition is the generic
-`session_requirements(session, capability)` table. Its creation and the
-`session_requirements` marker in the existing `migrations` table commit together.
-A fresh/legacy database without that marker may initialize. If the marker is
-present but the admission table is absent or unreadable, startup fails clearly;
-it never recreates empty authority state. There is no automatic destructive
-repair, core fork-row-map migration, or personality-specific query in this guard.
+The personality-era global session-admission table and startup/runtime calls are
+removed. Existing unused tables/markers are left untouched; ordinary session
+startup and unselected requests do not depend on them. Selected mandatory
+contributors are checked through native persisted selection, original/quarantined
+extension declarations and loaded composition. Core OAuth, image, transcript,
+credential and operation migrations remain unchanged.
 
-[Personality migration scenarios](../test/e2e/migrations_test.py) cover fresh
-installation, legacy upgrade with unchanged transcript/LCM storage, interrupted
-extension schema installation with a surviving core guard, and a missing core
-guard after migration/restart. Binding and capability requirement changes are
-one ordinary store transaction; a failed guard statement rolls back the binding
-and its receipt.
+[Startup scenarios](../test/e2e/migrations_test.py) verify fresh storage and legacy
+quarantine while preserving seeded transcript/LCM bytes. Compiled native tests
+also exercise missing-table failure across runtime reconstruction, atomic receipt
+rollback, default reuse and exact historical attachment boundaries.

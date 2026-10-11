@@ -360,7 +360,7 @@ pub fn request_context(
 ) {
   extension.plugin_values(composition.extensions, fn(_, plugin) {
     case plugin {
-      extension.RequestContextPlugin(prepare) -> Ok(prepare)
+      extension.RequestContextPlugin(prepare, _) -> Ok(prepare)
       _ -> Error(Nil)
     }
   })

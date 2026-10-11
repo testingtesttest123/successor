@@ -9,7 +9,6 @@ import albedo/daemon/notice
 import albedo/daemon/operations
 import albedo/daemon/requests
 import albedo/daemon/session_configuration
-import albedo/daemon/session_requirements
 import albedo/daemon/session_workspace
 import albedo/daemon/store
 import albedo/daemon/tool_results
@@ -465,7 +464,6 @@ pub fn initialise(store: store.Store) -> Result(Nil, String) {
       )
     }),
   )
-  use _ <- result.try(session_requirements.initialise(store))
   index_saved_entries(store)
 }
 

@@ -128,34 +128,39 @@ rules, corpus/schema validation, and fresh-reference execution gate. The local
 protocol tests above only check adapter plumbing; they do not replace that gate.
 
 
-## Albedo personality experiment: reviewed stages 1-7 checkpoint
+## Albedo personality experiment: correction stage 1 checkpoint
 
 The separate [`albedo-personality/`](albedo-personality/) subtree contains an
 Albedo-derived personal experiment. Existing Successor runtime and entrypoints
-remain unchanged. Approved [design](docs/experiments/albedo-personality-design.md)
-and [staged plan](docs/experiments/albedo-personality-plan.md) describe the goal.
+remain unchanged. The original [design](docs/experiments/albedo-personality-design.md)
+and [staged plan](docs/experiments/albedo-personality-plan.md) are retained as
+historical planning documents; this correction supersedes their claim-ledger
+product surface rather than claiming that original plan is complete.
 
 - Original Successor base: `b950f2d831f1fa5463799fbfe50995f644be52c3`.
 - Albedo source: [okami.mom/albedo](https://tangled.org/okami.mom/albedo), pinned
   baseline `47735ec493f3e3a6ac73b619495098437759e0c0`.
-- Exact independently reviewed publication checkpoint:
-  `94edf26046e832e6940fc27a526ed43a3e9272fb`, tracked tree
-  `53822f55a18b734dd8f8caeb3c8fd8134cd6bc3b`. Complete tracked source, tests,
+- Exact independently reviewed correction checkpoint:
+  `243dac808d5f9a2a98be3b5445e0201ce67d6de8`, tracked tree
+  `2e9db7edb7d468a33bc5dab5ca91c2ca25f5a319`. Complete tracked source, tests,
   required assets, license and third-party/vendored notices are exported.
-  No Albedo Git history, runtime homes or active uncommitted work is imported.
-- Reviewed through stage 7: identity binding/admission and revisioned edits,
-  immutable request-time identity context, source-backed memory correction and
-  inspection, bounded current-record recall and canonical episodic expansion,
-  and persona-aware native LCM compaction. Captured identity policy and trusted
-  transcript attribution accompany exact leaf ranges and selected child nodes;
-  unknown/historical attribution requires source expansion. Unbound native LCM
-  retains its generic prompt, chunking and accounting. Bounded inspection keeps
-  attempted summary captures even when later preparation fails; it does not
-  assert provider completion. Generated summaries remain derived and fallible.
-  Recall revalidates authority and evidence and authenticates exact references
-  and paging state. Generated local signing state lives only in the application
-  database; it is not part of this source export. Typed relationships/commitments
-  (stage 8), production delegation/grants (stage 9) and imports are future work.
+  No Albedo Git history, runtime homes, private reports or active uncommitted
+  work is imported.
+- Correction stage 1 replaces the previous mandatory field/claim ledger with
+  one free-form living personality document, ordinary write/substring editing,
+  human default/setup/binding and separately optional simple lessons. Captured
+  request revisions, atomic edit receipts, UTF-8 paging, read-only permissions,
+  native compaction selection and selected failure isolation remain enforced.
+  Oversized edit results are refused before replacement allocation. Legacy or
+  damaged personality storage is left untouched and quarantined; no destructive
+  conversion or repair is performed. Removed product mechanisms include the
+  source registry, signed-page/recall selector, claim taxonomy, adoption/report
+  acceptance and lifetime-capacity accounting. This checkpoint contains no
+  unreviewed legacy Task 8 or active correction-stage-2 work.
+- Native LCM reuse is present, but corrected autobiographical narration,
+  cross-session continuity, normal child/fork identity inheritance and native
+  background memory formation remain later correction stages. This is a
+  reviewed development backup, not an overall completed implementation.
 - Reviewed OAuth sanitization and generic webhook fixture cleanup are retained.
   Antigravity sign-in/refresh and Colab sign-in require explicit runtime config;
   tokens considered fresh by Albedo remain usable without it. See
@@ -163,17 +168,15 @@ and [staged plan](docs/experiments/albedo-personality-plan.md) describe the goal
   The historical GitHub fixture alert remains unresolved: this cleanup does not
   dismiss alerts, validate/rotate credentials or rewrite earlier Successor
   commits. Scoped scans are not a comprehensive security guarantee.
-- Recorded final stage-7 checks: 67 selected socket-free native cases, 23
-  human-HTTP daemon memory/recall cases, two API-doc cases, and successful static
-  checks and CLI build. The last isolated notes-fixture correction received
-  static/configuration checks and independent review; native/HTTP suites were
-  not rerun for that test-only change. Prior stage-6 and unchanged Rust/Go and
-  sanitization/fixture results remain recorded evidence, not new full-suite
-  passes. Native provider encoding checks are not live provider transport tests.
-- One initial live LCM attempt failed at AF_UNIX setup before provider semantics.
-  Full `./test.sh`, full `gleam test`, kernel/provider-turn E2E and Chrome remain
-  unverified under the approved AF_UNIX/Chrome exception. The inherited setup
-  capacity gap remains assigned to stage 11; overall capacity compliance is not
-  established. This is WIP, not the stage-12 release. Publication verifies exact
-  subtree parity and existing Successor preservation without testing the active
+- Recorded current-head checks: 60 compiled socket-free native tests, 10 real
+  daemon HTTP/startup scenarios, and formatting/type/lint checks. The allocation
+  fix received an independent scoped P1 recheck. Initial correction-stage-1
+  evidence also records 16 isolated OAuth regressions and native CLI checks;
+  those unrelated lanes were not rerun for the domain-only follow-up.
+- The attempted full repository gate did not pass: AF_UNIX/kernel and Chrome
+  failures, six parallel OAuth failures and a missing shared-scratch Go E2E log
+  remain disclosed evidence. Isolated OAuth tests passed, without establishing
+  an aggregate pass. Full kernel/provider/browser, whole-session E2E and
+  real-model behavior remain unverified. Publication verifies exact source
+  parity and existing Successor preservation without testing the active
   implementation worktree.

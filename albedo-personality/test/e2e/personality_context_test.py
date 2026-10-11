@@ -11,7 +11,6 @@ from harness import (
     Reply,
     error,
     exclusive,
-    operation_id,
     python,
     text,
 )
@@ -30,8 +29,12 @@ def instructions(request):
 
 def identity(request):
     prefix, block = instructions(request).split("\n\n[request context: ", 1)
-    payload = block.split("\n", 1)[1]
-    return prefix, json.loads(payload)
+    label, payload = block.split("\n", 1)
+    metadata, text = payload.split("\n", 1)
+    value = json.loads(metadata)
+    value["document"] = text.split("\n\n", 1)[1]
+    value["snapshot_id"] = label.split("; snapshot ", 1)[1].removesuffix("]")
+    return prefix, value
 
 
 def read(app, route):
@@ -39,19 +42,8 @@ def read(app, route):
         return json.load(response)
 
 
-def edit(app, session, values):
-    head = inspect(app, session)["persona"]
-    return value(
-        app,
-        f"/sessions/{session}/identity",
-        {
-            "operation_id": operation_id(),
-            "expected_revision": head["revision"],
-            "expected_identity_revision": head["identity_revision"],
-            "reason": "foreground identity change",
-            "changes": {"values": values},
-        },
-    )
+def edit(app, session, content):
+    return value(app, f"/sessions/{session}/document", {"content": content})
 
 
 @exclusive
@@ -89,13 +81,8 @@ class PersonalityContextTest(unittest.TestCase):
                     session = app.session()
                     persona = create(app)
                     bind(app, session, persona["id"])
-                    head = inspect(app, session)["persona"]
                     body.update(
-                        operation_id=operation_id(),
-                        expected_revision=head["revision"],
-                        expected_identity_revision=head["identity_revision"],
-                        reason="native live projection test",
-                        changes={"values": "Careful curiosity"},
+                        old_string="Initial identity", new_string="Careful curiosity"
                     )
                     app.prompt(session, "edit the live persona").close()
                     app.idle(session)
@@ -105,12 +92,9 @@ class PersonalityContextTest(unittest.TestCase):
                     new_prefix, new = identity(sent[2])
                     self.assertEqual(old_prefix, new_prefix)
                     self.assertEqual(old["persona_id"], new["persona_id"])
-                    self.assertEqual(new["identity"]["values"], "Careful curiosity")
+                    self.assertEqual(new["document"], "Careful curiosity")
                     self.assertEqual(
                         new["identity_revision"], old["identity_revision"] + 1
-                    )
-                    self.assertGreater(
-                        new["aggregate_revision"], old["aggregate_revision"]
                     )
                     records = read(app, f"/sessions/{session}/context?view=requests")[
                         "records"
@@ -130,63 +114,6 @@ class PersonalityContextTest(unittest.TestCase):
                     before = len(provider.requests)
                     read(app, f"/sessions/{session}/context?view=summary")
                     self.assertEqual(len(provider.requests), before)
-
-    def test_automatic_recall_is_request_only_and_preserves_static_pin(self):
-        for protocol in ("responses", "chat_completions"):
-            with self.subTest(protocol=protocol):
-                provider = Provider(lambda _request: text("source-backed turn"))
-                self.addCleanup(provider.close)
-                with self.app(provider, protocol) as app:
-                    session = app.session()
-                    bind(app, session, create(app)["id"])
-                    app.prompt(session, "needle asserted source").close()
-                    app.idle(session)
-                    transcript = read(app, f"/sessions/{session}/history?limit=100")[
-                        "entries"
-                    ]
-                    seq = next(
-                        row["position"] for row in transcript if row["kind"] == "user"
-                    )
-                    head = inspect(app, session)["persona"]
-                    receipt = value(
-                        app,
-                        f"/sessions/{session}/memories",
-                        {
-                            "operation_id": operation_id(),
-                            "expected_revision": head["revision"],
-                            "expected_identity_revision": head["identity_revision"],
-                            "reason": "explicit foreground curation",
-                            "memories": [
-                                {
-                                    "text": "I was told the needle assertion",
-                                    "provenance": "experienced",
-                                    "uncertainty": "unverified",
-                                    "tags": ["pinned"],
-                                    "sources": [
-                                        {
-                                            "relation": "supports",
-                                            "first_seq": seq,
-                                            "last_seq": seq,
-                                        }
-                                    ],
-                                }
-                            ],
-                        },
-                    )
-                    app.prompt(session, "needle follow-up").close()
-                    app.idle(session)
-                    sent = [item["request"] for item in provider.requests]
-                    self.assertEqual(identity(sent[0])[0], identity(sent[-1])[0])
-                    self.assertIn(
-                        "[request context: personality recall", json.dumps(sent[-1])
-                    )
-                    summary = read(app, f"/sessions/{session}/context?view=summary")
-                    recalled = summary["request_context"][0]
-                    self.assertIn(receipt["records"][0]["id"], recalled["selected_ids"])
-                    self.assertLessEqual(recalled["candidate_count"], 256)
-                    self.assertLessEqual(recalled["selected_count"], 16)
-                    durable = read(app, f"/sessions/{session}?tail=100")["history"]
-                    self.assertNotIn("[request context:", json.dumps(durable))
 
     def test_gateway_retry_reuses_snapshot_then_next_preparation_refreshes(self):
         for protocol in ("responses", "chat_completions"):
@@ -219,9 +146,7 @@ class PersonalityContextTest(unittest.TestCase):
                     app.prompt(session, "next preparation").close()
                     app.idle(session)
                     _, latest = identity(provider.requests[-1]["request"])
-                    self.assertEqual(
-                        latest["identity"]["values"], "changed during retry"
-                    )
+                    self.assertEqual(latest["document"], "changed during retry")
                     app.restart()
                     app.prompt(session, "after restart").close()
                     app.idle(session)
@@ -257,7 +182,7 @@ class PersonalityContextTest(unittest.TestCase):
                     self.assertGreaterEqual(len(provider.requests), 2)
                     _, next_identity = identity(provider.requests[1]["request"])
                     self.assertEqual(
-                        next_identity["identity"]["values"], "changed before steering"
+                        next_identity["document"], "changed before steering"
                     )
                     self.assertIn(
                         "steering excerpt", json.dumps(provider.requests[-1]["request"])

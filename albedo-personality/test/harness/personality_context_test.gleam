@@ -4,23 +4,14 @@
 //// failures, tiny windows and conflicting policies are not HTTP-installable.
 //// The unused kernel handle is never accessed by the no-kernel strategies.
 
-import albedo/daemon/context_snapshot
 import albedo/daemon/conversation
-import albedo/daemon/http_wire
 import albedo/daemon/requests
-import albedo/daemon/session_requirements
-import albedo/daemon/store
 import albedo/harness/compaction
 import albedo/harness/extension
 import albedo/harness/extension/composition
 import albedo/harness/extensions
 import albedo/harness/extensions/lcm/extension as lcm
 import albedo/harness/extensions/lcm/memory
-import albedo/harness/extensions/personality/domain
-import albedo/harness/extensions/personality/extension as personality
-import albedo/harness/extensions/personality/ledger
-import albedo/harness/extensions/personality/tools
-import albedo/harness/extensions/personality/types as p
 import albedo/harness/extensions/python/kernel
 import albedo/harness/extensions/rolling/extension as rolling
 import albedo/harness/extensions/snapcompact/extension as snapcompact
@@ -29,10 +20,8 @@ import albedo/harness/request_context
 import albedo/harness/runtime
 import albedo/harness/runtime/state
 import albedo/openai_api/types
-import gleam/dynamic/decode
 import gleam/erlang/process
 import gleam/int
-import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
@@ -46,7 +35,6 @@ fn start(extensions: List(extension.Extension)) -> runtime.Runtime {
   let assert Ok(host) =
     runtime.start_with_config(":memory:", extensions.Config(extensions, []))
   session_fixture.initialise(host)
-  session_requirements.initialise(runtime.ledger(host)) |> should.be_ok
   session_fixture.create(host, "owner", "/tmp")
   host
 }
@@ -94,10 +82,13 @@ pub fn preparation_passes_bounded_query_and_real_static_budget_once_test() -> Ni
       "",
       [],
       [
-        extension.RequestContextPlugin(fn(input) {
-          process.send(calls, input)
-          Ok(request_context.empty("one-capture"))
-        }),
+        extension.RequestContextPlugin(
+          fn(input) {
+            process.send(calls, input)
+            Ok(request_context.empty("one-capture"))
+          },
+          False,
+        ),
       ],
       extension.no_initialise,
     )
@@ -112,48 +103,6 @@ pub fn preparation_passes_bounded_query_and_real_static_budget_once_test() -> Ni
   input.query |> should.equal("recent user excerpt")
   should.be_true(input.budget.static_tokens > 0)
   process.receive(calls, 0) |> should.equal(Error(Nil))
-  composition.close(kernel.composition)
-  runtime.stop(host)
-}
-
-pub fn personality_callback_returns_one_current_identity_block_test() -> Nil {
-  let plugin = personality.extension()
-  let host = start([plugin])
-  let db = runtime.ledger(host)
-  ledger.initialise(db) |> should.be_ok
-  let assert Ok(persona) =
-    ledger.create(db, p.Creation("create", "identity", False, True, True))
-  ledger.bind(db, "owner", p.Bind("bind", persona.id, 0, 0)) |> should.be_ok
-  let assert Ok(snapshot) = ledger.capture(db, "owner", "")
-  domain.mutate(
-    db,
-    "owner",
-    p.User,
-    p.Mutation(
-      "edit",
-      snapshot.persona.revision,
-      snapshot.persona.identity_revision,
-      [#("values", "candid curiosity")],
-      "change",
-      None,
-      [],
-    ),
-  )
-  |> should.be_ok
-  let kernel = session(host, [plugin])
-  let assert [callback] = composition.request_context(kernel.composition)
-  let assert Ok(contribution) =
-    callback(request_context.Input(
-      db,
-      "owner",
-      ["personality"],
-      "",
-      request_context.Budget(None, None, 100, None),
-    ))
-  let assert [identity] = contribution.instructions
-  should.be_true(string.contains(identity.content, "candid curiosity"))
-  identity.mandatory |> should.be_true
-  contribution.data |> should.equal([])
   composition.close(kernel.composition)
   runtime.stop(host)
 }
@@ -178,19 +127,36 @@ pub fn rebuilt_final_request_keeps_static_pin_and_new_capture_separate_test() ->
       "",
       [],
       [
-        extension.RequestContextPlugin(fn(_) {
-          process.send(calls, Nil)
-          Ok(request_context.Contribution(
-            "revision-2",
-            [request_context.Block("identity", "current live values", True, 0)],
-            [request_context.Block("evidence", "inert recalled data", False, 0)],
-            None,
-            [],
-            ["record"],
-            1,
-            0,
-          ))
-        }),
+        extension.RequestContextPlugin(
+          fn(_) {
+            process.send(calls, Nil)
+            Ok(request_context.Contribution(
+              "revision-2",
+              [
+                request_context.Block(
+                  "identity",
+                  "current live values",
+                  True,
+                  0,
+                ),
+              ],
+              [
+                request_context.Block(
+                  "evidence",
+                  "inert recalled data",
+                  False,
+                  0,
+                ),
+              ],
+              None,
+              [],
+              ["record"],
+              1,
+              0,
+            ))
+          },
+          False,
+        ),
       ],
       extension.no_initialise,
     )
@@ -251,100 +217,6 @@ pub fn prepended_request_data_is_hashed_without_claiming_history_replacement_tes
   should.not_equal(first.projection_hash, second.projection_hash)
 }
 
-fn bind_persona(host: runtime.Runtime) -> p.Persona {
-  let db = runtime.ledger(host)
-  ledger.initialise(db) |> should.be_ok
-  let assert Ok(persona) =
-    ledger.create(db, p.Creation("create", "identity", False, True, True))
-  ledger.bind(db, "owner", p.Bind("bind", persona.id, 0, 0)) |> should.be_ok
-  let assert Ok(snapshot) = ledger.capture(db, "owner", "")
-  snapshot.persona
-}
-
-pub fn prepared_identity_is_immutable_after_edit_and_next_preparation_refreshes_test() -> Nil {
-  let plugin = personality.extension()
-  let host = start([plugin])
-  let persona = bind_persona(host)
-  let kernel = session(host, [plugin])
-  let history = [types.User("current user")]
-  let assert Ok(first) = prepare(host, kernel, history)
-  let base =
-    types.Request("unknown", Some("static"), history, [], None, types.defaults)
-  let original_request = request_context.assemble(base, first.request_context)
-  let assert Ok(tool) =
-    list.find(tools.tools(), fn(tool) { tool.definition.name == "persona_edit" })
-  let context =
-    extension.Context(
-      runtime.ledger(host),
-      "owner",
-      kernel.kernel,
-      "live-edit-call",
-      "/tmp",
-      types.any_images,
-    )
-  let body =
-    json.object([
-      #("operation_id", json.string("edit")),
-      #("expected_revision", json.int(persona.revision)),
-      #("expected_identity_revision", json.int(persona.identity_revision)),
-      #("reason", json.string("revise")),
-      #(
-        "changes",
-        json.object([#("values", json.string("new committed head"))]),
-      ),
-    ])
-    |> json.to_string
-  extension.invoke(tool, context, body) |> should.be_ok
-  request_context.assemble(base, first.request_context)
-  |> should.equal(original_request)
-  let assert Ok(next) = prepare(host, kernel, history)
-  should.not_equal(
-    first.request_context.contributions,
-    next.request_context.contributions,
-  )
-  let refreshed = request_context.assemble(base, next.request_context)
-  should.be_true(string.contains(
-    option.unwrap(refreshed.instructions, ""),
-    "new committed head",
-  ))
-  first.inputs |> should.equal(history)
-  next.inputs |> should.equal(history)
-  let assert Some(observation) = next.observation
-  should.be_true(
-    option.unwrap(observation.estimated_input_tokens, 0)
-    > compaction.estimate_inputs(history),
-  )
-  let assert [captured] = next.request_context.contributions
-  should.be_true(list.any(captured.diagnostics, string.contains(_, "unknown")))
-  let snapshot =
-    context_snapshot.from_prepared(
-      None,
-      "fixture",
-      "responses",
-      types.Responses,
-      refreshed,
-      next,
-    )
-  let public = http_wire.context(snapshot) |> json.to_string
-  should.be_true(string.contains(public, captured.snapshot_id))
-  should.be_true(string.contains(public, "personality identity"))
-  should.be_true(string.contains(public, "candidate_count"))
-  let assert context_snapshot.Ready(sections: sections, ..) = snapshot
-  let assert [static, dynamic, transcript] = sections
-  static.byte_count + dynamic.byte_count
-  |> should.equal(string.byte_size(option.unwrap(refreshed.instructions, "")))
-  static.content() |> should.equal("static")
-  should.be_true(string.contains(dynamic.content(), "new committed head"))
-  should.be_false(string.contains(transcript.content(), "new committed head"))
-  // Repeated page/metadata inspection does not advance any captured ledger head.
-  context_snapshot.page(snapshot, dynamic.id, 0) |> should.be_ok
-  context_snapshot.summary(snapshot) |> json.to_string |> should.not_equal("")
-  let assert Ok(current) = ledger.capture(runtime.ledger(host), "owner", "")
-  current.persona.revision |> should.equal(persona.revision + 1)
-  composition.close(kernel.composition)
-  runtime.stop(host)
-}
-
 fn live_plugin(
   callback: fn(request_context.Input) ->
     Result(request_context.Contribution, String),
@@ -353,7 +225,7 @@ fn live_plugin(
     "live",
     "",
     [],
-    [extension.RequestContextPlugin(callback)],
+    [extension.RequestContextPlugin(callback, False)],
     extension.no_initialise,
   )
 }
@@ -458,68 +330,6 @@ pub fn callback_errors_crashes_and_conflicting_summary_policies_stop_preparation
   list.each([kernel, crashing, conflicting, single], fn(kernel) {
     composition.close(kernel.composition)
   })
-  runtime.stop(host)
-}
-
-pub fn loaded_active_selection_and_core_guard_remain_independent_test() -> Nil {
-  let calls = process.new_subject()
-  let live =
-    live_plugin(fn(input) {
-      process.send(calls, input.loaded)
-      Ok(request_context.empty("loaded"))
-    })
-  let broken =
-    extension.Extension(
-      ..live,
-      name: "broken",
-      plugins: list.append(live.plugins, [
-        extension.ManagedPlugin(fn(_, _, _) { Error("broken preparation") }),
-      ]),
-    )
-  let host = start([live, broken])
-  let kernel = session(host, [live, broken])
-  store.query(runtime.ledger(host), fn(db) {
-    store.exec(
-      db,
-      "INSERT INTO session_extensions(session,name,enabled) VALUES('owner','live',0)",
-    )
-  })
-  |> should.be_ok
-  prepare(host, kernel, []) |> should.be_ok
-  process.receive(calls, 100) |> should.equal(Ok(["live"]))
-  process.receive(calls, 0) |> should.equal(Error(Nil))
-  store.query(runtime.ledger(host), fn(db) {
-    store.exec(
-      db,
-      "INSERT INTO session_requirements(session,capability) VALUES('owner','personality')",
-    )
-  })
-  |> should.be_ok
-  prepare(host, kernel, []) |> should.be_error
-  process.receive(calls, 0) |> should.equal(Error(Nil))
-  composition.close(kernel.composition)
-  runtime.stop(host)
-}
-
-pub fn managed_background_replay_guard_revalidates_binding_storage_test() -> Nil {
-  let plugin = personality.extension()
-  let host = start([plugin])
-  let _ = bind_persona(host)
-  let kernel = session(host, [plugin])
-  runtime.admit(host, kernel) |> should.be_ok
-  store.query(runtime.ledger(host), fn(db) {
-    store.exec(
-      db,
-      "ALTER TABLE personality_revision RENAME TO unavailable_identity",
-    )
-  })
-  |> should.be_ok
-  runtime.admit(host, kernel) |> should.be_error
-  prepare(host, kernel, []) |> should.be_error
-  let empty = session(host, [])
-  runtime.admit(host, empty) |> should.be_error
-  composition.close(kernel.composition)
-  composition.close(empty.composition)
   runtime.stop(host)
 }
 
@@ -957,120 +767,6 @@ pub fn snapcompact_text_fallback_keeps_resolved_catalog_budget_test() -> Nil {
     Some(1000),
     Some(1000),
   )
-}
-
-pub fn dynamic_identity_inspector_pages_are_utf8_byte_bounded_and_reconstruct_labels_test() -> Nil {
-  list.each(
-    [string.repeat("é", 2000), string.repeat("🧭", 1000)],
-    inspect_multibyte_identity_pages,
-  )
-}
-
-fn inspect_multibyte_identity_pages(field: String) -> Nil {
-  let plugin = personality.extension()
-  let host = start([plugin])
-  let persona = bind_persona(host)
-  string.byte_size(field) |> should.equal(4000)
-  domain.mutate(
-    runtime.ledger(host),
-    "owner",
-    p.User,
-    p.Mutation(
-      "large-identity",
-      persona.revision,
-      persona.identity_revision,
-      [
-        #("self_description", field),
-        #("values", field),
-        #("communication", field),
-      ],
-      "valid multibyte identity",
-      None,
-      [],
-    ),
-  )
-  |> should.be_ok
-  let kernel = session(host, [plugin])
-  let history = [types.User("current turn")]
-  let assert Ok(prepared) = prepare(host, kernel, history)
-  let request =
-    request_context.assemble(
-      types.Request(
-        "unknown",
-        Some("static"),
-        history,
-        [],
-        None,
-        types.defaults,
-      ),
-      prepared.request_context,
-    )
-  let snapshot =
-    context_snapshot.from_prepared(
-      None,
-      "fixture",
-      "responses",
-      types.Responses,
-      request,
-      prepared,
-    )
-  let assert context_snapshot.Ready(id: id, sections: [_, dynamic, ..], ..) =
-    snapshot
-  let assert Ok(first) = context_snapshot.page(snapshot, dynamic.id, 0)
-  should.be_true(string.byte_size(first.text) <= 8192)
-  should.be_true(first.page_count > 1)
-  let pages =
-    list.repeat(Nil, first.page_count)
-    |> list.index_map(fn(_, index) {
-      let assert Ok(page) = context_snapshot.page(snapshot, dynamic.id, index)
-      page.snapshot_id |> should.equal(id)
-      page.section_id |> should.equal(dynamic.id)
-      page.page_count |> should.equal(first.page_count)
-      should.be_true(string.byte_size(page.text) <= 8192)
-      // The actual public encoder preserves each bounded UTF-8 body and its
-      // snapshot/section/page labels; reconstruct the encoded text field.
-      let encoded = http_wire.context_page(page) |> json.to_string
-      let assert Ok(text) =
-        json.parse(encoded, decode.field("text", decode.string, decode.success))
-      text |> should.equal(page.text)
-      text
-    })
-  let rebuilt = string.concat(pages)
-  rebuilt |> should.equal(dynamic.content())
-  list.each(
-    [
-      "snapshot_id",
-      "persona_id",
-      "identity_revision",
-      "aggregate_revision",
-      "binding_revision",
-    ],
-    fn(label) {
-      should.be_true(string.contains(first.text, label))
-      should.be_true(string.contains(rebuilt, label))
-    },
-  )
-  let summary = http_wire.context(snapshot) |> json.to_string
-  let assert Ok(summaries) =
-    json.parse(
-      summary,
-      decode.field(
-        "sections",
-        decode.list({
-          use section_id <- decode.field("id", decode.string)
-          use count <- decode.field("page_count", decode.int)
-          decode.success(#(section_id, count))
-        }),
-        decode.success,
-      ),
-    )
-  let assert Ok(#(_, count)) =
-    list.find(summaries, fn(section) { section.0 == dynamic.id })
-  count |> should.equal(first.page_count)
-  context_snapshot.page(snapshot, dynamic.id, first.page_count)
-  |> should.be_error
-  composition.close(kernel.composition)
-  runtime.stop(host)
 }
 
 pub fn forced_unknown_window_stays_distinct_from_synthetic_strategy_estimate_test() -> Nil {

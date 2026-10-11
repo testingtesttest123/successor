@@ -6,6 +6,7 @@ import albedo/harness/command
 import albedo/harness/extension
 import albedo/harness/extension/composition
 import albedo/harness/extension/selection
+import albedo/harness/extensions/personality/ledger as personality
 import albedo/harness/extensions/python/kernel as python
 import albedo/harness/instruction_files
 import albedo/harness/project_files
@@ -41,7 +42,6 @@ pub fn build_cached(
   // Actual preparation refreshes the remote mirror before capturing its basis.
   // Observation paths only read an existing mirror and never contact a host.
   let _ = project_files.readable(cwd)
-  use basis <- result.try(observation.composition_basis(inventory, id, retained))
   use selected <- result.try(case selected {
     Some(value) -> Ok(value)
     None ->
@@ -52,7 +52,33 @@ pub fn build_cached(
         id,
       )
   })
+  // Fresh identity resolution precedes both native selection snapshot and first
+  // transcript admission. It is idempotent; request projection never binds.
+  use _ <- result.try(
+    case list.any(selected, fn(item) { item.name == "personality" }) {
+      True ->
+        personality.resolve_fresh_binding(inventory.ledger, id)
+        |> result.replace(Nil)
+        |> result.map_error(personality.message)
+      False -> Ok(Nil)
+    },
+  )
+  use basis <- result.try(observation.composition_basis(inventory, id, retained))
   let composed = composition.compose(selected, inventory.ledger, id, cwd)
+  use _ <- result.try(
+    selection.check_required(
+      inventory.ledger,
+      inventory.installed,
+      inventory.quarantined,
+      inventory.defaults,
+      id,
+      composed,
+    )
+    |> result.map_error(fn(error) {
+      composition.close(composed)
+      error
+    }),
+  )
   // A session opening on its own composes around whatever is broken, but an
   // extension the caller just asked for, and one a change must not break,
   // fail here instead of going quiet.

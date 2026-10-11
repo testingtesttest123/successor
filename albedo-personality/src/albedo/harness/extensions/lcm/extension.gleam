@@ -58,16 +58,7 @@ fn bundle(
     "Source-backed hierarchical summaries with bounded history retrieval",
     ["lcm-memory"],
     [
-      harness_extension.CompactionPlugin(
-        compaction.Strategy("lcm", fn(catalog, _) {
-          use config <- result.map(resolve())
-          compaction.Resolved(
-            rolling.configured_capacity(config.context_window_tokens, catalog),
-            fn(context, history) { project(config, context, history) },
-            fn(context, history) { compact(config, context, history) },
-          )
-        }),
-      ),
+      harness_extension.CompactionPlugin(strategy_with("lcm", resolve)),
       harness_extension.CleanPlugin(graph.forget_session),
     ],
     graph.initialise,
@@ -657,4 +648,27 @@ fn condensation_group(
       }
     _ -> list.take(candidates, 2)
   }
+}
+
+/// Native reusable resolver. Another bundle retains the same LCM settings,
+/// graph, projection and compaction without installing a second strategy.
+pub fn strategy(name: String) -> compaction.Strategy {
+  strategy_with(name, fn() {
+    use config <- result.try(settings.load("lcm", decoder(), default_config()))
+    validate(config)
+  })
+}
+
+fn strategy_with(
+  name: String,
+  resolve: fn() -> Result(Config, String),
+) -> compaction.Strategy {
+  compaction.Strategy(name, fn(catalog, _) {
+    use config <- result.map(resolve())
+    compaction.Resolved(
+      rolling.configured_capacity(config.context_window_tokens, catalog),
+      fn(context, history) { project(config, context, history) },
+      fn(context, history) { compact(config, context, history) },
+    )
+  })
 }

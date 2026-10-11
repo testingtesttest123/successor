@@ -42,8 +42,8 @@ inspector never invokes request-context callbacks or queries the personality
 ledger. `request_context` lists the exact contribution snapshot IDs, instruction
 and data names, mandatory classification, rendered-size estimates, diagnostics,
 and candidate/selected/excluded counts. Personality snapshot IDs explicitly
-include persona ID, identity revision, aggregate revision and binding revision;
-the rendered identity section includes those same named JSON fields. A later
+include persona ID, document revision and binding generation;
+the rendered identity section carries those facts beside the free-form document. A later
 edit cannot change an earlier inspector snapshot. It reaches the next ordinary,
 steering, tool-continuation or restart preparation without reloading Python.
 

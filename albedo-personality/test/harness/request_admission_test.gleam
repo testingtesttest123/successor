@@ -11,9 +11,10 @@ import gleeunit/should
 pub fn callbacks_are_scoped_to_whole_loaded_active_bundles_test() -> Nil {
   let assert Ok(ledger) = store.start(":memory:", "")
   let read =
-    extension.RequestContextPlugin(fn(_) {
-      Ok(request_context.empty("readable"))
-    })
+    extension.RequestContextPlugin(
+      fn(_) { Ok(request_context.empty("readable")) },
+      False,
+    )
   let active =
     extension.Extension("active", "", [], [read], extension.no_initialise)
   let broken =

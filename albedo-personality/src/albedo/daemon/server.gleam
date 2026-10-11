@@ -502,6 +502,7 @@ fn daemon(
     },
     fn(provider, endpoint) { runtime.model_names(host, provider, endpoint) },
     fn() { actor.call(registry, 5000, List) },
+    fn() { runtime.declarations(host) },
     fn(id, op) {
       use worker <- result.try(actor.call(registry, 5000, Lookup(id, _)))
       session.state_operation(worker, op)

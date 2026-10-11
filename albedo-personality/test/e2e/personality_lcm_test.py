@@ -10,7 +10,7 @@ import threading
 import unittest
 
 from harness import Albedo, Provider, error, exclusive, text
-from personality_context_test import edit, instructions, read
+from personality_context_test import edit, read
 from personality_support import bind, create, inspect
 
 
@@ -56,7 +56,6 @@ class PersonalityLcmTests(unittest.TestCase):
                         {
                             "enabled": {
                                 "personality": True,
-                                "lcm": True,
                                 "rolling": False,
                             },
                             "lcm": {
@@ -82,7 +81,8 @@ class PersonalityLcmTests(unittest.TestCase):
                         def compact_post():
                             try:
                                 with app.api(
-                                    f"/sessions/{owner}/compaction", {"strategy": "lcm"}
+                                    f"/sessions/{owner}/compaction",
+                                    {"strategy": "personality"},
                                 ) as response:
                                     result.append(json.load(response))
                             except Exception as exc:
@@ -113,7 +113,6 @@ class PersonalityLcmTests(unittest.TestCase):
                         first["identity_revision"], before["identity_revision"]
                     )
                     self.assertEqual(first["session"], owner)
-                    self.assertIn("persona", instructions(summaries[0]))
                     self.assertEqual(summaries[0].get("tools", []), [])
                     edit(app, editor, "Concurrent edit while summarizer is active")
                     edited = inspect(app, editor)["persona"]
@@ -232,7 +231,7 @@ class PersonalityLcmTests(unittest.TestCase):
             protocol="responses",
             prepare=lambda app: app.write_extensions(
                 {
-                    "enabled": {"personality": True, "lcm": True, "rolling": False},
+                    "enabled": {"personality": True, "rolling": False},
                     "lcm": {
                         "contextWindowTokens": 200000,
                         "triggerPercent": 80,
@@ -249,7 +248,7 @@ class PersonalityLcmTests(unittest.TestCase):
                 app.idle(owner)
             before = inspect(app, owner)["persona"]
             with app.api(
-                f"/sessions/{owner}/compaction", {"strategy": "lcm"}
+                f"/sessions/{owner}/compaction", {"strategy": "personality"}
             ) as response:
                 report = json.load(response)
             self.assertEqual(report["state"], "failed")

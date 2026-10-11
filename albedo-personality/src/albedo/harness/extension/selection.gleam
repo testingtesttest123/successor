@@ -528,7 +528,7 @@ pub fn summaries(
         ext.requires,
         list.map(ext.plugins, fn(plugin) {
           case plugin {
-            extension.RequestContextPlugin(_) -> "request_context"
+            extension.RequestContextPlugin(_, _) -> "request_context"
             extension.ContextPlugin(_) -> "context"
             extension.ToolPlugin(_, _, _, _) -> "tool"
             extension.ManagedPlugin(_) -> "managed"
@@ -619,4 +619,62 @@ pub fn select(
     list.key_find(overrides, ext.name) == Ok(True)
   }
   exclusive(selected, is_compaction, chosen)
+}
+
+/// Resolve saved choices before installation filtering. Quarantine retains the
+/// original declaration, including mandatory context and strategy exclusivity.
+/// No extension-owned data is queried here.
+pub fn required_selected(
+  ledger: store.Store,
+  installed: List(extension.Extension),
+  quarantined: List(extension.Quarantined),
+  defaults: List(String),
+  session: String,
+) -> Result(List(String), String) {
+  let declared =
+    list.append(installed, list.map(quarantined, fn(item) { item.declaration }))
+  use choices <- result.map(overrides(ledger, session))
+  select(declared, resolved_defaults(declared, defaults), choices)
+  |> list.filter(extension.required_when_selected)
+  |> list.map(fn(item) { item.name })
+}
+
+pub fn check_required(
+  ledger: store.Store,
+  installed: List(extension.Extension),
+  quarantined: List(extension.Quarantined),
+  defaults: List(String),
+  session: String,
+  composed: composition.Composition,
+) -> Result(Nil, String) {
+  use selected <- result.try(required_selected(
+    ledger,
+    installed,
+    quarantined,
+    defaults,
+    session,
+  ))
+  let requested =
+    composition.requested(composed)
+    |> list.filter(extension.required_when_selected)
+    |> list.map(fn(item) { item.name })
+  let loaded =
+    composition.extensions(composed) |> list.map(fn(item) { item.name })
+  list.try_each(list.unique(list.append(selected, requested)), fn(name) {
+    case list.contains(loaded, name) {
+      True -> Ok(Nil)
+      False -> {
+        let detail =
+          list.key_find(composition.inactive(composed), name)
+          |> result.lazy_or(fn() {
+            list.find(quarantined, fn(item) { item.name == name })
+            |> result.map(fn(item) { item.reason })
+          })
+          |> result.unwrap("selected extension not loaded")
+        Error(
+          "required selected extension " <> name <> " unavailable: " <> detail,
+        )
+      }
+    }
+  })
 }
