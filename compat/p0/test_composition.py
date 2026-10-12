@@ -143,6 +143,12 @@ class App:
 atexit.register(lambda: [app.stop() for app in reversed(APPS)])
 
 
+def stop_parent(parent):
+    if parent.poll() is None:
+        parent.kill()
+    parent.wait(timeout=5)
+
+
 class Composition(unittest.TestCase):
     def app(self, mode, **options):
         app = App(mode, **options)
@@ -267,7 +273,7 @@ class Composition(unittest.TestCase):
 
     def test_parent_death_stops_the_actual_fixture_entrypoint(self):
         parent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(40)"])
-        self.addCleanup(lambda: parent.kill() if parent.poll() is None else None)
+        self.addCleanup(stop_parent, parent)
         app = self.app("enabled", parent=parent.pid)
         parent.terminate(); parent.wait(timeout=5)
         app.process.wait(timeout=15)

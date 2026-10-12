@@ -557,6 +557,31 @@ pub fn canonical_healthy_owner_is_not_quarantined_by_duplicate_test() -> Nil {
   runtime.stop(host)
 }
 
+pub fn failed_canonical_owner_reports_its_initialiser_failure_test() -> Nil {
+  let failed =
+    extension.Extension(..declaration(), initialise: fn(_) {
+      Error("fixture unavailable")
+    })
+  let assert Ok(host) =
+    runtime.start_with_config(
+      ":memory:",
+      extensions.Config([failed, failed], []),
+    )
+  let assert [owner] = runtime.lifecycle_owners(host)
+  owner.availability
+  |> should.equal(lifecycle.Quarantined(
+    "it did not install: fixture unavailable",
+  ))
+  let ledger = runtime.ledger(host)
+  let assert Ok(_) = conversation.initialise(ledger)
+  conversation.create(ledger, info("fresh"), runtime.lifecycle_owners(host))
+  |> should.equal(Error(
+    "fixture-lineage: required lifecycle owner is quarantined: it did not install: fixture unavailable",
+  ))
+  count(ledger, "sessions") |> should.equal(0)
+  runtime.stop(host)
+}
+
 pub fn failed_initialiser_retains_guard_but_never_applies_test() -> Nil {
   let failed =
     extension.Extension(..declaration(), initialise: fn(_) {

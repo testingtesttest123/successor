@@ -45,6 +45,14 @@
         "test/harness/tool_error_test.gleam"
       ],
       "scope": "P3a lifecycle only; direct stock LCM call and modules retained"
+    },
+    {
+      "path": "0003-canonical-lifecycle-diagnostic.patch",
+      "sha256": "0f2ad2b02ce19f1c4d90248f7cf60735b2c9e6d8b77db85fd9cbfe9d43b31dec",
+      "production_paths": [
+        "src/albedo/harness/extension.gleam"
+      ],
+      "scope": "canonical failed lifecycle owner reports its own installation failure; quarantine behavior unchanged"
     }
   ],
   "scope": "P0 and narrowed P3a only; historical qualification FAILED/OPEN"
