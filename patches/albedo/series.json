@@ -53,6 +53,19 @@
         "src/albedo/harness/extension.gleam"
       ],
       "scope": "canonical failed lifecycle owner reports its own installation failure; quarantine behavior unchanged"
+    },
+    {
+      "path": "0004-test-process-ownership.patch",
+      "sha256": "c092c7e4a62c0d96f37a1d3e29df56fd84880f9917b20f905a216b918594d2a4",
+      "production_paths": [],
+      "test_paths": [
+        "test.sh",
+        "test/python_test_runner.py",
+        "test/process_owner.py",
+        "test/harness/process_owner_test.py",
+        "test/process-owner.md"
+      ],
+      "scope": "test-only Linux orphan ownership; no production supervision, physical-absence assertion or test timeout changes"
     }
   ],
   "scope": "P0 and narrowed P3a only; historical qualification FAILED/OPEN"
