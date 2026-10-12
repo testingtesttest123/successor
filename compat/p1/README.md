@@ -1,0 +1,46 @@
+# P1: captured request context
+
+Acceptance basis: approved S1 design and Task 4, independently reconciled with
+stock Albedo `e9df547` and frozen Successor oracle `fb1f4dc`. This follows the
+verified cumulative Successor checkpoint `3a9ace14`. Connectome comparisons use
+context-manager `537d921d` (`src/types/strategy.ts` inspection and actual rendered
+size contracts) and connectome-host `c1203a5` (`src/framework-strategy.ts` policy
+composition). This slice does not claim full Connectome parity.
+
+The host owns preparation, actual request accounting and saved inspection. An
+external compiled extension owns its read-only context callback and opaque
+source revision. Identity, lineage, lessons, memory policy, selection/controller
+logic and native summary policy are outside this slice. No deployed-data
+migration machinery is needed. Historical copied-tree OAuth qualification is
+outside the owner's current scope.
+
+Acceptance checks:
+
+1. Resolve stock strategy settings once before capture; preserve rolling/LCM
+   configured-first capacity and snapcompact catalog-first visual capacity and
+   rolling text fallback. Synthetic forced capacity remains unknown to callbacks
+   and inspection. Host code must not dispatch on strategy names or provenance.
+2. Capture active complete bundles once per preparation after static instructions
+   and tools. Required unavailable contributors refuse preparation. Callbacks
+   receive only a recent user/steering excerpt of at most 4096 UTF-8 bytes.
+3. Reserve rendered mandatory context separately from raw compaction history;
+   admit optional context against the final projected history so it cannot force
+   avoidable eviction or an indivisible-tail refusal.
+   Mandatory overflow refuses provider entry; optional blocks are omitted whole
+   in deterministic reverse contribution order. Price the final assembled request
+   once, including actual instructions after pin settlement, tools and history.
+4. Actual-loop tests with scripted local providers cover both protocols, retry,
+   steering/next-request revisions, pin retention/release, provider refusal and
+   saved inspector pages without recapture, including failed captures and
+   refusals before any saved pin update. Inspect capacity, included/omitted
+   blocks, diagnostics and estimate from captured values.
+5. Dynamic restart restoration without a saved capture is skipped; static-only
+   restoration and existing lifecycle/compaction/kernel behavior remain intact.
+
+`fixture_app` is a separate external consumer because stock HTTP configuration
+cannot install a native callback. It uses the real runtime, SQLite, loop and
+inspector, with scripted providers and data only. Freeze the complete Successor
+tree and patched pinned host before every acceptance build: the native daemon
+snapshot links its `priv` directory back to that source. Preserve exact command
+logs and source hashes outside this repository. The denied Chromium sandbox is
+not retried; focused and native suites do not constitute a full `./test.sh` gate.

@@ -77,7 +77,33 @@
         "test/process-owner.md"
       ],
       "scope": "test-only cancellation deadline retention and procfs process-disappearance races; existing assertions and timeouts unchanged"
+    },
+    {
+      "path": "0006-captured-request-context.patch",
+      "sha256": "066e709b8eebd5c031cf472f6826491dca272614da8f560ce224eb67fe204f7a",
+      "production_paths": [
+        "src/albedo/daemon/context_snapshot.gleam",
+        "src/albedo/daemon/http_wire.gleam",
+        "src/albedo/daemon/session_run.gleam",
+        "src/albedo/harness/compaction.gleam",
+        "src/albedo/harness/extension.gleam",
+        "src/albedo/harness/extension/composition.gleam",
+        "src/albedo/harness/extension/selection.gleam",
+        "src/albedo/harness/extensions/lcm/extension.gleam",
+        "src/albedo/harness/extensions/rolling/extension.gleam",
+        "src/albedo/harness/extensions/snapcompact/extension.gleam",
+        "src/albedo/harness/loop.gleam",
+        "src/albedo/harness/request_context.gleam",
+        "src/albedo/harness/runtime.gleam"
+      ],
+      "documentation_paths": [
+        "robot-docs/cache-warming.md",
+        "robot-docs/compaction.md",
+        "robot-docs/context.md",
+        "robot-docs/extensions.md"
+      ],
+      "scope": "P1/S1 generic captured request context, resolved strategy settings, actual final accounting and saved inspection; external policy remains external"
     }
   ],
-  "scope": "P0 and narrowed P3a only; historical qualification FAILED/OPEN"
+  "scope": "P0, P3a lifecycle and P1/S1 request context; bounded evidence is not a full aggregate gate"
 }
