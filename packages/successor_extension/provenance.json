@@ -1,0 +1,38 @@
+{
+  "reference_commit": "fb1f4dc4099d915ee926139fc49a5c55bb63eac4",
+  "reference_sources": {
+    "types.gleam": {
+      "path": "albedo-personality/src/albedo/harness/extensions/personality/types.gleam",
+      "sha256": "114fd3bd75bebe0a55939c326a990dd24e04453c89986d578b2aa53aeb880c7a",
+      "extraction": "full source unchanged"
+    },
+    "domain.gleam": {
+      "path": "albedo-personality/src/albedo/harness/extensions/personality/domain.gleam",
+      "sha256": "56e181930e507e7932d336666198df38831ac493955d6e431d52e343c596e9e6",
+      "extraction": "full source; import namespace and formatter ordering changed"
+    },
+    "migrations/schema.gleam": {
+      "path": "albedo-personality/src/albedo/harness/extensions/personality/migrations/schema.gleam",
+      "sha256": "04cd532faf2ff1a655a3f2873609cea9b441dbde533af63c1a8e80ef6f62f2c6",
+      "extraction": "constants and validate only; excludes apply"
+    }
+  },
+  "upstream": {
+    "repo": "https://tangled.org/okami.mom/albedo",
+    "commit": "e9df547f67f6819ebcd217649be326e53111027c",
+    "tree": "542057beeeb5eb67edbc3dca260060c12c493679",
+    "archive_sha256": "131e95379caf8501ff8c0e04f42ddb7837d4df5d5f83faa830b3a0c49e61c69b",
+    "source_entries": 1013,
+    "compatibility_patches": [],
+    "qualification": "source pin only; FAILED/OPEN"
+  },
+  "upstream_copyright": "Copyright (C) 2026 albedo contributors (okami.mom & ptr.pet)",
+  "upstream_license": "WTFPL version 2; UPSTREAM-LICENSE.txt",
+  "license_scope": "preserves upstream attribution; no new repository-wide license grant",
+  "historical_qualification": "FAILED/OPEN",
+  "test_support_source": {
+    "path": "albedo-personality/test/harness/albedo_personality_edit_test_support.erl",
+    "sha256": "8af12bb799f848ce3c58e5270fcedbce93eb9800e6db2bba736d0820c35b0ef9",
+    "extraction": "test-only count_replacements helper; module name and explanatory comment changed"
+  }
+}
