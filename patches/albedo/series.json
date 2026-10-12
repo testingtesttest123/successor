@@ -16,7 +16,36 @@
         "added": 25,
         "removed": 2
       }
+    },
+    {
+      "path": "0002-session-lifecycle.patch",
+      "sha256": "c554abf4cbd1d0ee6a809c04352de8cca575bff42af414bff010d00752485036",
+      "production_paths": [
+        "src/albedo/daemon/conversation.gleam",
+        "src/albedo/daemon/history.gleam",
+        "src/albedo/daemon/mail.gleam",
+        "src/albedo/daemon/registry.gleam",
+        "src/albedo/harness/extension.gleam",
+        "src/albedo/harness/extension/selection.gleam",
+        "src/albedo/harness/runtime.gleam",
+        "src/albedo/harness/runtime/state.gleam",
+        "src/albedo/harness/session_lifecycle.gleam"
+      ],
+      "test_paths": [
+        "test/daemon/conversation_test.gleam",
+        "test/daemon/image_store_test.gleam",
+        "test/daemon/mail_commit_test.gleam",
+        "test/daemon/transcript_sources_test.gleam",
+        "test/harness/cache_fade_test.gleam",
+        "test/harness/extension_failure_test.gleam",
+        "test/harness/lcm_preparation_test.gleam",
+        "test/harness/lcm_test.gleam",
+        "test/harness/retrieval_performance_test.gleam",
+        "test/harness/session_fixture.gleam",
+        "test/harness/tool_error_test.gleam"
+      ],
+      "scope": "P3a lifecycle only; direct stock LCM call and modules retained"
     }
   ],
-  "scope": "P0 only; historical qualification FAILED/OPEN"
+  "scope": "P0 and narrowed P3a only; historical qualification FAILED/OPEN"
 }
