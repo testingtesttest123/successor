@@ -1,0 +1,191 @@
+diff --git a/test/process_owner.py b/test/process_owner.py
+--- a/test/process_owner.py
++++ b/test/process_owner.py
+@@ -29,7 +29,7 @@
+             continue
+         try:
+             fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+-        except FileNotFoundError:
++        except (FileNotFoundError, ProcessLookupError):
+             continue
+         if int(fields[1]) == os.getpid():
+             owned.append(int(entry.name))
+@@ -95,14 +95,16 @@
+                 return (status if status >= 0 else 128 - status) or int(cleanup_failed)
+             now = time.monotonic()
+             if pending:
+-                cancellation = True
++                if not cancellation:
++                    cancellation = True
++                    if stage == 0:
++                        deadline = now + TERM
+                 if status is None:
+                     try:
+                         os.killpg(process.pid, pending)
+                     except ProcessLookupError:
+                         pass
+                 pending = 0
+-                deadline = now + TERM
+             if status is not None and deadline is None:
+                 deadline = now + DRAIN
+             if deadline is not None and now >= deadline:
+diff --git a/test/harness/process_owner_test.py b/test/harness/process_owner_test.py
+--- a/test/harness/process_owner_test.py
++++ b/test/harness/process_owner_test.py
+@@ -1,6 +1,8 @@
+ """The test launch owns orphan reaping; assertions still require actual absence."""
+
+ import ctypes
++import errno
++import importlib.util
+ import os
+ from pathlib import Path
+ import subprocess
+@@ -10,6 +12,7 @@
+ import textwrap
+ import time
+ import unittest
++from unittest import mock
+
+ TEST = Path(__file__).resolve().parents[1]
+ OWNER = [sys.executable, str(TEST / "process_owner.py")]
+@@ -156,6 +159,124 @@
+                     process.terminate()
+                     process.wait(timeout=6)
+                 self.reap_fixture(report)
++
++    def test_repeated_cancellation_cannot_extend_cleanup(self):
++        with tempfile.TemporaryDirectory() as folder:
++            report = Path(folder) / "pid"
++            code = (
++                "import os,signal,time; from pathlib import Path; "
++                "signal.signal(signal.SIGTERM,signal.SIG_IGN); "
++                "signal.signal(signal.SIGINT,signal.SIG_IGN); "
++                f"Path({str(report)!r}).write_text(str(os.getpid())); time.sleep(30)"
++            )
++            process = subprocess.Popen([*OWNER, sys.executable, "-c", code])
++            try:
++                ready = time.monotonic() + 3
++                while not report.exists():
++                    self.assertLess(time.monotonic(), ready)
++                    time.sleep(0.01)
++                deadline = time.monotonic() + 3
++                signals = (signal.SIGTERM, signal.SIGINT)
++                sent = 0
++                while process.poll() is None and time.monotonic() < deadline:
++                    try:
++                        os.kill(process.pid, signals[sent % 2])
++                    except ProcessLookupError:
++                        break
++                    sent += 1
++                    time.sleep(0.1)
++                self.assertIsNotNone(
++                    process.poll(),
++                    "owner stayed alive beyond three seconds of repeated cancellation",
++                )
++                self.assertGreater(sent, 1)
++                self.assertEqual(process.wait(timeout=6), 137)
++                with self.assertRaises(ProcessLookupError):
++                    os.kill(int(report.read_text()), 0)
++                with self.assertRaises(ChildProcessError):
++                    os.waitpid(process.pid, os.WNOHANG)
++            finally:
++                if process.poll() is None:
++                    process.terminate()
++                    process.wait(timeout=6)
++                self.reap_fixture(report)
++
++    def test_procfs_esrch_race_still_cleans_owned_descendants(self):
++        with tempfile.TemporaryDirectory() as folder:
++            report = Path(folder) / "pid"
++            observed = Path(folder) / "errno"
++            command = (
++                "import subprocess; from pathlib import Path; "
++                "child=subprocess.Popen(['sleep','30'],start_new_session=True,"
++                "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
++                f"Path({str(report)!r}).write_text(str(child.pid))"
++            )
++            # Open a real procfs file, then reap that process before read().
++            # This yields kernel ESRCH, without substituting a fake exception.
++            shim = textwrap.dedent(f"""
++                import errno, runpy, subprocess, sys
++                from pathlib import Path
++                owner = runpy.run_path({str(TEST / "process_owner.py")!r})
++                victim = subprocess.Popen(['sleep', '30'])
++                victim_stat = Path(f'/proc/{{victim.pid}}/stat')
++                original_open = Path.open
++                class DisappearingStat:
++                    def __init__(self, stream):
++                        self.stream = stream
++                    def __enter__(self):
++                        return self
++                    def __exit__(self, *args):
++                        self.stream.close()
++                    def read(self, *args):
++                        try:
++                            return self.stream.read(*args)
++                        except OSError as error:
++                            Path({str(observed)!r}).write_text(str(error.errno))
++                            raise
++                def open_then_disappear(path, *args, **kwargs):
++                    stream = original_open(path, *args, **kwargs)
++                    if path == victim_stat:
++                        victim.kill()
++                        victim.wait()
++                        return DisappearingStat(stream)
++                    return stream
++                Path.open = open_then_disappear
++                try:
++                    raise SystemExit(owner['run']([sys.executable, '-c', {command!r}]))
++                finally:
++                    Path.open = original_open
++                    if victim.poll() is None:
++                        victim.kill()
++                        victim.wait()
++            """)
++            try:
++                result = subprocess.run(
++                    [sys.executable, "-c", shim],
++                    capture_output=True,
++                    text=True,
++                    timeout=10,
++                )
++                self.assertEqual(int(observed.read_text()), errno.ESRCH)
++                self.assertEqual(result.returncode, 1, result.stderr)
++                with self.assertRaises(ProcessLookupError, msg=result.stderr):
++                    os.kill(int(report.read_text()), 0)
++                self.assertNotIn("Traceback", result.stderr)
++                self.assertIn("live descendants after command exit", result.stderr)
++            finally:
++                self.reap_fixture(report)
++
++    def test_process_table_does_not_hide_unrelated_read_errors(self):
++        spec = importlib.util.spec_from_file_location(
++            "owner_under_test", TEST / "process_owner.py"
++        )
++        assert spec is not None and spec.loader is not None
++        owner = importlib.util.module_from_spec(spec)
++        spec.loader.exec_module(owner)
++        failure = OSError(errno.EIO, "synthetic unrelated read error")
++        with mock.patch.object(Path, "read_text", side_effect=failure):
++            with self.assertRaises(OSError) as raised:
++                owner.children()
++        self.assertIs(raised.exception, failure)
+
+     def test_stopped_child_is_not_mistaken_for_an_exited_child(self):
+         with tempfile.TemporaryDirectory() as folder:
+diff --git a/test/process-owner.md b/test/process-owner.md
+--- a/test/process-owner.md
++++ b/test/process-owner.md
+@@ -21,6 +21,11 @@
+ failed command remains failed. Interruption cleanup is also bounded. The caller
+ must wait for this owner, as the gate and Python runner do.
+
++The first cancellation starts the escalation deadline; repeated SIGINT/SIGTERM
++cannot extend it or an already-running cleanup stage. A procfs entry disappearing
++between open and read is ordinary process-table churn (ENOENT or ESRCH), while
++unrelated read errors remain fatal rather than being hidden.
++
+ Non-Linux platforms exec the command directly and retain their normal init
+ reaping. Linux subreaper setup failure is fatal; there is no fallback claiming
+ these physical-absence assertions passed. A denied operation is an error.
