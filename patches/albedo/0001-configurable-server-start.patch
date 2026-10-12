@@ -1,0 +1,77 @@
+--- a/src/albedo/daemon/server.gleam
++++ b/src/albedo/daemon/server.gleam
+@@ -15,6 +15,7 @@
+ import albedo/daemon/settings
+ import albedo/harness/credentials
+ import albedo/harness/extension
++import albedo/harness/extensions
+ import albedo/harness/runtime
+ import albedo/harness/usage_feed
+ import gleam/bit_array
+@@ -47,10 +48,20 @@
+ }
+ 
+ pub fn start(config: Config, port: Int) -> Result(Int, String) {
++  start_with_config(config, port, extensions.defaults())
++}
++
++/// Start with the caller's installed registry and default selection.
++/// This keeps the same caller ownership contract as start.
++pub fn start_with_config(
++  config: Config,
++  port: Int,
++  extension_config: extensions.Config,
++) -> Result(Int, String) {
+   // Storage is the one thing this daemon cannot run without, so the runtime
+   // that owns it stays linked to the daemon; everything above it is supervised.
+   use host <- result.try(
+-    runtime.start(config.home <> "/albedo.sqlite")
++    runtime.start_with_config(config.home <> "/albedo.sqlite", extension_config)
+     |> result.replace_error("could not start runtime"),
+   )
+   use _ <- result.try(registry.prepare_storage(config, host))
+@@ -590,6 +601,17 @@
+ }
+ 
+ pub fn main() -> Nil {
++  run_main(start)
++}
++
++/// Run the complete stock daemon startup with the caller's composition.
++pub fn main_with_config(extension_config: extensions.Config) -> Nil {
++  run_main(fn(config, port) {
++    start_with_config(config, port, extension_config)
++  })
++}
++
++fn run_main(start_server: fn(Config, Int) -> Result(Int, String)) -> Nil {
+   let assert Ok(#(home, token)) = defaults()
+   let config =
+     Config(
+@@ -608,7 +630,8 @@
+     Error(error) -> panic as error.message
+   }
+   // A fixed port gives services such as the proxy a stable base url.
+-  let assert Ok(port) = start(config, setting("ALBEDO_PORT", 0, 0, 65_535))
++  let assert Ok(port) =
++    start_server(config, setting("ALBEDO_PORT", 0, 0, 65_535))
+   // Before readiness, so a client that sees the daemon can already inspect it.
+   inspect(home)
+   let assert Ok(_) = ready(home, port, token)
+--- a/robot-docs/extensions.md
++++ b/robot-docs/extensions.md
+@@ -16,6 +16,14 @@
+ ## installed and enabled
+ 
+ `extensions.Config(installed, default_enabled)` separates installed extensions from their default selection. multiple compaction strategies may be installed, but at most one can be enabled for a session. built-in sessions start with `rolling`; custom hosts can omit compaction. `runtime.start_with_config(database, config)` uses this selection; `runtime.start_with_extensions(database, installed)` enables every supplied extension.
++
++`daemon/server.main_with_config(config)` runs the complete stock daemon startup
++with a supplied `extensions.Config`. Construct declarations only before calling
++it; installed initialisers run after the home lock is claimed. `main()` retains
++stock defaults. The lower-level `start_with_config(daemon_config, port, config)`
++has the same caller-owned home/authentication/process contract as `start`.
++Executable entrypoints dispatch `storage_cli.arguments()` before constructing a
++custom registry, so offline storage helpers retain their existing ownership.
+ 
+ ## boundaries to preserve
+ 

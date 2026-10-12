@@ -1,0 +1,22 @@
+{
+  "host_repo": "https://tangled.org/okami.mom/albedo",
+  "base_commit": "e9df547f67f6819ebcd217649be326e53111027c",
+  "base_tree": "542057beeeb5eb67edbc3dca260060c12c493679",
+  "patches": [
+    {
+      "path": "0001-configurable-server-start.patch",
+      "sha256": "533bf4684141c6a1e3457780b0150e22728b3d97878649da67fce71e9a18e6ed",
+      "production_paths": [
+        "src/albedo/daemon/server.gleam"
+      ],
+      "documentation_paths": [
+        "robot-docs/extensions.md"
+      ],
+      "production_diff": {
+        "added": 25,
+        "removed": 2
+      }
+    }
+  ],
+  "scope": "P0 only; historical qualification FAILED/OPEN"
+}
