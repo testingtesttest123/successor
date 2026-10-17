@@ -1,3 +1,227 @@
+diff --git a/cli/internal/daemon/protocol/api.gen.go b/cli/internal/daemon/protocol/api.gen.go
+index b5279ec8ea6904ce77af59e7e9bf85342c63afef..98b0eebd96be65b46a257b995e9d9f3cec09cb5f 100644
+--- a/cli/internal/daemon/protocol/api.gen.go
++++ b/cli/internal/daemon/protocol/api.gen.go
+@@ -490,16 +490,17 @@ type ContextSectionPage struct {
+ 
+ // ContextSummary defines model for ContextSummary.
+ type ContextSummary struct {
+-	CapturedAt          *Timestamp        `json:"captured_at" nullable:"true"`
+-	Compaction          ContextCompaction `json:"compaction"`
+-	ContextWindowTokens *Counter          `json:"context_window_tokens" nullable:"true"`
+-	Model               *ID               `json:"model" nullable:"true"`
+-	Protocol            *string           `json:"protocol" nullable:"true"`
+-	Provider            *ID               `json:"provider" nullable:"true"`
+-	Reason              *SafeReason       `json:"reason" nullable:"true"`
+-	Sections            []ContextSection  `json:"sections"`
+-	SnapshotID          *ID               `json:"snapshot_id" nullable:"true"`
+-	State               string            `json:"state"`
++	CapturedAt          *Timestamp                `json:"captured_at" nullable:"true"`
++	Compaction          ContextCompaction         `json:"compaction"`
++	ContextWindowTokens *Counter                  `json:"context_window_tokens" nullable:"true"`
++	Model               *ID                       `json:"model" nullable:"true"`
++	Protocol            *string                   `json:"protocol" nullable:"true"`
++	Provider            *ID                       `json:"provider" nullable:"true"`
++	Reason              *SafeReason               `json:"reason" nullable:"true"`
++	RequestContext      *RequestContextInspection `json:"request_context,omitempty" nullable:"true"`
++	Sections            []ContextSection          `json:"sections"`
++	SnapshotID          *ID                       `json:"snapshot_id" nullable:"true"`
++	State               string                    `json:"state"`
+ }
+ 
+ // ContextWindow defines model for ContextWindow.
+@@ -2004,6 +2005,35 @@ type ReplayBatch struct {
+ 	Generation Generation `json:"generation"`
+ }
+ 
++// RequestContextInspection defines model for RequestContextInspection.
++type RequestContextInspection struct {
++	CapacitySource *string `json:"capacity_source" nullable:"true"`
++	CapacityTokens *int64  `json:"capacity_tokens" nullable:"true"`
++	Captures       []struct {
++		Diagnostics []string `json:"diagnostics"`
++		Owner       string   `json:"owner"`
++		SnapshotID  string   `json:"snapshot_id"`
++	} `json:"captures"`
++	EstimatedTokens int64   `json:"estimated_tokens"`
++	Failure         *string `json:"failure" nullable:"true"`
++	Fits            bool    `json:"fits"`
++	Included        []struct {
++		Kind       string `json:"kind"`
++		Mandatory  bool   `json:"mandatory"`
++		Name       string `json:"name"`
++		Owner      string `json:"owner"`
++		SnapshotID string `json:"snapshot_id"`
++	} `json:"included"`
++	Omitted []struct {
++		Kind       string `json:"kind"`
++		Name       string `json:"name"`
++		Owner      string `json:"owner"`
++		Reason     string `json:"reason"`
++		SnapshotID string `json:"snapshot_id"`
++	} `json:"omitted"`
++	StaticTokens int64 `json:"static_tokens"`
++}
++
+ // RequestRecordPage defines model for RequestRecordPage.
+ type RequestRecordPage struct {
+ 	Items []ProviderRequestRecord `json:"items"`
+diff --git a/cli/test/e2e/contract_test.go b/cli/test/e2e/contract_test.go
+index adc8043c6209b15023adcb4931de0ac3f7bc717f..46a3360bc98cc6ca8fc88d7bd82fb69b05f4b513 100644
+--- a/cli/test/e2e/contract_test.go
++++ b/cli/test/e2e/contract_test.go
+@@ -319,3 +319,43 @@ func TestOpenAPIRejectsDriftInRealDaemonResponse(t *testing.T) {
+ 		t.Fatal("contract accepted a problem missing its required code")
+ 	}
+ }
++
++// Validate the machine-readable contract, independent of YAML layout or prose.
++func TestRequestContextContractRejectsMalformedCapture(t *testing.T) {
++	schema := map[string]any{"$ref": "#/components/schemas/RequestContextInspection"}
++	valid := `{"capacity_tokens":200000,"capacity_source":"fixture","static_tokens":20,"estimated_tokens":45,"fits":true,"failure":null,"captures":[{"owner":"identity","snapshot_id":"revision-1","diagnostics":["fixture"]}],"included":[{"owner":"identity","snapshot_id":"revision-1","kind":"instructions","name":"identity","mandatory":true}],"omitted":[{"owner":"identity","snapshot_id":"revision-1","kind":"data","name":"optional","reason":"budget"}]}`
++	decode := func() map[string]any {
++		var value map[string]any
++		if err := json.Unmarshal([]byte(valid), &value); err != nil {
++			t.Fatal(err)
++		}
++		return value
++	}
++	if err := suite.contract.validate(schema, decode()); err != nil {
++		t.Fatal(err)
++	}
++	unknown := decode()
++	unknown["capacity_tokens"], unknown["capacity_source"] = nil, nil
++	unknown["fits"], unknown["failure"] = false, "fixture failure"
++	if err := suite.contract.validate(schema, unknown); err != nil {
++		t.Fatal(err)
++	}
++	for name, corrupt := range map[string]func(map[string]any){
++		"missing fits":            func(v map[string]any) { delete(v, "fits") },
++		"wrong estimate type":     func(v map[string]any) { v["estimated_tokens"] = "45" },
++		"unknown top-level field": func(v map[string]any) { v["unexpected"] = true },
++		"unknown capture field":   func(v map[string]any) { v["captures"].([]any)[0].(map[string]any)["unexpected"] = true },
++		"missing capture owner":   func(v map[string]any) { delete(v["captures"].([]any)[0].(map[string]any), "owner") },
++		"invalid block kind":      func(v map[string]any) { v["included"].([]any)[0].(map[string]any)["kind"] = "arbitrary" },
++		"wrong mandatory type":    func(v map[string]any) { v["included"].([]any)[0].(map[string]any)["mandatory"] = "yes" },
++		"missing omission reason": func(v map[string]any) { delete(v["omitted"].([]any)[0].(map[string]any), "reason") },
++	} {
++		t.Run(name, func(t *testing.T) {
++			value := decode()
++			corrupt(value)
++			if err := suite.contract.validate(schema, value); err == nil {
++				t.Fatal("contract accepted malformed capture")
++			}
++		})
++	}
++}
+diff --git a/docs/openapi.yaml b/docs/openapi.yaml
+index 0960570af5b3b1d7b77dead532b2ae508d1135b1..a4379734c30feceab2a98dc796e9747f02fc393e 100644
+--- a/docs/openapi.yaml
++++ b/docs/openapi.yaml
+@@ -7379,6 +7379,84 @@ components:
+           $ref: '#/components/schemas/Preview'
+       required: [id, label, kind, source, item_count, utf8_bytes, page_count, preview]
+       additionalProperties: false
++    RequestContextInspection:
++      type: object
++      properties:
++        capacity_tokens:
++          anyOf:
++          - type: integer
++            minimum: 0
++          - type: 'null'
++        capacity_source:
++          anyOf:
++          - type: string
++          - type: 'null'
++        static_tokens:
++          type: integer
++          minimum: 0
++        estimated_tokens:
++          type: integer
++          minimum: 0
++        fits:
++          type: boolean
++        failure:
++          anyOf:
++          - type: string
++          - type: 'null'
++        captures:
++          type: array
++          items:
++            type: object
++            properties:
++              owner:
++                type: string
++              snapshot_id:
++                type: string
++              diagnostics:
++                type: array
++                items:
++                  type: string
++            required: [owner, snapshot_id, diagnostics]
++            additionalProperties: false
++        included:
++          type: array
++          items:
++            type: object
++            properties:
++              owner:
++                type: string
++              snapshot_id:
++                type: string
++              kind:
++                type: string
++                enum: [instructions, data]
++              name:
++                type: string
++              mandatory:
++                type: boolean
++            required: [owner, snapshot_id, kind, name, mandatory]
++            additionalProperties: false
++        omitted:
++          type: array
++          items:
++            type: object
++            properties:
++              owner:
++                type: string
++              snapshot_id:
++                type: string
++              kind:
++                type: string
++                enum: [instructions, data]
++              name:
++                type: string
++              reason:
++                type: string
++            required: [owner, snapshot_id, kind, name, reason]
++            additionalProperties: false
++      required: [capacity_tokens, capacity_source, static_tokens, estimated_tokens, fits, failure,
++        captures, included, omitted]
++      additionalProperties: false
+     ContextSummary:
+       type: object
+       properties:
+@@ -7412,6 +7490,10 @@ components:
+           - type: 'null'
+         compaction:
+           $ref: '#/components/schemas/ContextCompaction'
++        request_context:
++          anyOf:
++          - $ref: '#/components/schemas/RequestContextInspection'
++          - type: 'null'
+         sections:
+           type: array
+           items:
+@@ -7430,6 +7512,7 @@ components:
+             state:
+               const: ready
+         then:
++          required: [request_context]
+           properties:
+             snapshot_id:
+               $ref: '#/components/schemas/ID'
 diff --git a/robot-docs/cache-warming.md b/robot-docs/cache-warming.md
 index 1d17173eb077606edcde06ba1c773ecf8da28d99..66bf3533927007f204a3e05cc957e242ea894452 100644
 --- a/robot-docs/cache-warming.md
@@ -4555,6 +4779,32 @@ index bee0af2109a699ebd8742aa7100e9ea42ab8f165..4e8a82cfc7c621399ce15434978e52af
    let assert Ok(branch) = conversation.snapshot(ledger, "branch")
    let assert Ok(branch_stats) = conversation.source_stats(ledger, branch, 0)
    branch_stats.uncovered_users |> should.equal(2)
+diff --git a/test/e2e/context_test.py b/test/e2e/context_test.py
+index 524814daceefa9a3cb0bbcb347d2de907c2cd7c7..3ede1e359f2cf6692fcdccc916e82198ed145557 100644
+--- a/test/e2e/context_test.py
++++ b/test/e2e/context_test.py
+@@ -113,9 +113,19 @@ class ContextTest(unittest.TestCase):
+         compaction = snapshot["compaction"]
+         self.assertEqual(compaction["provider_input_tokens"], 20)
+         self.assertIsNone(compaction["provider_cached_input_tokens"])
++        captured = snapshot["request_context"]
+         self.assertEqual(
+-            compaction["estimate_method"],
+-            "local byte-based estimate; not provider token usage",
++            compaction["estimated_input_tokens"], captured["estimated_tokens"]
++        )
++        self.assertGreater(captured["estimated_tokens"], captured["static_tokens"])
++        self.assertEqual(captured["capacity_tokens"], snapshot["context_window_tokens"])
++        self.assertEqual(
++            captured["fits"],
++            captured["estimated_tokens"] <= captured["capacity_tokens"],
++        )
++        self.assertIsNone(captured["failure"])
++        self.assertNotEqual(
++            compaction["estimated_input_tokens"], compaction["provider_input_tokens"]
+         )
+         self.assertEqual(compaction["status"], "not_needed")
+         self.assertEqual(compaction["input_limit_tokens"], 200000)
 diff --git a/test/harness/cache_fade_test.gleam b/test/harness/cache_fade_test.gleam
 index 20647edecade1505c44193011f2bcf714a169bf0..fccee0b618b68b7cd4d2ec46ffea1b41238d37de 100644
 --- a/test/harness/cache_fade_test.gleam
