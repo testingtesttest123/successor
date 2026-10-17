@@ -1,0 +1,5080 @@
+diff --git a/cli/internal/daemon/protocol/api.gen.go b/cli/internal/daemon/protocol/api.gen.go
+index b5279ec8ea6904ce77af59e7e9bf85342c63afef..98b0eebd96be65b46a257b995e9d9f3cec09cb5f 100644
+--- a/cli/internal/daemon/protocol/api.gen.go
++++ b/cli/internal/daemon/protocol/api.gen.go
+@@ -490,16 +490,17 @@ type ContextSectionPage struct {
+ 
+ // ContextSummary defines model for ContextSummary.
+ type ContextSummary struct {
+-	CapturedAt          *Timestamp        `json:"captured_at" nullable:"true"`
+-	Compaction          ContextCompaction `json:"compaction"`
+-	ContextWindowTokens *Counter          `json:"context_window_tokens" nullable:"true"`
+-	Model               *ID               `json:"model" nullable:"true"`
+-	Protocol            *string           `json:"protocol" nullable:"true"`
+-	Provider            *ID               `json:"provider" nullable:"true"`
+-	Reason              *SafeReason       `json:"reason" nullable:"true"`
+-	Sections            []ContextSection  `json:"sections"`
+-	SnapshotID          *ID               `json:"snapshot_id" nullable:"true"`
+-	State               string            `json:"state"`
++	CapturedAt          *Timestamp                `json:"captured_at" nullable:"true"`
++	Compaction          ContextCompaction         `json:"compaction"`
++	ContextWindowTokens *Counter                  `json:"context_window_tokens" nullable:"true"`
++	Model               *ID                       `json:"model" nullable:"true"`
++	Protocol            *string                   `json:"protocol" nullable:"true"`
++	Provider            *ID                       `json:"provider" nullable:"true"`
++	Reason              *SafeReason               `json:"reason" nullable:"true"`
++	RequestContext      *RequestContextInspection `json:"request_context,omitempty" nullable:"true"`
++	Sections            []ContextSection          `json:"sections"`
++	SnapshotID          *ID                       `json:"snapshot_id" nullable:"true"`
++	State               string                    `json:"state"`
+ }
+ 
+ // ContextWindow defines model for ContextWindow.
+@@ -2004,6 +2005,35 @@ type ReplayBatch struct {
+ 	Generation Generation `json:"generation"`
+ }
+ 
++// RequestContextInspection defines model for RequestContextInspection.
++type RequestContextInspection struct {
++	CapacitySource *string `json:"capacity_source" nullable:"true"`
++	CapacityTokens *int64  `json:"capacity_tokens" nullable:"true"`
++	Captures       []struct {
++		Diagnostics []string `json:"diagnostics"`
++		Owner       string   `json:"owner"`
++		SnapshotID  string   `json:"snapshot_id"`
++	} `json:"captures"`
++	EstimatedTokens int64   `json:"estimated_tokens"`
++	Failure         *string `json:"failure" nullable:"true"`
++	Fits            bool    `json:"fits"`
++	Included        []struct {
++		Kind       string `json:"kind"`
++		Mandatory  bool   `json:"mandatory"`
++		Name       string `json:"name"`
++		Owner      string `json:"owner"`
++		SnapshotID string `json:"snapshot_id"`
++	} `json:"included"`
++	Omitted []struct {
++		Kind       string `json:"kind"`
++		Name       string `json:"name"`
++		Owner      string `json:"owner"`
++		Reason     string `json:"reason"`
++		SnapshotID string `json:"snapshot_id"`
++	} `json:"omitted"`
++	StaticTokens int64 `json:"static_tokens"`
++}
++
+ // RequestRecordPage defines model for RequestRecordPage.
+ type RequestRecordPage struct {
+ 	Items []ProviderRequestRecord `json:"items"`
+diff --git a/cli/test/e2e/contract_test.go b/cli/test/e2e/contract_test.go
+index adc8043c6209b15023adcb4931de0ac3f7bc717f..46a3360bc98cc6ca8fc88d7bd82fb69b05f4b513 100644
+--- a/cli/test/e2e/contract_test.go
++++ b/cli/test/e2e/contract_test.go
+@@ -319,3 +319,43 @@ func TestOpenAPIRejectsDriftInRealDaemonResponse(t *testing.T) {
+ 		t.Fatal("contract accepted a problem missing its required code")
+ 	}
+ }
++
++// Validate the machine-readable contract, independent of YAML layout or prose.
++func TestRequestContextContractRejectsMalformedCapture(t *testing.T) {
++	schema := map[string]any{"$ref": "#/components/schemas/RequestContextInspection"}
++	valid := `{"capacity_tokens":200000,"capacity_source":"fixture","static_tokens":20,"estimated_tokens":45,"fits":true,"failure":null,"captures":[{"owner":"identity","snapshot_id":"revision-1","diagnostics":["fixture"]}],"included":[{"owner":"identity","snapshot_id":"revision-1","kind":"instructions","name":"identity","mandatory":true}],"omitted":[{"owner":"identity","snapshot_id":"revision-1","kind":"data","name":"optional","reason":"budget"}]}`
++	decode := func() map[string]any {
++		var value map[string]any
++		if err := json.Unmarshal([]byte(valid), &value); err != nil {
++			t.Fatal(err)
++		}
++		return value
++	}
++	if err := suite.contract.validate(schema, decode()); err != nil {
++		t.Fatal(err)
++	}
++	unknown := decode()
++	unknown["capacity_tokens"], unknown["capacity_source"] = nil, nil
++	unknown["fits"], unknown["failure"] = false, "fixture failure"
++	if err := suite.contract.validate(schema, unknown); err != nil {
++		t.Fatal(err)
++	}
++	for name, corrupt := range map[string]func(map[string]any){
++		"missing fits":            func(v map[string]any) { delete(v, "fits") },
++		"wrong estimate type":     func(v map[string]any) { v["estimated_tokens"] = "45" },
++		"unknown top-level field": func(v map[string]any) { v["unexpected"] = true },
++		"unknown capture field":   func(v map[string]any) { v["captures"].([]any)[0].(map[string]any)["unexpected"] = true },
++		"missing capture owner":   func(v map[string]any) { delete(v["captures"].([]any)[0].(map[string]any), "owner") },
++		"invalid block kind":      func(v map[string]any) { v["included"].([]any)[0].(map[string]any)["kind"] = "arbitrary" },
++		"wrong mandatory type":    func(v map[string]any) { v["included"].([]any)[0].(map[string]any)["mandatory"] = "yes" },
++		"missing omission reason": func(v map[string]any) { delete(v["omitted"].([]any)[0].(map[string]any), "reason") },
++	} {
++		t.Run(name, func(t *testing.T) {
++			value := decode()
++			corrupt(value)
++			if err := suite.contract.validate(schema, value); err == nil {
++				t.Fatal("contract accepted malformed capture")
++			}
++		})
++	}
++}
+diff --git a/docs/openapi.yaml b/docs/openapi.yaml
+index 0960570af5b3b1d7b77dead532b2ae508d1135b1..a4379734c30feceab2a98dc796e9747f02fc393e 100644
+--- a/docs/openapi.yaml
++++ b/docs/openapi.yaml
+@@ -7379,6 +7379,84 @@ components:
+           $ref: '#/components/schemas/Preview'
+       required: [id, label, kind, source, item_count, utf8_bytes, page_count, preview]
+       additionalProperties: false
++    RequestContextInspection:
++      type: object
++      properties:
++        capacity_tokens:
++          anyOf:
++          - type: integer
++            minimum: 0
++          - type: 'null'
++        capacity_source:
++          anyOf:
++          - type: string
++          - type: 'null'
++        static_tokens:
++          type: integer
++          minimum: 0
++        estimated_tokens:
++          type: integer
++          minimum: 0
++        fits:
++          type: boolean
++        failure:
++          anyOf:
++          - type: string
++          - type: 'null'
++        captures:
++          type: array
++          items:
++            type: object
++            properties:
++              owner:
++                type: string
++              snapshot_id:
++                type: string
++              diagnostics:
++                type: array
++                items:
++                  type: string
++            required: [owner, snapshot_id, diagnostics]
++            additionalProperties: false
++        included:
++          type: array
++          items:
++            type: object
++            properties:
++              owner:
++                type: string
++              snapshot_id:
++                type: string
++              kind:
++                type: string
++                enum: [instructions, data]
++              name:
++                type: string
++              mandatory:
++                type: boolean
++            required: [owner, snapshot_id, kind, name, mandatory]
++            additionalProperties: false
++        omitted:
++          type: array
++          items:
++            type: object
++            properties:
++              owner:
++                type: string
++              snapshot_id:
++                type: string
++              kind:
++                type: string
++                enum: [instructions, data]
++              name:
++                type: string
++              reason:
++                type: string
++            required: [owner, snapshot_id, kind, name, reason]
++            additionalProperties: false
++      required: [capacity_tokens, capacity_source, static_tokens, estimated_tokens, fits, failure,
++        captures, included, omitted]
++      additionalProperties: false
+     ContextSummary:
+       type: object
+       properties:
+@@ -7412,6 +7490,10 @@ components:
+           - type: 'null'
+         compaction:
+           $ref: '#/components/schemas/ContextCompaction'
++        request_context:
++          anyOf:
++          - $ref: '#/components/schemas/RequestContextInspection'
++          - type: 'null'
+         sections:
+           type: array
+           items:
+@@ -7430,6 +7512,7 @@ components:
+             state:
+               const: ready
+         then:
++          required: [request_context]
+           properties:
+             snapshot_id:
+               $ref: '#/components/schemas/ID'
+diff --git a/robot-docs/cache-warming.md b/robot-docs/cache-warming.md
+index 1d17173eb077606edcde06ba1c773ecf8da28d99..66bf3533927007f204a3e05cc957e242ea894452 100644
+--- a/robot-docs/cache-warming.md
++++ b/robot-docs/cache-warming.md
+@@ -72,3 +72,16 @@ every ping is a provider request row of kind `background`, with the prefix ident
+ ```
+ 
+ when unset or malformed, `minCachedTokens` is 1024. the cache table itself (its layers, refresh, local override) is documented in robot-docs/cache-ttl.md.
++
++
++Restart restoration skips compositions with dynamic request contributors when
++the old capture is unavailable. Re-reading current callbacks would fabricate a
++past request. Static-only restoration retains its existing prefix comparison;
++ordinary in-memory warming repeats the exact saved sent request.
++
++An observer handle retains the session configuration revision from the sent-call
++or restored-call event. Before starting a saved background request, the session
++actor checks that revision again while it owns admission. An idle bind, unbind,
++or other configuration change therefore invalidates an earlier warming handle
++with `configuration_changed`. Dynamic document edits that leave session
++configuration unchanged do not reconstruct the saved request or rerun capture.
+diff --git a/robot-docs/compaction.md b/robot-docs/compaction.md
+index ecb6e3d7bd98c568ba2d2102629c144a89a2a3ac..e52a1cd765704a8eea35995d346693af6fc58374 100644
+--- a/robot-docs/compaction.md
++++ b/robot-docs/compaction.md
+@@ -133,3 +133,29 @@ Image bytes are never copied into the recap or the summarizer prompt; a recent i
+ ## inspect
+ 
+ `/context` shows the prepared request: its sections in order, their sources, and compaction status. After a provider completes that request, it shows the provider's measured input tokens (and cached tokens when reported); until then, or when usage is omitted, the strategy's local estimate is shown instead. The JSON retains `estimated_input_tokens` separately from `provider_input_tokens` so neither is mistaken for the other. A manual `/compact` sends no ordinary provider request, so its snapshot has only an estimate. See [the context inspector](context.md).
++
++## Settings captured per preparation
++
++A strategy resolves once to `Resolved(capacity, project, compact)` before request
++context capture. Its closures retain validated settings across project, compact
++and project. Genuine capacity preserves each strategy's precedence: rolling and
++LCM configuration before catalog; visual snapcompact catalog before its setting;
++a session context-window override precedes both in every strategy and with no strategy;
++text-only snapcompact captures rolling settings once. A forced synthetic window
++remains internal to compaction and is unknown to contributors/inspection.
++
++Rendered mandatory dynamic blocks are reserved with static instructions and
++tools; they are not inserted into raw history. Optional blocks cannot force
++history eviction or an indivisible-tail refusal: final admission gives them the
++space remaining after projected history. Initial impossible optionals are
++omitted whole from the end, leaving mandatory history allowance. After pin settlement
++the host prices the actual assembled request with the existing local estimator,
++removes further optional blocks whole, and refuses mandatory overflow before
++foreground provider entry, including a request with no dynamic blocks. A stock
++summary call may already have occurred when overflow is only knowable after
++compaction releases a pin; initially provable overflow makes no summary call.
++
++Summarizer requests assemble the same captured mandatory blocks with the native
++summary instructions, tools and final rendered history, and check their complete
++request estimate before provider entry. Capture callbacks never run again for a
++summary or retry. Persistent requirements are checked on each provider attempt.
+diff --git a/robot-docs/context.md b/robot-docs/context.md
+index 23067ee03522d705ef57a8e25837f26d658b4e4e..b3ee34b3eff3a980628bdd3107e327516dbb41e6 100644
+--- a/robot-docs/context.md
++++ b/robot-docs/context.md
+@@ -29,3 +29,25 @@ The session actor owns the immutable prepared snapshot and returns it to the cal
+ The `context: 1` server capability indicates support. Invalid section or page identifiers return an error without changing session state.
+ 
+ The skills and instructions management catalog at `GET /sessions/{session_id}/catalog` is a fresh discovery view, separate from this prepared request snapshot. A candidate can appear there before a session reload makes it available at runtime; reloads can also update live commands while the cached system prompt remains pinned until compaction.
++
++## Request contribution inspection
++
++Saved request snapshots include typed `request_context` capture facts: opaque
++source IDs and diagnostics, included and omitted whole blocks, genuine capacity
++and provenance, initial static cost, final estimate and fit. Content pages use
++the exact assembled request's instructions/history/tools. Retry and inspection
++reuse the capture; a subsequent request captures the next live revision. The
++final estimator prices assembled content once, rather than adding its dynamic
++subtotal twice. Estimates are local byte-based approximations, not tokenizer
++guarantees. Unknown capacity stays unknown even for forced compaction.
++
++Preparation refusals save an explicitly failed capture inspection before pin
++settlement or compaction notifications. Successful earlier contributors survive
++a later callback/strategy failure. The generic refusal reason is capped at 2048
++Unicode scalars; source diagnostics retain the callback's bounded semantic
++contract. This failed attempt does not represent a sent provider request.
++
++The loop captures the accepted source query before image fitting appends
++request-only notes, carries it through tool continuations, and refreshes it from
++new steering. The preparation API receives that source query explicitly and
++enforces the same UTF-8 byte cap. It does not infer source actors from prose.
+diff --git a/robot-docs/extensions.md b/robot-docs/extensions.md
+index 771388deab750e58f6c1fa846897557f6550421a..cb1da5a5958dab427a79c8376250cdd28ea86820 100644
+--- a/robot-docs/extensions.md
++++ b/robot-docs/extensions.md
+@@ -17,6 +17,14 @@ The runtime keeps the Python kernel when its workspace and modules match, replac
+ 
+ `extensions.Config(installed, default_enabled)` separates installed extensions from their default selection. multiple compaction strategies may be installed, but at most one can be enabled for a session. built-in sessions start with `rolling`; custom hosts can omit compaction. `runtime.start_with_config(database, config)` uses this selection; `runtime.start_with_extensions(database, installed)` enables every supplied extension.
+ 
++
++`daemon/server.main_with_config(config)` runs the complete daemon with an explicit
++`extensions.Config`; construct declarations only, since installation effects run
++after the normal home lock. `main()` retains stock defaults. The lower-level
++`start_with_config(daemon_config, port, webhook_port, config)` preserves the
++ordinary caller ownership and returns both listener ports. Executable consumers
++dispatch `storage_cli.arguments()` first so offline helpers retain their ownership.
++
+ ## boundaries to preserve
+ 
+ Use these rules when adding or changing an extension:
+@@ -281,3 +289,25 @@ see [the skills extension](skills.md) for discovery paths, metadata-only startup
+ `notes` is a layer over whichever strategy is active, not a strategy: at every compaction the model rewrites its own notes, and they lead every later request. it is enabled by default and needs no strategy of its own. see [compaction](compaction.md).
+ 
+ a `CleanPlugin` is how an extension that keeps rows per session deletes them with the session. every installed extension's runs inside the delete's transaction, enabled or not, before the session row goes, so an extension owns its tables and the daemon's delete lists only its own. the exception is `cells`, which the daemon deletes itself because it feeds the image reference count released in the same transaction.
++
++## Captured request context
++
++`RequestContextPlugin(prepare, required)` contributes bounded read-only native
++context once per actual request preparation. It receives the store/session, fully
++active bundle names, a recent user/steering query capped at 4096 UTF-8 bytes, and
++the genuine remaining window after static instructions and tool schemas. This is
++a trusted native semantic contract, not a security sandbox. The extension owns
++its coherent source revision and returns an opaque snapshot ID, whole mandatory
++or optional instruction/data blocks and diagnostics. Identity and memory policy
++do not belong to the host interface.
++
++The composition collects callbacks only from complete active bundles. A required
++requested bundle that failed loading refuses preparation. Any active callback
++error or exception stops preparation. Admission and capability inspection do not
++invoke callbacks. Dynamic data is never durable history or raw compaction input.
++
++Canonical required request declarations survive installation quarantine. Saved
++selection is checked before composing and on actual preparation, including a
++retained cached composition. Persisted session requirements additionally check
++complete active request-contributor owner names, so removing the entire owner
++cannot silently turn a required session into an ordinary session.
+diff --git a/robot-docs/migrations.md b/robot-docs/migrations.md
+index 4e3a65e0b95f9682b6326f5b4b1d23fae995fcb9..cd26644bb361ef32c2e69599c665d2e9698e6cbb 100644
+--- a/robot-docs/migrations.md
++++ b/robot-docs/migrations.md
+@@ -234,3 +234,40 @@ checkpoint belong to the fork. Forks copy no admission receipts or live runs.
+ Acceptance guarantees stored input or its committed or cancelled outcome.
+ Commit means the input reached the transcript. Neither guarantee promises that
+ assistant generation, tools, or external effects occur exactly once.
++
++## persisted session capabilities and lifecycle transactions
++
++`daemon/session_requirements` owns the core `session_requirements` table.
++`conversation.initialise` initializes it beside session configuration, independent
++of extension installation. Each `(session, capability)` row records a required
++complete active request-context owner. Missing or unreadable storage is an error;
++removing the extension cannot turn a required session into an ordinary session.
++Initialization atomically records `session_requirements_v1` in core migrations.
++An unmarked stock database receives the table; a marked database with missing
++or incompatible storage refuses startup rather than recreating an empty table.
++Binding owners call `require_in` or `release_in` on their transaction connection
++so binding changes and host requirements commit or roll back together. Native
++session deletion removes requirement rows; it does not delete external identities.
++
++`harness/session_lifecycle` defines trusted connection-only creation callbacks.
++Runtime captures canonical lifecycle owners once during installation, including
++quarantined declarations and owners disabled for individual sessions. Guards
++perform bounded reads; mutation callbacks use only the supplied SQLite connection.
++They must not reenter actors, nest transactions, notify the bus, start processes,
++or call external services. Errors and catchable crashes roll back the entire
++native transaction. A required quarantined owner reports its canonical installation
++failure, including when a duplicate declaration was rejected first.
++
++`conversation` calls lifecycle hooks inside native and identified creation
++transactions. Identified receipt recovery does not rerun callbacks. `history`
++provides exact ordered source/branch references for copied fork rows, excluding
++synthetic tool completions, and preserves native LCM prefix inheritance. Initial
++child tasks commit with their session and family membership; registry notification
++and activation follow commit.
++
++Inheritance of persisted capabilities is not supported in this slice. Core
++child, fork, and rewind transactions reject a source with any persisted requirement
++before writes, even if the contributing extension is absent. The session actor
++also rejects rewind summary preparation before opening a kernel or provider call.
++Authenticated native service binding mutations use the session's idle gate;
++ordinary model commands cannot invoke that mutation bridge.
+diff --git a/src/albedo/daemon/context_snapshot.gleam b/src/albedo/daemon/context_snapshot.gleam
+index fe960800282c97b89b51b9024d1f1713de37d23f..45dd08614b0d5453537a056740a481b5c5431806 100644
+--- a/src/albedo/daemon/context_snapshot.gleam
++++ b/src/albedo/daemon/context_snapshot.gleam
+@@ -4,6 +4,7 @@
+ import albedo/daemon/message_content as events
+ import albedo/daemon/usage
+ import albedo/harness/compaction as context_size
++import albedo/harness/request_context
+ import albedo/openai_api/request as provider_request
+ import albedo/openai_api/types
+ import gleam/int
+@@ -87,6 +88,7 @@ pub type Snapshot {
+     compaction: Compaction,
+     sections: List(Section),
+     retained_tool_calls: List(String),
++    request_context: Option(request_context.Inspection),
+   )
+ }
+ 
+@@ -218,6 +220,7 @@ fn ready(
+     compaction,
+     sections,
+     [],
++    None,
+   )
+ }
+ 
+@@ -273,6 +276,93 @@ pub fn from_request(
+   }
+ }
+ 
++/// Captured facts only: neither pages nor inspection invoke contributors.
++pub fn with_request_context(
++  snapshot: Snapshot,
++  final: request_context.Final,
++) -> Snapshot {
++  case snapshot {
++    Pending(_) -> snapshot
++    Ready(..) ->
++      Ready(
++        ..snapshot,
++        context_window_tokens: final.captured.budget.capacity_tokens,
++        compaction: Compaction(
++          ..snapshot.compaction,
++          estimated_input_tokens: Some(final.estimated_tokens),
++          estimate_method: Some(
++            "local byte-based estimate of assembled request; not provider token usage",
++          ),
++        ),
++        request_context: Some(request_context.Inspection(
++          final.captured,
++          final.estimated_tokens,
++          final.fits,
++          final.failure,
++        )),
++      )
++  }
++}
++
++pub fn request_context_json(
++  inspected: request_context.Inspection,
++) -> json.Json {
++  let kind = fn(kind) {
++    case kind {
++      request_context.Instructions -> json.string("instructions")
++      request_context.Data -> json.string("data")
++    }
++  }
++  json.object([
++    #(
++      "capacity_tokens",
++      json.nullable(inspected.captured.budget.capacity_tokens, json.int),
++    ),
++    #(
++      "capacity_source",
++      json.nullable(inspected.captured.budget.capacity_source, json.string),
++    ),
++    #("static_tokens", json.int(inspected.captured.budget.static_tokens)),
++    #("estimated_tokens", json.int(inspected.estimated_tokens)),
++    #("fits", json.bool(inspected.fits)),
++    #("failure", json.nullable(inspected.failure, json.string)),
++    #(
++      "captures",
++      json.array(inspected.captured.contributions, fn(captured) {
++        json.object([
++          #("owner", json.string(captured.owner)),
++          #("snapshot_id", json.string(captured.value.snapshot_id)),
++          #("diagnostics", json.array(captured.value.diagnostics, json.string)),
++        ])
++      }),
++    ),
++    #(
++      "included",
++      json.array(inspected.captured.blocks, fn(selected) {
++        json.object([
++          #("owner", json.string(selected.owner)),
++          #("snapshot_id", json.string(selected.snapshot_id)),
++          #("kind", kind(selected.kind)),
++          #("name", json.string(selected.block.name)),
++          #("mandatory", json.bool(selected.block.mandatory)),
++        ])
++      }),
++    ),
++    #(
++      "omitted",
++      json.array(inspected.captured.omissions, fn(omission) {
++        json.object([
++          #("owner", json.string(omission.owner)),
++          #("snapshot_id", json.string(omission.snapshot_id)),
++          #("kind", kind(omission.kind)),
++          #("name", json.string(omission.name)),
++          #("reason", json.string(omission.reason)),
++        ])
++      }),
++    ),
++  ])
++}
++
+ fn tools_section(
+   protocol: types.Protocol,
+   tools: List(types.Tool),
+@@ -481,6 +571,7 @@ pub fn summary(snapshot: Snapshot) -> json.Json {
+       compacted,
+       sections,
+       _,
++      captured,
+     ) ->
+       // Optional detail fields lead the wire order; absent ones are omitted.
+       json.object(
+@@ -494,6 +585,7 @@ pub fn summary(snapshot: Snapshot) -> json.Json {
+             #("snapshot_id", json.string(id)),
+             #("model", json.string(model)),
+             #("compaction", compaction_json(compacted)),
++            #("request_context", json.nullable(captured, request_context_json)),
+             #("sections", json.array(sections, section_json)),
+           ],
+         ]),
+diff --git a/src/albedo/daemon/conversation.gleam b/src/albedo/daemon/conversation.gleam
+index a608dedceab204d2f6dd14cb12f4e8aec1f0cbe4..b9605917e74c2ef9c0c9629bdb1a827153d30e87 100644
+--- a/src/albedo/daemon/conversation.gleam
++++ b/src/albedo/daemon/conversation.gleam
+@@ -9,6 +9,7 @@ import albedo/daemon/notice
+ import albedo/daemon/operations
+ import albedo/daemon/requests
+ import albedo/daemon/session_configuration
++import albedo/daemon/session_requirements
+ import albedo/daemon/session_workspace
+ import albedo/daemon/store
+ import albedo/daemon/tool_results
+@@ -16,6 +17,7 @@ import albedo/daemon/transcript
+ import albedo/daemon/usage
+ import albedo/harness/cache_fade
+ import albedo/harness/extensions/python/cells as journal
++import albedo/harness/session_lifecycle
+ import albedo/openai_api/types
+ import gleam/bool
+ import gleam/dynamic/decode
+@@ -245,6 +247,7 @@ pub fn create_identified(
+   info: Info,
+   creation: Creation,
+   context_window: Option(Int),
++  owners: List(session_lifecycle.Owner),
+ ) -> Result(operations.Receipt, String) {
+   store.query(ledger, fn(db) {
+     store.transaction(db, fn() {
+@@ -262,7 +265,12 @@ pub fn create_identified(
+             info.id,
+             context_window,
+           ))
+-          record_creation_in(db, info.id, creation)
++          use _ <- result.try(record_creation_in(db, info.id, creation))
++          session_lifecycle.run_in(
++            db,
++            owners,
++            session_lifecycle.Created(info.id),
++          )
+         },
+       )
+     })
+@@ -272,6 +280,7 @@ pub fn create_identified(
+ pub fn create_child_identified(
+   ledger: store.Store,
+   child: ChildCreation,
++  owners: List(session_lifecycle.Owner),
+ ) -> Result(operations.Receipt, String) {
+   store.query(ledger, fn(db) {
+     store.transaction(db, fn() {
+@@ -283,6 +292,10 @@ pub fn create_child_identified(
+         child.creation.submitted,
+         None,
+         fn(db) {
++          use _ <- result.try(session_requirements.descendant_allowed_in(
++            db,
++            child.parent_id,
++          ))
+           use above <- result.try(session_configuration.read_in(
+             db,
+             child.parent_id,
+@@ -308,6 +321,7 @@ pub fn create_child_identified(
+             Ok(Some(_)) -> Error("input_conflict")
+             Error(error) -> Error(error)
+           })
++          use _ <- result.try(mail.validate(child.task))
+           use _ <- result.try(create_in(db, info))
+           use _ <- result.try(family.link_in(
+             db,
+@@ -325,8 +339,18 @@ pub fn create_child_identified(
+             True -> Ok(Nil)
+             False -> Error("child task inbox is full")
+           })
+-          operations.admit_pending_in(db, child.input, child.payload, 202, "{}")
+-          |> result.replace(Nil)
++          use _ <- result.try(operations.admit_pending_in(
++            db,
++            child.input,
++            child.payload,
++            202,
++            "{}",
++          ))
++          session_lifecycle.run_in(
++            db,
++            owners,
++            session_lifecycle.Child(child.parent_id, child.info.id),
++          )
+         },
+       )
+     })
+@@ -431,6 +455,7 @@ pub fn initialise(store: store.Store) -> Result(Nil, String) {
+           <> creation_schema,
+       ))
+       use _ <- result.try(conversation_columns.apply(db))
++      use _ <- result.try(session_requirements.initialise_in(db))
+       use _ <- result.try(session_configuration.initialise_in(db))
+       use _ <- result.try(session_workspace.initialise_in(db))
+       use _ <- result.try(
+@@ -1079,6 +1104,7 @@ fn delete_in(
+         "submission_events",
+         "continuation_markers",
+         "provider_requests",
++        "session_requirements",
+         "session_extensions",
+         "session_selection",
+         "session_family",
+@@ -1118,21 +1144,64 @@ pub fn create_child(
+   info: Info,
+   parent: String,
+   name: String,
++  initial_task: Option(mail.Letter),
++  owners: List(session_lifecycle.Owner),
+ ) -> Result(#(Info, family.Member), String) {
+   store.query(ledger, fn(db) {
+     store.transaction(db, fn() {
++      use _ <- result.try(case initial_task {
++        None -> Ok(Nil)
++        Some(task) -> {
++          use _ <- result.try(
++            case
++              task.recipient == info.id
++              && task.sender == Some(parent)
++              && task.kind == mail.Task
++            {
++              True -> Ok(Nil)
++              False -> Error("invalid child task identity")
++            },
++          )
++          mail.validate(task)
++        }
++      })
++      use _ <- result.try(session_requirements.descendant_allowed_in(db, parent))
+       use above <- result.try(session_configuration.read_in(db, parent))
+       use _ <- result.try(family.available_in(db, parent))
+       let info = Info(..info, cwd: above.workspace)
+       use _ <- result.try(create_in(db, info))
+       use member <- result.try(family.link_in(db, info.id, parent, name))
++      use _ <- result.try(case initial_task {
++        None -> Ok(Nil)
++        Some(task) -> {
++          use inserted <- result.try(mail.insert_silent(db, task, mail.Inbox))
++          case inserted {
++            True -> Ok(Nil)
++            False -> Error("child task inbox is full")
++          }
++        }
++      })
++      use _ <- result.try(session_lifecycle.run_in(
++        db,
++        owners,
++        session_lifecycle.Child(parent, info.id),
++      ))
+       Ok(#(info, member))
+     })
+   })
+ }
+ 
+-pub fn create(store: store.Store, info: Info) -> Result(Nil, String) {
+-  store.query(store, create_in(_, info))
++pub fn create(
++  store: store.Store,
++  info: Info,
++  owners: List(session_lifecycle.Owner),
++) -> Result(Nil, String) {
++  store.query(store, fn(db) {
++    store.transaction(db, fn() {
++      use _ <- result.try(create_in(db, info))
++      session_lifecycle.run_in(db, owners, session_lifecycle.Created(info.id))
++    })
++  })
+ }
+ 
+ fn create_in(db: sqlight.Connection, info: Info) -> Result(Nil, String) {
+diff --git a/src/albedo/daemon/history.gleam b/src/albedo/daemon/history.gleam
+index 0109e49ac417cd020d2efd8fa49284177c3529e5..fb74da15041a7f98adc905547e97a33fc7cacd2e 100644
+--- a/src/albedo/daemon/history.gleam
++++ b/src/albedo/daemon/history.gleam
+@@ -7,10 +7,12 @@ import albedo/daemon/message_content as events
+ import albedo/daemon/note
+ import albedo/daemon/operations
+ import albedo/daemon/session_configuration
++import albedo/daemon/session_requirements
+ import albedo/daemon/store
+ import albedo/daemon/transcript
+ import albedo/daemon/usage
+ import albedo/harness/extensions/lcm/graph as lcm_graph
++import albedo/harness/session_lifecycle
+ import albedo/openai_api/types
+ import gleam/dynamic/decode
+ import gleam/json
+@@ -41,6 +43,7 @@ pub type ForkCreation {
+ pub fn fork_identified(
+   ledger: store.Store,
+   request: ForkCreation,
++  owners: List(session_lifecycle.Owner),
+ ) -> Result(operations.Receipt, String) {
+   store.query(ledger, fn(db) {
+     store.transaction(db, fn() {
+@@ -60,6 +63,7 @@ pub fn fork_identified(
+             request.source_id,
+             request.branch_id,
+             request.checkpoint,
++            owners,
+           ))
+           conversation.record_creation_in(
+             db,
+@@ -80,9 +84,12 @@ pub fn fork(
+   source_id: String,
+   branch_id: String,
+   checkpoint: Int,
++  owners: List(session_lifecycle.Owner),
+ ) -> Result(conversation.Info, String) {
+   store.query(ledger, fn(db) {
+-    store.transaction(db, fn() { fork_in(db, source_id, branch_id, checkpoint) })
++    store.transaction(db, fn() {
++      fork_in(db, source_id, branch_id, checkpoint, owners)
++    })
+   })
+ }
+ 
+@@ -91,7 +98,9 @@ fn fork_in(
+   source_id: String,
+   branch_id: String,
+   checkpoint: Int,
++  owners: List(session_lifecycle.Owner),
+ ) -> Result(conversation.Info, String) {
++  use _ <- result.try(session_requirements.descendant_allowed_in(db, source_id))
+   use _ <- result.try(
+     case
+       source_id != branch_id
+@@ -114,7 +123,13 @@ fn fork_in(
+   use pending <- result.try(unmatched_calls(rows))
+   let title = prefix_title(rows)
+   use _ <- result.try(insert_session(db, source, branch_id, title))
+-  use _ <- result.try(copy_prefix(db, source_id, branch_id, checkpoint, rows))
++  use mapping <- result.try(copy_prefix(
++    db,
++    source_id,
++    branch_id,
++    checkpoint,
++    rows,
++  ))
+   use _ <- result.try(lcm_graph.inherit_fork_prefix(
+     db,
+     source_id,
+@@ -129,6 +144,11 @@ fn fork_in(
+     source.provider,
+     pending,
+   ))
++  use _ <- result.try(session_lifecycle.run_in(
++    db,
++    owners,
++    session_lifecycle.Fork(source_id, branch_id, checkpoint, mapping),
++  ))
+   Ok(conversation.Info(
+     branch_id,
+     title,
+@@ -161,10 +181,19 @@ pub fn rewind(
+   checkpoint: Int,
+   summary: Option(String),
+   expected_last: Option(Int),
++  owners: List(session_lifecycle.Owner),
+ ) -> Result(Rewound, String) {
+   store.query(ledger, fn(db) {
+     store.transaction(db, fn() {
+-      rewind_in(db, session_id, archive_id, checkpoint, summary, expected_last)
++      rewind_in(
++        db,
++        session_id,
++        archive_id,
++        checkpoint,
++        summary,
++        expected_last,
++        owners,
++      )
+     })
+   })
+ }
+@@ -176,7 +205,9 @@ fn rewind_in(
+   checkpoint: Int,
+   summary: Option(String),
+   expected_last: Option(Int),
++  owners: List(session_lifecycle.Owner),
+ ) -> Result(Rewound, String) {
++  use _ <- result.try(session_requirements.descendant_allowed_in(db, id))
+   use cut <- result.try(read_cut(db, id, checkpoint))
+   use last <- result.try(store.one(
+     db,
+@@ -191,7 +222,7 @@ fn rewind_in(
+     _ -> Ok(Nil)
+   })
+   use source <- result.try(conversation.read_info(db, id))
+-  use _ <- result.try(fork_in(db, id, archive_id, last))
++  use _ <- result.try(fork_in(db, id, archive_id, last, owners))
+   use _ <- result.try(
+     store.run(db, "UPDATE sessions SET archived=1,title=? WHERE id=?", [
+       sqlight.text(conversation.title("rewound: " <> source.title)),
+@@ -397,7 +428,7 @@ fn copy_prefix(
+   branch_id: String,
+   checkpoint: Int,
+   rows: List(Row),
+-) -> Result(Nil, String) {
++) -> Result(List(#(transcript.SourceRef, transcript.SourceRef)), String) {
+   use _ <- result.try(
+     store.run(
+       db,
+@@ -415,40 +446,54 @@ fn copy_prefix(
+     [sqlight.text(branch_id)],
+     decode.field(0, decode.int, decode.success),
+   ))
+-  list.try_each(list.zip(rows, positions), fn(pair) {
+-    use _ <- result.try(conversation.index_entry_in(
+-      db,
+-      branch_id,
+-      pair.1,
+-      pair.0.input,
+-    ))
+-    use _ <- result.try(copy_input_metadata(
+-      db,
+-      source_id,
+-      branch_id,
+-      #(pair.0.seq, pair.1),
+-      checkpoint,
+-    ))
+-    case cell_id(pair.0.input) {
+-      Error(_) -> Ok(Nil)
+-      Ok(cell_id) -> {
+-        use traces <- result.try(
+-          conversation.traces_in(db, source_id, [cell_id]),
+-        )
+-        list.try_each(traces, fn(trace) {
+-          store.run(
+-            db,
+-            "INSERT OR IGNORE INTO transcript_traces(session,cell_id,payload) VALUES(?,?,?)",
+-            [
+-              sqlight.text(branch_id),
+-              sqlight.text(trace.0),
+-              sqlight.text(json.to_string(trace.1)),
+-            ],
++  use pairs <- result.try(
++    list.strict_zip(rows, positions)
++    |> result.replace_error("fork transcript copy changed its source row count"),
++  )
++  use _ <- result.try(
++    list.try_each(pairs, fn(pair) {
++      use _ <- result.try(conversation.index_entry_in(
++        db,
++        branch_id,
++        pair.1,
++        pair.0.input,
++      ))
++      use _ <- result.try(copy_input_metadata(
++        db,
++        source_id,
++        branch_id,
++        #(pair.0.seq, pair.1),
++        checkpoint,
++      ))
++      case cell_id(pair.0.input) {
++        Error(_) -> Ok(Nil)
++        Ok(cell_id) -> {
++          use traces <- result.try(
++            conversation.traces_in(db, source_id, [cell_id]),
+           )
+-        })
++          list.try_each(traces, fn(trace) {
++            store.run(
++              db,
++              "INSERT OR IGNORE INTO transcript_traces(session,cell_id,payload) VALUES(?,?,?)",
++              [
++                sqlight.text(branch_id),
++                sqlight.text(trace.0),
++                sqlight.text(json.to_string(trace.1)),
++              ],
++            )
++          })
++        }
+       }
+-    }
+-  })
++    }),
++  )
++  Ok(
++    list.map(pairs, fn(pair) {
++      #(
++        transcript.SourceRef(source_id, pair.0.seq),
++        transcript.SourceRef(branch_id, pair.1),
++      )
++    }),
++  )
+ }
+ 
+ /// The cell a tool result reports, when it is a cell's.
+diff --git a/src/albedo/daemon/http_wire.gleam b/src/albedo/daemon/http_wire.gleam
+index 433ea1896f306985775928855ed39e57b5149070..f13948ac40c4a567ec93fd24f25e6a7192bcca55 100644
+--- a/src/albedo/daemon/http_wire.gleam
++++ b/src/albedo/daemon/http_wire.gleam
+@@ -441,6 +441,7 @@ pub fn context(snapshot: context_snapshot.Snapshot) -> json.Json {
+       compacted,
+       sections,
+       _,
++      captured,
+     ) ->
+       json.object([
+         #("state", json.string("ready")),
+@@ -451,6 +452,10 @@ pub fn context(snapshot: context_snapshot.Snapshot) -> json.Json {
+         #("protocol", json.nullable(protocol, json.string)),
+         #("context_window_tokens", json.nullable(window, json.int)),
+         #("compaction", compaction(compacted)),
++        #(
++          "request_context",
++          json.nullable(captured, context_snapshot.request_context_json),
++        ),
+         #(
+           "sections",
+           json.array(sections, fn(section) {
+diff --git a/src/albedo/daemon/mail.gleam b/src/albedo/daemon/mail.gleam
+index d14cae6e36ecc158944a3ffd3e9ae28dec8e0fd2..23083e6bfee906b3d0cab1ce5b3e81269aa7cf25 100644
+--- a/src/albedo/daemon/mail.gleam
++++ b/src/albedo/daemon/mail.gleam
+@@ -206,17 +206,9 @@ pub fn post(
+   kind: Kind,
+   body: String,
+ ) -> Result(Letter, String) {
+-  let empty = string.trim(body) == ""
+-  let oversize = string.byte_size(body) > body_limit
+-  use _ <- result.try(case empty, oversize, sender == Some(recipient) {
+-    True, _, _ -> Error("mail body is empty")
+-    _, True, _ ->
+-      Error("mail body is over 1 MiB; write it to a file and send the path")
+-    _, _, True -> Error("an agent cannot mail itself")
+-    False, False, False -> Ok(Nil)
+-  })
+   let letter =
+     Letter(id, recipient, sender, sender_name, kind, body, usage.now())
++  use _ <- result.try(validate(letter))
+   store.query(db, fn(connection) { insert(connection, letter, Inbox) })
+   |> result.try(fn(inserted) {
+     case inserted {
+@@ -226,6 +218,20 @@ pub fn post(
+   })
+ }
+ 
++/// Validate initial tasks before their creation transaction makes any writes.
++pub fn validate(letter: Letter) -> Result(Nil, String) {
++  let Letter(_, recipient, sender, _, _, body, _) = letter
++  let empty = string.trim(body) == ""
++  let oversize = string.byte_size(body) > body_limit
++  case empty, oversize, sender == Some(recipient) {
++    True, _, _ -> Error("mail body is empty")
++    _, True, _ ->
++      Error("mail body is over 1 MiB; write it to a file and send the path")
++    _, _, True -> Error("an agent cannot mail itself")
++    False, False, False -> Ok(Nil)
++  }
++}
++
+ /// Store a letter inside the caller's transaction: False when the recipient's
+ /// inbox is full. Producers with their own records (a webhook's raw body) write
+ /// both in one transaction.
+@@ -233,6 +239,23 @@ pub fn insert(
+   connection: sqlight.Connection,
+   letter: Letter,
+   owner: DeliveryOwner,
++) -> Result(Bool, String) {
++  insert_silent(connection, letter, owner)
++  |> result.map(fn(inserted) {
++    case inserted, owner {
++      True, Inbox -> announce(letter)
++      _, _ -> Nil
++    }
++    inserted
++  })
++}
++
++/// A creator uses this inside its transaction and announces only after commit.
++/// Existing producers keep `insert`'s notification behavior.
++pub fn insert_silent(
++  connection: sqlight.Connection,
++  letter: Letter,
++  owner: DeliveryOwner,
+ ) -> Result(Bool, String) {
+   let Letter(id, recipient, sender, sender_name, kind, body, created_at) =
+     letter
+@@ -264,26 +287,19 @@ pub fn insert(
+       False -> e.message
+     }
+   })
+-  |> result.map(fn(rows) {
+-    case rows {
+-      [] -> False
+-      _ -> {
+-        case owner {
+-          IdentifiedInput -> Nil
+-          Inbox ->
+-            bus.mailed(
+-              id,
+-              sender,
+-              sender_name,
+-              recipient,
+-              kind_name(kind),
+-              string.byte_size(body),
+-            )
+-        }
+-        True
+-      }
+-    }
+-  })
++  |> result.map(fn(rows) { !list.is_empty(rows) })
++}
++
++/// Announce a committed inbox letter; never call from a creation callback.
++pub fn announce(letter: Letter) -> Nil {
++  bus.mailed(
++    letter.id,
++    letter.sender,
++    letter.sender_name,
++    letter.recipient,
++    kind_name(letter.kind),
++    string.byte_size(letter.body),
++  )
+ }
+ 
+ /// The oldest undelivered letters, excluding closed recipients before the limit.
+diff --git a/src/albedo/daemon/registry.gleam b/src/albedo/daemon/registry.gleam
+index f88f7b19f70aa0cede44e8534673df177d5bbe12..b930710a89e01ff2537e1be93196718c7438346d 100644
+--- a/src/albedo/daemon/registry.gleam
++++ b/src/albedo/daemon/registry.gleam
+@@ -18,6 +18,7 @@ import albedo/daemon/session
+ import albedo/daemon/session/creation as session_creation
+ import albedo/daemon/session_preferences
+ import albedo/daemon/session_provider
++import albedo/daemon/session_requirements
+ import albedo/daemon/session_submission
+ import albedo/daemon/state_expiry
+ import albedo/daemon/store
+@@ -207,7 +208,11 @@ fn serve(state: State, message: Message) -> actor.Next(State, a) {
+         {
+           False -> Error("expected a model")
+           True ->
+-            conversation.create(runtime.ledger(state.host), info)
++            conversation.create(
++              runtime.ledger(state.host),
++              info,
++              runtime.lifecycle_owners(state.host),
++            )
+             |> result.replace(info)
+         }
+       }
+@@ -863,6 +868,7 @@ fn create_child(
+ ) -> #(State, Result(#(conversation.Info, family.Member), String)) {
+   let db = runtime.ledger(state.host)
+   let created = {
++    use _ <- result.try(session_requirements.descendant_allowed(db, parent))
+     use #(cached, _) <- result.try(
+       dict.get(state.sessions, parent)
+       |> result.replace_error("session not found"),
+@@ -897,39 +903,46 @@ fn create_child(
+         protocol: provider.protocol,
+         effort: extension.default_effort(efforts),
+       )
+-    conversation.create_child(db, info, parent, name)
++    let letter =
++      mail.Letter(
++        mail.new_id(),
++        info.id,
++        Some(parent),
++        family.name_of(db, parent),
++        mail.Task,
++        task,
++        usage.now(),
++      )
++    conversation.create_child(
++      db,
++      info,
++      parent,
++      name,
++      Some(letter),
++      runtime.lifecycle_owners(state.host),
++    )
++    |> result.map(fn(created) { #(created, letter) })
+   }
+   case created {
+     Error(error) -> #(state, Error(error))
+-    Ok(#(info, member)) -> {
++    Ok(#(#(info, member), letter)) -> {
+       bus.spawned(member)
++      mail.announce(letter)
+       let state =
+         State(
+           ..state,
+           sessions: dict.insert(state.sessions, info.id, #(info, None)),
+         )
+       let #(state, worker) = activate(state, info.id)
+-      let sent = {
+-        use letter <- result.try(mail.post(
+-          db,
+-          mail.new_id(),
+-          info.id,
+-          Some(parent),
+-          family.name_of(db, parent),
+-          mail.Task,
+-          task,
+-        ))
+-        // Off the registry: admitting the task may boot the child's kernel.
+-        // The letter is durable, so a failed hand-off is the dispatcher's.
+-        case worker {
+-          Ok(worker) -> {
+-            process.spawn_unlinked(fn() { session.submit_mail(worker, letter) })
+-            Ok(Nil)
+-          }
+-          Error(_) -> Ok(Nil)
++      // The committed letter survives a failed hand-off; the dispatcher retries.
++      case worker {
++        Ok(worker) -> {
++          process.spawn_unlinked(fn() { session.submit_mail(worker, letter) })
++          Nil
+         }
++        Error(_) -> Nil
+       }
+-      #(state, sent |> result.replace(#(info, member)))
++      #(state, Ok(#(info, member)))
+     }
+   }
+ }
+@@ -1193,7 +1206,13 @@ fn create_identified(
+             conversation.Creation(operation, submitted, resolved, name)
+           let result = case intent {
+             session_creation.NewSession(context_window:, ..) ->
+-              conversation.create_identified(db, info, creation, context_window)
++              conversation.create_identified(
++                db,
++                info,
++                creation,
++                context_window,
++                runtime.lifecycle_owners(state.host),
++              )
+             session_creation.ForkSession(source, checkpoint, _) -> {
+               use checkpoint <- result.try(
+                 int.parse(checkpoint)
+@@ -1202,6 +1221,7 @@ fn create_identified(
+               history.fork_identified(
+                 db,
+                 history.ForkCreation(source, id, checkpoint, creation),
++                runtime.lifecycle_owners(state.host),
+               )
+             }
+             session_creation.ChildSession(
+@@ -1246,6 +1266,7 @@ fn create_identified(
+                   session_submission.encode(submitted),
+                   letter,
+                 ),
++                runtime.lifecycle_owners(state.host),
+               )
+             }
+           }
+diff --git a/src/albedo/daemon/server.gleam b/src/albedo/daemon/server.gleam
+index e773e9dcd78fb724d3f1eeba455848edd8365f7c..07cb1ddbc9ab0662faaeb7f047ece99bcd2bd98e 100644
+--- a/src/albedo/daemon/server.gleam
++++ b/src/albedo/daemon/server.gleam
+@@ -12,10 +12,12 @@ import albedo/daemon/http_wire
+ import albedo/daemon/listener
+ import albedo/daemon/quota
+ import albedo/daemon/registry.{type Config, type Message, Config, List, Shutdown}
++import albedo/daemon/session
+ import albedo/daemon/settings
+ import albedo/daemon/webhook_intake
+ import albedo/harness/credentials
+ import albedo/harness/extension
++import albedo/harness/extensions
+ import albedo/harness/runtime
+ import albedo/harness/usage_feed
+ import gleam/bit_array
+@@ -48,11 +50,21 @@ pub fn start(
+   config: Config,
+   port: Int,
+   webhook_port: Int,
++) -> Result(#(Int, Int), String) {
++  start_with_config(config, port, webhook_port, extensions.defaults())
++}
++
++/// Start the ordinary supervised daemon with an explicitly installed composition.
++pub fn start_with_config(
++  config: Config,
++  port: Int,
++  webhook_port: Int,
++  extension_config: extensions.Config,
+ ) -> Result(#(Int, Int), String) {
+   // Storage is the one thing this daemon cannot run without, so the runtime
+   // that owns it stays linked to the daemon; everything above it is supervised.
+   use host <- result.try(
+-    runtime.start(config.home <> "/albedo.sqlite")
++    runtime.start_with_config(config.home <> "/albedo.sqlite", extension_config)
+     |> result.replace_error("could not start runtime"),
+   )
+   use _ <- result.try(registry.prepare_storage(config, host))
+@@ -590,6 +602,13 @@ fn daemon(
+     },
+     fn(provider, endpoint) { runtime.model_names(host, provider, endpoint) },
+     fn() { actor.call(registry, 5000, List) },
++    fn() { runtime.installed(host) },
++    fn(id, op) {
++      use worker <- result.try(
++        actor.call(registry, 5000, registry.Lookup(id, _)),
++      )
++      session.state_operation(worker, op)
++    },
+     fn() { runtime.global(host) |> result.map(extension.searches) },
+   )
+ }
+@@ -684,6 +703,19 @@ fn daemon_route(
+ }
+ 
+ pub fn main() -> Nil {
++  run_main(start)
++}
++
++/// Claim the home before any supplied extension installation effects.
++pub fn main_with_config(extension_config: extensions.Config) -> Nil {
++  run_main(fn(config, port, webhook_port) {
++    start_with_config(config, port, webhook_port, extension_config)
++  })
++}
++
++fn run_main(
++  start_server: fn(Config, Int, Int) -> Result(#(Int, Int), String),
++) -> Nil {
+   let assert Ok(#(home, token)) = defaults()
+   let config =
+     Config(
+@@ -703,7 +735,7 @@ pub fn main() -> Nil {
+   }
+   // A fixed port gives services such as the proxy a stable base url.
+   let #(port, webhook_port) = case
+-    start(
++    start_server(
+       config,
+       setting("ALBEDO_PORT", 0, 0, 65_535),
+       setting("ALBEDO_WEBHOOK_PORT", 8088, 0, 65_535),
+diff --git a/src/albedo/daemon/session.gleam b/src/albedo/daemon/session.gleam
+index 900e5f999f4b3b6c62a12754c8e93d2c80a5647c..c0fa90bbf2afabb4485ee0d4ffb078aacc0fb7f8 100644
+--- a/src/albedo/daemon/session.gleam
++++ b/src/albedo/daemon/session.gleam
+@@ -25,6 +25,7 @@ import albedo/daemon/session_last_call
+ import albedo/daemon/session_namespace
+ import albedo/daemon/session_prompt
+ import albedo/daemon/session_provider
++import albedo/daemon/session_requirements
+ import albedo/daemon/session_run
+ import albedo/daemon/session_state
+ import albedo/daemon/session_submission
+@@ -177,6 +178,10 @@ pub fn submission_error(error: SubmissionError) -> String {
+ }
+ 
+ pub type Message {
++  ApplyIdle(
++    fn(store.Store, String) -> Result(json.Json, String),
++    Subject(Result(json.Json, String)),
++  )
+   Resume
+   /// An idle session started after a daemon restart because it waits on
+   /// work that will wake it: its extensions hear its last turn call again.
+@@ -257,6 +262,8 @@ pub type Message {
+   ReportCompacting(String, Subject(Nil))
+   /// An extension asks for a background call; see `extension.Session`.
+   CallInBackground(
++    Int,
++    Int,
+     types.Request,
+     requests.Prefix,
+     Subject(Result(Option(types.Usage), String)),
+@@ -397,6 +404,7 @@ pub fn start(
+         booting: None,
+         blocked_until: 0,
+         generation: generation,
++        composition_generation: 0,
+         tool_progress: tool_progress_state.new(),
+         progress_timer_token: 0,
+         progress_timer: None,
+@@ -1121,7 +1129,8 @@ fn handle(
+   // Anything a client sends counts as attention; a detached session goes quiet.
+   // Listing sessions reads their summaries and is not attention.
+   let state = case message {
+-    Submit(..)
++    ApplyIdle(..)
++    | Submit(..)
+     | ReadCapture(..)
+     | ChangeConfiguration(..)
+     | InterruptCaptured(..)
+@@ -1142,6 +1151,8 @@ fn handle(
+   // catches a turn that never started, such as one whose kernel failed to boot.
+   let state = settle(state)
+   case message {
++    ApplyIdle(run, reply) ->
++      answer(state, reply, session_configure.apply_idle(state, run))
+     ReadCapture(reply) -> answer(state, reply, capture_state(state))
+     ReadSummary(reply) -> answer(state, reply, summary_state(state))
+     ReadAwaited(reply) -> answer(state, reply, awaited(state))
+@@ -1745,8 +1756,15 @@ fn handle(
+         |> session_state.announce,
+       )
+     }
+-    CallInBackground(request, prefix, reply) ->
+-      actor.continue(start_background(state, request, prefix, reply))
++    CallInBackground(revision, composition_generation, request, prefix, reply) ->
++      actor.continue(start_background(
++        state,
++        revision,
++        composition_generation,
++        request,
++        prefix,
++        reply,
++      ))
+     BackgroundFinished(id, started, outcome) ->
+       case turn.owner(state.activity, id) {
+         Some(turn.Run(work: turn.Background(reply), ..) as run) -> {
+@@ -1969,9 +1987,16 @@ fn handle(
+         }
+       }
+     StartSummary(checkpoint, instructions, out, ack) ->
+-      case occupied(state) {
+-        True -> answer(state, ack, Error("session must be idle to rewind"))
+-        False ->
++      case
++        occupied(state),
++        session_requirements.descendant_allowed(
++          runtime.ledger(state.host),
++          state.info.id,
++        )
++      {
++        True, _ -> answer(state, ack, Error("session must be idle to rewind"))
++        False, Error(error) -> answer(state, ack, Error(error))
++        False, Ok(_) ->
+           case
+             kernel_or_park(
+               state,
+@@ -1995,6 +2020,7 @@ fn handle(
+               checkpoint,
+               summary,
+               expected_last,
++              runtime.lifecycle_owners(state.host),
+             )
+           {
+             Error(error) -> answer(state, reply, Error(error))
+@@ -2061,6 +2087,23 @@ fn forget(state: State) -> Nil {
+   cleanup_registrations(state.info.id)
+ }
+ 
++/// Authenticated native services resolve the session and serialize mutations
++/// with session activity. Ordinary model commands cannot access this bridge.
++pub fn state_operation(
++  session: Session,
++  op: command.StateOp,
++) -> Result(json.Json, String) {
++  case op {
++    command.ApplyIdle(run) ->
++      actor_call.try_call(session, 10_000, ApplyIdle(run, _))
++      |> result.replace_error(
++        "session state response unavailable; outcome unknown",
++      )
++      |> result.flatten
++    _ -> Error("service state operation unsupported")
++  }
++}
++
+ /// The registered command state seam: one operation in, session state out.
+ ///
+ /// Runs on whichever process invoked the command (the kernel's host-call
+@@ -2074,6 +2117,8 @@ fn command_op(
+   op: command.StateOp,
+ ) -> Result(json.Json, String) {
+   case op {
++    command.ApplyIdle(_) ->
++      Error("idle mutation requires the native service bridge")
+     command.ModelGet ->
+       Ok(selection_json(actor.call(session, 5000, ReadSelection)))
+     command.ModelSelect(model, provider, effort) ->
+@@ -2316,6 +2361,10 @@ fn discard(path: String) -> Nil
+ fn prepare_submission(
+   state: State,
+ ) -> Result(#(State, runtime.Session, extension.Upstream), SubmissionError) {
++  use _ <- result.try(
++    runtime.required_context_ready(state.host, state.info.id)
++    |> result.map_error(Rejected),
++  )
+   use _ <- result.try(workspace_ready(state))
+   use state <- result.try(
+     session_history.ensure_history(state) |> result.map_error(Rejected),
+@@ -2641,19 +2690,26 @@ fn admit(
+   reply: Subject(Result(Bool, SubmissionError)),
+ ) -> actor.Next(State, Message) {
+   // Anything a client submits counts as attention.
+-  let state = stirred(state)
+-  let closed = case submission.source {
+-    turn.Mail(..) -> family_closed(state)
+-    _ -> Ok(False)
++  let closed = {
++    use _ <- result.try(runtime.required_context_ready(
++      state.host,
++      state.info.id,
++    ))
++    case submission.source {
++      turn.Mail(..) -> family_closed(state)
++      _ -> Ok(False)
++    }
+   }
+   case closed {
+     Ok(True) -> answer(state, reply, Error(Rejected("session is closed")))
+     Error(error) -> answer(state, reply, Error(Rejected(error)))
+-    Ok(False) ->
++    Ok(False) -> {
++      let state = stirred(state)
+       case refused_image(state, submission) {
+         #(state, Some(reason)) -> answer(state, reply, Error(Rejected(reason)))
+         #(state, None) -> admit_within_limits(state, submission, reply)
+       }
++    }
+   }
+ }
+ 
+@@ -3137,6 +3193,8 @@ fn finish_turn(
+ /// needs no kernel: a released one does not stop it.
+ fn start_background(
+   state: State,
++  revision: Int,
++  composition_generation: Int,
+   request: types.Request,
+   prefix: requests.Prefix,
+   reply: Subject(Result(Option(types.Usage), String)),
+@@ -3148,7 +3206,24 @@ fn start_background(
+   case turn.running(state.activity) {
+     Some(_) -> refused(state, "the session is busy")
+     None ->
+-      case session_provider.configured_client(state) {
++      case
++        {
++          use current <- result.try(session_configuration.revision(
++            runtime.ledger(state.host),
++            state.info.id,
++          ))
++          use _ <- result.try(
++            case
++              current == revision
++              && state.composition_generation == composition_generation
++            {
++              True -> Ok(Nil)
++              False -> Error("configuration_changed")
++            },
++          )
++          session_provider.configured_client(state)
++        }
++      {
+         Ok(#(primed, client)) ->
+           session_run.start_background(
+             primed,
+@@ -3338,7 +3413,12 @@ fn observe(state: State, event: extension.SessionEvent) -> Nil {
+     Some(kernel) ->
+       runtime.observe(
+         kernel,
+-        background_handle(state.info.id, state.self),
++        background_handle(
++          runtime.ledger(state.host),
++          state.info.id,
++          state.self,
++          state.composition_generation,
++        ),
+         event,
+       )
+     None -> Nil
+@@ -3347,12 +3427,27 @@ fn observe(state: State, event: extension.SessionEvent) -> Nil {
+ 
+ /// What an observer may ask of this session. It travels to the observer, so
+ /// it captures the actor's subject, never the state and its transcript.
+-fn background_handle(id: String, self: Session) -> extension.Session {
++fn background_handle(
++  ledger: store.Store,
++  id: String,
++  self: Session,
++  composition_generation: Int,
++) -> extension.Session {
++  // Capture when the observer hears the sent/restored call, not when a later
++  // warming timer fires. The actor rechecks it before taking ownership.
++  let captured_revision = session_configuration.revision(ledger, id)
+   extension.Session(
+     id,
+     fn(request, prefix) {
++      use revision <- result.try(captured_revision)
+       case
+-        actor_call.try_call(self, 600_000, CallInBackground(request, prefix, _))
++        actor_call.try_call(self, 600_000, CallInBackground(
++          revision,
++          composition_generation,
++          request,
++          prefix,
++          _,
++        ))
+       {
+         Ok(outcome) -> outcome
+         Error(actor_call.TimedOut) ->
+@@ -3682,14 +3777,21 @@ fn admit_operation(
+     Error(error) -> answer(state, reply, Error(error))
+     Ok(Some(receipt)) -> answer(state, reply, Ok(receipt))
+     Ok(None) -> {
+-      let #(state, image_error) = refused_image(state, submission)
++      let readiness = runtime.required_context_ready(state.host, state.info.id)
++      let #(state, image_error) = case readiness {
++        Ok(_) -> refused_image(state, submission)
++        Error(_) -> #(state, None)
++      }
+       let refusal = case
++        readiness,
+         image_error,
+         turn.admit(state.activity, submission, list.length(state.steering))
+       {
+-        Some(reason), _ ->
++        Error(reason), _, _ ->
++          Some(operations.Rejection(409, "required_context_unavailable", reason))
++        _, Some(reason), _ ->
+           Some(operations.Rejection(409, "image_rejected", reason))
+-        _, turn.Reject(turn.Busy) -> {
++        _, _, turn.Reject(turn.Busy) -> {
+           case
+             turn.admit(turn.Resting, submission, list.length(state.steering))
+           {
+@@ -3707,13 +3809,13 @@ fn admit_operation(
+               ))
+           }
+         }
+-        _, turn.Reject(turn.Oversized) ->
++        _, _, turn.Reject(turn.Oversized) ->
+           Some(operations.Rejection(
+             413,
+             "input_too_large",
+             "prompt or activation exceeds its bounded size",
+           ))
+-        _, _ -> None
++        _, _, _ -> None
+       }
+       case refusal {
+         Some(reason) ->
+diff --git a/src/albedo/daemon/session_configuration.gleam b/src/albedo/daemon/session_configuration.gleam
+index 316c2caaa0e12f80f542c3753faec642a38c0d3b..2e648e3e5259031196ae2f3337659adcda5e7e96 100644
+--- a/src/albedo/daemon/session_configuration.gleam
++++ b/src/albedo/daemon/session_configuration.gleam
+@@ -519,3 +519,17 @@ fn mask_name_controls(bytes: BitArray, masked: BitArray) -> BitArray {
+     _ -> masked
+   }
+ }
++
++/// Configuration identity retained with an observer's saved request handle.
++/// Read failure must not authorize reuse of a request under unknown settings.
++pub fn revision(ledger: store.Store, session: String) -> Result(Int, String) {
++  store.query(ledger, fn(db) {
++    store.one(
++      db,
++      "SELECT config_revision FROM sessions WHERE id=?",
++      [sqlight.text(session)],
++      decode.field(0, decode.int, decode.success),
++      "session configuration is unavailable",
++    )
++  })
++}
+diff --git a/src/albedo/daemon/session_configure.gleam b/src/albedo/daemon/session_configure.gleam
+index f5fec7b5310ac578b7ae48b5b84b134262f8a655..76173baad7bb110fb083c7cb2d9279d06008ba71 100644
+--- a/src/albedo/daemon/session_configure.gleam
++++ b/src/albedo/daemon/session_configure.gleam
+@@ -12,9 +12,11 @@ import albedo/daemon/turn
+ import albedo/harness/context_limits
+ import albedo/harness/extension
+ import albedo/harness/extension/selection
++import albedo/harness/protect
+ import albedo/harness/runtime
+ import albedo/harness/runtime/catalog as session_catalog
+ import gleam/dict
++import gleam/json
+ import gleam/list
+ import gleam/option.{None, Some}
+ import gleam/result
+@@ -394,12 +396,7 @@ fn resolve_choices(
+     False -> {
+       use catalog <- result.try(session_catalog.inspect(
+         state.home,
+-        session_catalog.Inventory(
+-          runtime.ledger(state.host),
+-          runtime.installed(state.host),
+-          runtime.quarantined(state.host),
+-          runtime.base_defaults(state.host),
+-        ),
++        runtime.inventory(state.host),
+         state.info.id,
+       ))
+       use _ <- result.try(
+@@ -522,3 +519,17 @@ fn resolve_aliases(
+   )
+   Ok(dict.values(resolved))
+ }
++
++/// Trusted native local work while the session owns idle order. The callback
++/// owns its store transaction and must never reenter a session state bridge.
++/// Catchable failures return errors; a caller timeout leaves outcome unknown.
++pub fn apply_idle(
++  state: session_state.State(message),
++  run: fn(store.Store, String) -> Result(json.Json, String),
++) -> Result(json.Json, String) {
++  case turn.running(state.activity) != None || state.booting != None {
++    True -> Error("session_busy")
++    False ->
++      protect.guarded(fn() { run(runtime.ledger(state.host), state.info.id) })
++  }
++}
+diff --git a/src/albedo/daemon/session_extensions.gleam b/src/albedo/daemon/session_extensions.gleam
+index f3d5a265b18b59e374e56b6a8062c50c37b4516f..c6816f20afe51107e83a089b3196b2b4dffe502b 100644
+--- a/src/albedo/daemon/session_extensions.gleam
++++ b/src/albedo/daemon/session_extensions.gleam
+@@ -50,6 +50,13 @@ fn apply(
+   case turn.running(state.activity) != None || state.booting != None {
+     True -> #(state, Error("session must be idle to reload"))
+     False -> {
++      // A killed observer may already have queued a saved request behind this
++      // reload. Invalidate its handle even if replacement subsequently fails.
++      let state =
++        session_state.State(
++          ..state,
++          composition_generation: state.composition_generation + 1,
++        )
+       let previous = runtime.peek_prompt(state.host, state.info.id)
+       let previous_tools = option.map(state.kernel, runtime.tools)
+       case run() {
+diff --git a/src/albedo/daemon/session_requirements.gleam b/src/albedo/daemon/session_requirements.gleam
+new file mode 100644
+index 0000000000000000000000000000000000000000..8c87bc5f37b4135d4301c6e4e71e336aef10ce5c
+--- /dev/null
++++ b/src/albedo/daemon/session_requirements.gleam
+@@ -0,0 +1,136 @@
++//// Durable host admission requirements survive missing or quarantined owners.
++//// Capability names are generic: only complete active contributors satisfy them.
++
++import albedo/daemon/store
++import gleam/dynamic/decode
++import gleam/list
++import gleam/result
++import sqlight
++
++pub fn initialise(ledger: store.Store) -> Result(Nil, String) {
++  store.query(ledger, initialise_in)
++}
++
++const schema =
++  "CREATE TABLE session_requirements(session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,capability TEXT NOT NULL,PRIMARY KEY(session,capability))"
++
++/// The core migration marker distinguishes a stock upgrade from lost storage.
++/// Initialization owns this transaction; callers must not nest it in another.
++pub fn initialise_in(db: sqlight.Connection) -> Result(Nil, String) {
++  store.transaction(db, fn() {
++    use _ <- result.try(store.exec(
++      db,
++      "CREATE TABLE IF NOT EXISTS migrations(name TEXT PRIMARY KEY,applied_at INTEGER NOT NULL)",
++    ))
++    use marked <- result.try(store.rows(
++      db,
++      "SELECT name FROM migrations WHERE name='session_requirements_v1'",
++      [],
++      decode.field(0, decode.string, decode.success),
++    ))
++    use existing <- result.try(
++      store.rows(
++        db,
++        "SELECT type,sql FROM sqlite_master WHERE name='session_requirements'",
++        [],
++        {
++          use kind <- decode.field(0, decode.string)
++          use definition <- decode.field(1, decode.string)
++          decode.success(#(kind, definition))
++        },
++      ),
++    )
++    case marked, existing {
++      [], [] -> {
++        use _ <- result.try(store.exec(db, schema))
++        store.exec(
++          db,
++          "INSERT INTO migrations(name,applied_at) VALUES('session_requirements_v1',unixepoch())",
++        )
++      }
++      ["session_requirements_v1"], [#("table", definition)]
++        if definition == schema
++      -> Ok(Nil)
++      _, _ -> Error("session requirements storage is missing or incompatible")
++    }
++  })
++}
++
++/// Call with the same connection and transaction as the owner's binding write.
++pub fn require_in(
++  db: sqlight.Connection,
++  session: String,
++  capability: String,
++) -> Result(Nil, String) {
++  store.run(
++    db,
++    "INSERT OR IGNORE INTO session_requirements(session,capability) VALUES(?,?)",
++    [sqlight.text(session), sqlight.text(capability)],
++  )
++}
++
++/// Only explicit authorized unbinding or native deletion releases requirements.
++pub fn release_in(
++  db: sqlight.Connection,
++  session: String,
++  capability: String,
++) -> Result(Nil, String) {
++  store.run(
++    db,
++    "DELETE FROM session_requirements WHERE session=? AND capability=?",
++    [sqlight.text(session), sqlight.text(capability)],
++  )
++}
++
++/// Missing or unreadable requirement storage is an admission error, never empty.
++pub fn required_in(
++  db: sqlight.Connection,
++  session: String,
++) -> Result(List(String), String) {
++  store.rows(
++    db,
++    "SELECT capability FROM session_requirements WHERE session=? ORDER BY capability",
++    [sqlight.text(session)],
++    decode.field(0, decode.string, decode.success),
++  )
++  |> result.map_error(fn(error) {
++    "session requirements unavailable: " <> error
++  })
++}
++
++pub fn check(
++  ledger: store.Store,
++  session: String,
++  active: List(String),
++) -> Result(Nil, String) {
++  use required <- result.try(store.query(ledger, required_in(_, session)))
++  list.try_each(required, fn(capability) {
++    case list.contains(active, capability) {
++      True -> Ok(Nil)
++      False -> Error("required session capability unavailable: " <> capability)
++    }
++  })
++}
++
++/// Until inheritance is supported, never manufacture an unguarded descendant.
++/// Runs before native writes even when the entire contributing owner is absent.
++pub fn descendant_allowed_in(
++  db: sqlight.Connection,
++  session: String,
++) -> Result(Nil, String) {
++  use required <- result.try(required_in(db, session))
++  case required {
++    [] -> Ok(Nil)
++    _ ->
++      Error(
++        "session requires capabilities; descendant inheritance is unavailable",
++      )
++  }
++}
++
++pub fn descendant_allowed(
++  ledger: store.Store,
++  session: String,
++) -> Result(Nil, String) {
++  store.query(ledger, descendant_allowed_in(_, session))
++}
+diff --git a/src/albedo/daemon/session_run.gleam b/src/albedo/daemon/session_run.gleam
+index 544558acfc702374e673b80cda9cb2ba3a113581..f9f4876189b9d750cca58263112301b906fa272a 100644
+--- a/src/albedo/daemon/session_run.gleam
++++ b/src/albedo/daemon/session_run.gleam
+@@ -5,6 +5,7 @@ import albedo/daemon/context_snapshot
+ import albedo/daemon/conversation
+ import albedo/daemon/events
+ import albedo/daemon/requests
++import albedo/daemon/session_requirements
+ import albedo/daemon/session_state
+ import albedo/daemon/session_submission
+ import albedo/daemon/transcript
+@@ -369,7 +370,7 @@ pub fn start(
+       tool_progress_finish_fn(owner, run_id, messages),
+       commit_fn(owner, run_id, messages, waiting: 10_000),
+       fits_fn(owner, run_id, messages, waiting: 10_000),
+-      fn(request, observation, compacted) {
++      fn(request, observation, compacted, captured) {
+         let snapshot =
+           context_snapshot.from_request(
+             Some(usage.now()),
+@@ -379,6 +380,7 @@ pub fn start(
+             request,
+             observation,
+           )
++          |> context_snapshot.with_request_context(captured)
+         // Inspection and post-compaction cleanup must not kill the turn if
+         // the session actor stalls; leave the message queued after the bound.
+         report(owner, messages.context(run_id, snapshot, compacted, _))
+@@ -457,6 +459,14 @@ pub fn start_background(
+   let client = stoppable(client, owner, stop)
+   // The worker's closures must capture these fields, never `state`: the
+   // session state carries the loaded transcript.
++  let host = state.host
++  let session = state.info.id
++  let admission = case option.or(state.kernel, state.released) {
++    Some(kernel) -> fn() { runtime.admit(host, kernel) }
++    None -> fn() {
++      session_requirements.check(runtime.ledger(host), session, [])
++    }
++  }
+   let worker =
+     loop.CallContext(
+       runtime.ledger(state.host),
+@@ -465,6 +475,7 @@ pub fn start_background(
+       state.info.provider,
+       run_id,
+       None,
++      admission,
+     )
+   let pid =
+     process.spawn_unlinked(fn() {
+diff --git a/src/albedo/daemon/session_state.gleam b/src/albedo/daemon/session_state.gleam
+index 8932af9b48acbb0b6daba48c629c43f29c8daa50..87a32f31dfb16a6cc870781e74634893661feb86 100644
+--- a/src/albedo/daemon/session_state.gleam
++++ b/src/albedo/daemon/session_state.gleam
+@@ -60,6 +60,8 @@ pub type State(message) {
+     booting: Option(#(Int, List(message))),
+     blocked_until: Int,
+     generation: String,
++    /// Invalidates saved background handles when composition reload is attempted.
++    composition_generation: Int,
+     tool_progress: tool_progress.Projection,
+     progress_timer_token: Int,
+     progress_timer: Option(process.Timer),
+diff --git a/src/albedo/harness/command.gleam b/src/albedo/harness/command.gleam
+index 945d92cbf20c8cb3f0f6c39adcde48f9d437c51f..6b7f55bca8a51fce91071c5c73af7d28dfd5e4dd 100644
+--- a/src/albedo/harness/command.gleam
++++ b/src/albedo/harness/command.gleam
+@@ -7,6 +7,7 @@
+ //// inside that actor must never run a command: its state calls would deadlock
+ //// against the actor it is running in.
+ 
++import albedo/daemon/store
+ import albedo/harness/extensions/python/kernel
+ import albedo/harness/host
+ import albedo/harness/protect
+@@ -45,6 +46,9 @@ pub type Outcome {
+ /// its registered bridge, reusing its ordinary message handlers; an unknown
+ /// operation is unrepresentable.
+ pub type StateOp {
++  /// Trusted native service mutation serialized while the session is idle.
++  /// Own the store transaction; never reenter a session bridge.
++  ApplyIdle(run: fn(store.Store, String) -> Result(json.Json, String))
+   ModelGet
+   ModelSelect(model: String, provider: Option(String), effort: Option(String))
+   EffortGet
+diff --git a/src/albedo/harness/compaction.gleam b/src/albedo/harness/compaction.gleam
+index 2c98cd96e1e656e141cac98d02531455f79d1fec..2487b74ea0f7245cd89cb847cddaec374b514d3d 100644
+--- a/src/albedo/harness/compaction.gleam
++++ b/src/albedo/harness/compaction.gleam
+@@ -91,7 +91,11 @@ pub type Reader {
+ 
+ /// Whether the model reads image input: `None` when no catalog says.
+ pub fn reads_images(context: Context) -> Option(Bool) {
+-  case context.reader {
++  reader_images(context.reader)
++}
++
++pub fn reader_images(reader: Option(Reader)) -> Option(Bool) {
++  case reader {
+     Some(Reader(_, [_, ..] as modalities)) ->
+       Some(list.contains(modalities, "image"))
+     _ -> None
+@@ -192,6 +196,16 @@ fn estimated_window(
+   }
+ }
+ 
++pub fn configured_capacity(
++  configured: Option(Int),
++  catalog: Option(Capacity),
++) -> Option(Capacity) {
++  case configured {
++    Some(tokens) -> Some(Capacity(tokens, "configured contextWindowTokens"))
++    None -> catalog
++  }
++}
++
+ /// Groups `units`, each with its items and estimated token cost, into chunks
+ /// under `budget`, keeping an oversized unit whole, for summarizer requests
+ /// that fold a long eviction a piece at a time.
+@@ -510,6 +524,14 @@ pub type View {
+ pub type Strategy {
+   Strategy(
+     name: String,
++    /// Resolve genuine capacity and validated settings once per preparation.
++    resolve: fn(Option(Capacity), Option(Reader)) -> Result(Resolved, String),
++  )
++}
++
++pub type Resolved {
++  Resolved(
++    capacity: Option(Capacity),
+     /// The request under the saved state. It never writes state or calls a
+     /// model, so a request can be inspected or rebuilt without changing it.
+     project: fn(Context, List(types.Input)) -> Result(View, String),
+@@ -523,7 +545,7 @@ pub type Strategy {
+ /// first when forced or due. A request compacts at most once, so the
+ /// projection after a compaction is sent even if it is still due.
+ pub fn prepare(
+-  strategy: Strategy,
++  strategy: Resolved,
+   context: Context,
+   history: List(types.Input),
+ ) -> Result(Prepared, String) {
+@@ -554,7 +576,7 @@ pub fn prepare(
+ /// compacting even when due: building it changes nothing, so it can stand in
+ /// for a request sent earlier.
+ pub fn project(
+-  strategy: Strategy,
++  strategy: Resolved,
+   context: Context,
+   history: List(types.Input),
+ ) -> Result(Prepared, String) {
+diff --git a/src/albedo/harness/extension.gleam b/src/albedo/harness/extension.gleam
+index 9b49cf4702b7ef1ff939946d7bb392d105576d9b..86e1869351107ac7fbbb566db7d6f1ab04e9f248 100644
+--- a/src/albedo/harness/extension.gleam
++++ b/src/albedo/harness/extension.gleam
+@@ -13,6 +13,8 @@ import albedo/harness/host
+ import albedo/harness/oauth
+ import albedo/harness/page
+ import albedo/harness/protect
++import albedo/harness/request_context
++import albedo/harness/session_lifecycle
+ import albedo/harness/web_search
+ import albedo/openai_api/types
+ import gleam/bool
+@@ -22,6 +24,7 @@ import gleam/http
+ import gleam/http/request
+ import gleam/http/response
+ import gleam/int
++import gleam/json
+ import gleam/list
+ import gleam/option.{type Option, None, Some}
+ import gleam/result
+@@ -278,6 +281,14 @@ pub type Cleaner =
+   fn(sqlight.Connection, String) -> Result(Nil, String)
+ 
+ pub type Plugin {
++  /// Captures bounded read-only context once per prepared request.
++  RequestContextPlugin(
++    prepare: fn(request_context.Input) ->
++      Result(request_context.Contribution, String),
++    required: Bool,
++  )
++  /// Durable creation hooks, independent of per-session enablement.
++  SessionLifecyclePlugin(contribution: session_lifecycle.Contribution)
+   ContextPlugin(load: fn(String) -> Result(String, String))
+   ToolPlugin(
+     instructions: String,
+@@ -372,6 +383,8 @@ pub type Daemon {
+     /// Catalog model ids for a provider extension and endpoint.
+     models: fn(String, Option(String)) -> List(String),
+     sessions: fn() -> List(conversation.Info),
++    declarations: fn() -> List(Extension),
++    state: fn(String, command.StateOp) -> Result(json.Json, String),
+     searches: fn() -> Result(List(web_search.Provider), String),
+   )
+ }
+@@ -465,6 +478,49 @@ fn quarantined(extension: Extension, reason: String) -> Quarantined {
+   Quarantined(extension.name, extension.description, reason)
+ }
+ 
++/// Retain canonical declarations before installation discards failed owners.
++/// A duplicate's quarantine cannot change the first owner's availability.
++pub fn lifecycle_owners(
++  declarations: List(Extension),
++  installed: List(Extension),
++  failures: List(Quarantined),
++) -> List(session_lifecycle.Owner) {
++  let #(canonical, _) = distinctly_named(declarations)
++  list.filter_map(canonical, fn(declaration) {
++    let contributions =
++      plugin_values([declaration], fn(_, plugin) {
++        case plugin {
++          SessionLifecyclePlugin(value) -> Ok(value)
++          _ -> Error(Nil)
++        }
++      })
++    case contributions {
++      [] -> Error(Nil)
++      _ -> {
++        let ready =
++          list.any(installed, fn(ext) { ext.name == declaration.name })
++        let availability = case ready {
++          True -> session_lifecycle.Ready
++          False -> {
++            // Canonical installation failures follow duplicate-name rejections.
++            let reason =
++              list.reverse(failures)
++              |> list.find(fn(failure) { failure.name == declaration.name })
++              |> result.map(fn(failure) { failure.reason })
++              |> result.unwrap("owner was not installed")
++            session_lifecycle.Quarantined(reason)
++          }
++        }
++        Ok(session_lifecycle.Owner(
++          declaration.name,
++          availability,
++          contributions,
++        ))
++      }
++    }
++  })
++}
++
+ /// Split `installed` in order: each extension `check` accepts is kept, and
+ /// each one it refuses is quarantined with the reason it gave. `check` sees
+ /// what has been kept so far, since a conflict is with an earlier one.
+@@ -972,3 +1028,19 @@ fn overlapping_routes(routes: List(String)) -> Bool {
+       || overlapping_routes(rest)
+   }
+ }
++
++/// Required request declarations survive quarantine so saved selection cannot
++/// silently lose a mandatory contributor. The first declaration owns the name.
++pub fn required_request_context(
++  declarations: List(Extension),
++) -> List(Extension) {
++  let #(canonical, _) = distinctly_named(declarations)
++  list.filter(canonical, fn(declaration) {
++    list.any(declaration.plugins, fn(plugin) {
++      case plugin {
++        RequestContextPlugin(_, True) -> True
++        _ -> False
++      }
++    })
++  })
++}
+diff --git a/src/albedo/harness/extension/composition.gleam b/src/albedo/harness/extension/composition.gleam
+index c7830b252dfcef228da3226214c778957611105c..26cb5c4867bcf5d2cf0f946e23c52f266debfbf0 100644
+--- a/src/albedo/harness/extension/composition.gleam
++++ b/src/albedo/harness/extension/composition.gleam
+@@ -8,6 +8,7 @@ import albedo/harness/command
+ import albedo/harness/extension
+ import albedo/harness/hook
+ import albedo/harness/protect
++import albedo/harness/request_context
+ import gleam/io
+ import gleam/list
+ import gleam/option
+@@ -237,6 +238,60 @@ pub fn extensions(composition: Composition) -> List(extension.Extension) {
+   composition.extensions
+ }
+ 
++/// Captures belong only to fully active bundles. A required requested bundle
++/// that failed static/managed loading refuses preparation before any callback.
++pub fn request_contributors(
++  composition: Composition,
++) -> Result(
++  List(
++    #(
++      String,
++      fn(request_context.Input) -> Result(request_context.Contribution, String),
++    ),
++  ),
++  String,
++) {
++  let active = list.map(composition.extensions, fn(item) { item.name })
++  use _ <- result.try(
++    list.try_each(composition.requested, fn(item) {
++      let required =
++        list.any(item.plugins, fn(plugin) {
++          case plugin {
++            extension.RequestContextPlugin(_, True) -> True
++            _ -> False
++          }
++        })
++      case required && !list.contains(active, item.name) {
++        True ->
++          Error("required request context " <> item.name <> " is unavailable")
++        False -> Ok(Nil)
++      }
++    }),
++  )
++  Ok(
++    list.flat_map(composition.extensions, fn(item) {
++      list.filter_map(item.plugins, fn(plugin) {
++        case plugin {
++          extension.RequestContextPlugin(callback, _) ->
++            Ok(#(item.name, callback))
++          _ -> Error(Nil)
++        }
++      })
++    }),
++  )
++}
++
++pub fn has_request_context(composition: Composition) -> Bool {
++  list.any(composition.requested, fn(item) {
++    list.any(item.plugins, fn(plugin) {
++      case plugin {
++        extension.RequestContextPlugin(..) -> True
++        _ -> False
++      }
++    })
++  })
++}
++
+ /// Nonempty context blocks, labelled by the extension that supplied them.
+ pub fn context(composition: Composition) -> List(#(String, String)) {
+   contributions(composition)
+diff --git a/src/albedo/harness/extension/selection.gleam b/src/albedo/harness/extension/selection.gleam
+index ae00cb07251dd71f9b77ff4b622399ed36c8ebdd..c757ba4a5befbf7334f3cf15335674f26af4d035 100644
+--- a/src/albedo/harness/extension/selection.gleam
++++ b/src/albedo/harness/extension/selection.gleam
+@@ -529,6 +529,8 @@ pub fn summaries(
+         list.map(ext.plugins, fn(plugin) {
+           case plugin {
+             extension.ContextPlugin(_) -> "context"
++            extension.RequestContextPlugin(..) -> "request_context"
++            extension.SessionLifecyclePlugin(_) -> "session_lifecycle"
+             extension.ToolPlugin(_, _, _, _) -> "tool"
+             extension.ManagedPlugin(_) -> "managed"
+             extension.CommandPlugin(_) -> "commands"
+@@ -619,3 +621,43 @@ pub fn select(
+   }
+   exclusive(selected, is_compaction, chosen)
+ }
++
++/// Check desired selection against retained required declarations before
++/// admission or composition. Disabled failures remain harmless; installation
++/// availability is fixed for this runtime, independent of a cached composition.
++pub fn required_context_ready(
++  ledger: store.Store,
++  installed: List(extension.Extension),
++  declarations: List(extension.Extension),
++  default_enabled: List(String),
++  session: String,
++) -> Result(Nil, String) {
++  let unavailable =
++    list.filter(declarations, fn(declaration) {
++      !list.any(installed, fn(item) { item.name == declaration.name })
++    })
++  case unavailable {
++    [] -> Ok(Nil)
++    _ -> {
++      use overrides <- result.try(overrides(ledger, session))
++      let declared = list.append(installed, unavailable)
++      let selected =
++        select(
++          declared,
++          resolved_defaults(declared, default_enabled),
++          overrides,
++        )
++      list.try_each(unavailable, fn(declaration) {
++        case list.any(selected, fn(item) { item.name == declaration.name }) {
++          True ->
++            Error(
++              "required request context "
++              <> declaration.name
++              <> " is unavailable",
++            )
++          False -> Ok(Nil)
++        }
++      })
++    }
++  }
++}
+diff --git a/src/albedo/harness/extensions/lcm/extension.gleam b/src/albedo/harness/extensions/lcm/extension.gleam
+index 7de9315d24b91fa4386c77c289db8954c0b79de4..020cbc3c2ebf651d9171cf21ac196680b8c2f966 100644
+--- a/src/albedo/harness/extensions/lcm/extension.gleam
++++ b/src/albedo/harness/extensions/lcm/extension.gleam
+@@ -59,17 +59,17 @@ fn bundle(
+     ["lcm-memory"],
+     [
+       harness_extension.CompactionPlugin(
+-        compaction.Strategy(
+-          "lcm",
+-          fn(context, history) {
+-            use config <- result.try(resolve())
+-            project(config, context, history)
+-          },
+-          fn(context, history) {
+-            use config <- result.try(resolve())
+-            compact(config, context, history)
+-          },
+-        ),
++        compaction.Strategy("lcm", fn(catalog, _) {
++          use config <- result.map(resolve())
++          compaction.Resolved(
++            compaction.configured_capacity(
++              config.context_window_tokens,
++              catalog,
++            ),
++            fn(context, history) { project(config, context, history) },
++            fn(context, history) { compact(config, context, history) },
++          )
++        }),
+       ),
+       harness_extension.CleanPlugin(graph.forget_session),
+     ],
+diff --git a/src/albedo/harness/extensions/rolling/extension.gleam b/src/albedo/harness/extensions/rolling/extension.gleam
+index c852fff84c7c8a026d720938f0558ebe8ed32ae7..fe392a1f3bf7a6cc02becd34e4effd4550a9c258 100644
+--- a/src/albedo/harness/extensions/rolling/extension.gleam
++++ b/src/albedo/harness/extensions/rolling/extension.gleam
+@@ -113,17 +113,14 @@ pub fn with_settings() -> compaction.Strategy {
+ 
+ /// The strategy under the settings `resolve` answers per request.
+ fn strategy(resolve: fn() -> Result(Config, String)) -> compaction.Strategy {
+-  compaction.Strategy(
+-    "rolling",
+-    fn(context, history) {
+-      use config <- result.try(resolve())
+-      project(config, context, history)
+-    },
+-    fn(context, history) {
+-      use config <- result.try(resolve())
+-      compact(config, context, history)
+-    },
+-  )
++  compaction.Strategy("rolling", fn(catalog, _) {
++    use config <- result.map(resolve())
++    compaction.Resolved(
++      compaction.configured_capacity(config.context_window_tokens, catalog),
++      fn(context, history) { project(config, context, history) },
++      fn(context, history) { compact(config, context, history) },
++    )
++  })
+ }
+ 
+ /// The saved summary, recap, and tail this history still matches, or the
+diff --git a/src/albedo/harness/extensions/snapcompact/extension.gleam b/src/albedo/harness/extensions/snapcompact/extension.gleam
+index d079f2ff6ede75c0b6504d7f649b36d46ae1662c..22639ef779a439e5e63212dd304056f1973187d5 100644
+--- a/src/albedo/harness/extensions/snapcompact/extension.gleam
++++ b/src/albedo/harness/extensions/snapcompact/extension.gleam
+@@ -305,23 +305,32 @@ fn compaction_plugins() -> List(extension.Plugin) {
+ fn strategy_with(
+   resolve: fn() -> Result(Config, String),
+ ) -> compaction.Strategy {
+-  compaction.Strategy(
+-    "snapcompact",
+-    fn(context, history) {
+-      use valid <- result.try(result.try(resolve(), validate_config))
+-      case compaction.reads_images(context) {
+-        Some(False) -> text_project(context, history)
+-        _ -> visual_project(valid, context, history)
+-      }
+-    },
+-    fn(context, history) {
+-      use valid <- result.try(result.try(resolve(), validate_config))
+-      case compaction.reads_images(context) {
+-        Some(False) -> rolling.with_settings().compact(context, history)
+-        _ -> visual_compact(valid, context, history)
++  compaction.Strategy("snapcompact", fn(catalog, reader) {
++    use valid <- result.try(result.try(resolve(), validate_config))
++    case compaction.reader_images(reader) {
++      Some(False) -> {
++        use fallback <- result.map(rolling.with_settings().resolve(
++          catalog,
++          reader,
++        ))
++        compaction.Resolved(..fallback, project: fn(context, history) {
++          use view <- result.map(fallback.project(context, history))
++          text_view(view)
++        })
+       }
+-    },
+-  )
++      _ ->
++        Ok(
++          compaction.Resolved(
++            option.or(
++              catalog,
++              compaction.configured_capacity(valid.context_window_tokens, None),
++            ),
++            fn(context, history) { visual_project(valid, context, history) },
++            fn(context, history) { visual_compact(valid, context, history) },
++          ),
++        )
++    }
++  })
+ }
+ 
+ /// The text fallback keeps its summary in rolling's tables.
+@@ -342,23 +351,17 @@ fn initialise(ledger: store.Store) -> Result(Nil, String) {
+ 
+ /// A model without image input cannot read frames: rolling's text summary
+ /// stands in, and the frame archive waits for a model that reads images.
+-fn text_project(
+-  context: compaction.Context,
+-  history: List(types.Input),
+-) -> Result(compaction.View, String) {
+-  use view <- result.try(rolling.with_settings().project(context, history))
+-  Ok(
+-    compaction.View(
+-      ..view,
+-      observation: option.map(view.observation, fn(observed) {
+-        compaction.Observation(
+-          ..observed,
+-          strategy: "snapcompact",
+-          source: "model reads no image input; rolling text compaction: "
+-            <> observed.source,
+-        )
+-      }),
+-    ),
++fn text_view(view: compaction.View) -> compaction.View {
++  compaction.View(
++    ..view,
++    observation: option.map(view.observation, fn(observed) {
++      compaction.Observation(
++        ..observed,
++        strategy: "snapcompact",
++        source: "model reads no image input; rolling text compaction: "
++          <> observed.source,
++      )
++    }),
+   )
+ }
+ 
+diff --git a/src/albedo/harness/loop.gleam b/src/albedo/harness/loop.gleam
+index a68859d319df910a3b713e842579e05c286876f7..083e066eca69e9eef1f10c4d8d166207aad12952 100644
+--- a/src/albedo/harness/loop.gleam
++++ b/src/albedo/harness/loop.gleam
+@@ -18,6 +18,7 @@ import albedo/harness/compaction
+ import albedo/harness/extension
+ import albedo/harness/extensions/python/cells as journal
+ import albedo/harness/hook
++import albedo/harness/request_context
+ import albedo/harness/runtime
+ import albedo/openai_api/types
+ import gleam/dynamic/decode
+@@ -52,8 +53,12 @@ pub type Loop {
+       Result(#(Int, Option(Int)), String),
+     /// Appends image fit rows ahead of the request that needs them.
+     commit_fits: fn(List(transcript.ImageFit)) -> Result(Nil, String),
+-    record_context: fn(types.Request, Option(compaction.Observation), Bool) ->
+-      Nil,
++    record_context: fn(
++      types.Request,
++      Option(compaction.Observation),
++      Bool,
++      request_context.Final,
++    ) -> Nil,
+     record_usage: fn(usage.Metadata) -> Result(Nil, String),
+     drain_steering: fn() -> Result(List(types.Input), String),
+     /// Reports the pin's compaction baseline (`Some`) or that compaction
+@@ -90,10 +95,13 @@ pub type CallContext {
+     profile: String,
+     run_id: String,
+     report_call: Option(fn(extension.SentCall) -> Nil),
++    admit: fn() -> Result(Nil, String),
+   )
+ }
+ 
+ fn call_context(state: Loop) -> CallContext {
++  let host = state.host
++  let kernel = state.kernel
+   CallContext(
+     runtime.ledger(state.host),
+     state.upstream,
+@@ -101,6 +109,7 @@ fn call_context(state: Loop) -> CallContext {
+     state.profile,
+     state.run_id,
+     Some(state.report_call),
++    fn() { runtime.admit(host, kernel) },
+   )
+ }
+ 
+@@ -135,12 +144,28 @@ pub fn run(
+   id: String,
+   inputs: List(types.Input),
+   step: Int,
++) -> Result(Nil, String) {
++  run_request(
++    state,
++    id,
++    inputs,
++    step,
++    request_context.query(list.reverse(inputs)),
++  )
++}
++
++fn run_request(
++  state: Loop,
++  id: String,
++  inputs: List(types.Input),
++  step: Int,
++  source_query: String,
+ ) -> Result(Nil, String) {
+   use _ <- result.try(checkpoint(state))
+   use prompted <- result.try(prompted(state, inputs, step))
+   case prompted {
+     None -> Ok(Nil)
+-    Some(inputs) -> converse(state, id, inputs, step)
++    Some(inputs) -> converse(state, id, inputs, step, source_query)
+   }
+ }
+ 
+@@ -149,11 +174,27 @@ fn converse(
+   id: String,
+   inputs: List(types.Input),
+   step: Int,
++  source_query: String,
+ ) -> Result(Nil, String) {
+   use inputs <- result.try(fit_history(state, inputs))
+   let original = list.reverse(inputs)
+-  use prepared <- result.try(prepare(state, original, False))
+-  let #(state, history) = settle_pin(state, original, prepared.inputs)
++  use preparation <- result.try(prepare(state, original, False, source_query))
++  let prepared = preparation.history
++  let previous_state = state
++  let history = prepared.inputs
++  let state = Loop(..state, pin: settled(state.pin, original, history))
++  let current_instructions = request_instructions(state)
++  let final =
++    request_context.reconcile(
++      request(state, current_instructions, history),
++      preparation.captured,
++      runtime.request_estimate,
++      0,
++    )
++  let request = final.request
++  state.record_context(request, prepared.observation, prepared.compacted, final)
++  use _ <- result.try(ready(final))
++  let #(state, _) = settle_pin(previous_state, original, history)
+   case state.pin {
+     Unpinned ->
+       state.report_pin(Some(
+@@ -162,9 +203,6 @@ fn converse(
+     Pinned(..) -> Nil
+   }
+   let state = warn_small(state, prepared.observation)
+-  let current_instructions = request_instructions(state)
+-  let request = request(state, current_instructions, history)
+-  state.record_context(request, prepared.observation, prepared.compacted)
+   let answer = fn(request: types.Request, original: List(types.Input)) {
+     call(
+       call_context(state),
+@@ -212,6 +250,20 @@ fn converse(
+     False -> Ok(answered)
+     True -> {
+       let nudge = types.User(speechless_nudge)
++      use _ <- result.try(compaction.require(
++        case final.captured.budget.capacity_tokens {
++          None -> True
++          Some(capacity) ->
++            runtime.request_estimate(
++              types.Request(
++                ..request,
++                input: list.append(request.input, [nudge]),
++              ),
++            )
++            <= capacity
++        },
++        "retry exceeds known context window",
++      ))
+       case state.publish(view.Retry(state.run_id, 2, speechless_retry, 0)) {
+         False -> Error("cancelled")
+         True ->
+@@ -278,11 +330,12 @@ fn converse(
+                 [] -> state
+                 _ -> Loop(..state, held: state.held + 1)
+               }
+-              run(
++              run_request(
+                 state,
+                 id,
+                 unshift(inputs, [replay, held, steering]),
+                 step + 1,
++                continued_query(source_query, steering),
+               )
+             }
+           }
+@@ -306,11 +359,12 @@ fn converse(
+       use _ <- result.try(commit_hooked(state, added, conversation.Tool))
+       use steering <- result.try(state.drain_steering())
+       use _ <- result.try(state.commit([], conversation.Model, None))
+-      run(
++      run_request(
+         state,
+         id,
+         unshift(inputs, [replay, results, added, steering]),
+         step + 1,
++        continued_query(source_query, steering),
+       )
+     }
+   }
+@@ -370,7 +424,13 @@ pub fn compact(state: Loop, inputs: List(types.Input)) -> Result(Nil, String) {
+   use _ <- result.try(checkpoint(state))
+   // `inputs` accumulates newest-first; strategies read chronological history.
+   let original = list.reverse(inputs)
+-  use prepared <- result.try(prepare(state, original, True))
++  use preparation <- result.try(prepare(
++    state,
++    original,
++    True,
++    request_context.query(original),
++  ))
++  let prepared = preparation.history
+   let history = prepared.inputs
+   // The projection keeps a verbatim tail, so everything before the shared
+   // suffix is what the strategy's replacement stands in for.
+@@ -379,6 +439,28 @@ pub fn compact(state: Loop, inputs: List(types.Input)) -> Result(Nil, String) {
+   // A source-backed fold can change the projection while its verbatim tail
+   // still covers every original input. Report that committed change as well.
+   let changed = prepared.compacted || evicted > 0
++  let instructions = case changed {
++    True -> kernel_instructions(state.kernel)
++    False -> request_instructions(state)
++  }
++  // A forced compaction keeps the default options; an ordinary turn sets effort.
++  let final =
++    request_context.reconcile(
++      types.Request(
++        ..request(state, instructions, history),
++        options: types.defaults,
++      ),
++      preparation.captured,
++      runtime.request_estimate,
++      0,
++    )
++  state.record_context(
++    final.request,
++    prepared.observation,
++    prepared.compacted,
++    final,
++  )
++  use _ <- result.try(ready(final))
+   let _ = case changed {
+     True -> {
+       // The summary replaced the history the pinned prompt was cached with.
+@@ -399,19 +481,6 @@ pub fn compact(state: Loop, inputs: List(types.Input)) -> Result(Nil, String) {
+       ))
+   }
+   state.report_pin(Some(evicted))
+-  let instructions = case changed {
+-    True -> kernel_instructions(state.kernel)
+-    False -> request_instructions(state)
+-  }
+-  // A forced compaction keeps the default options; an ordinary turn sets effort.
+-  state.record_context(
+-    types.Request(
+-      ..request(state, instructions, history),
+-      options: types.defaults,
+-    ),
+-    prepared.observation,
+-    prepared.compacted,
+-  )
+   Ok(Nil)
+ }
+ 
+@@ -422,6 +491,11 @@ pub fn summarize_branch(
+   inputs: List(types.Input),
+   extra: Option(String),
+ ) -> Result(String, String) {
++  use _ <- result.try(runtime.admit(state.host, state.kernel))
++  use _ <- result.try(compaction.require(
++    !runtime.has_request_context(state.kernel),
++    "branch summary requires captured dynamic context",
++  ))
+   summarize(
+     state,
+     compaction.SummaryRequest(
+@@ -715,15 +789,16 @@ fn prepare(
+   state: Loop,
+   original: List(types.Input),
+   force: Bool,
+-) -> Result(compaction.Prepared, String) {
+-  runtime.prepare_view_scoped(
++  source_query: String,
++) -> Result(runtime.PreparedRequest, String) {
++  runtime.prepare_request_scoped(
+     state.host,
+     state.kernel,
+     state.model,
+     request_source(state.upstream, state.model),
+     extension.clean_endpoint(state.upstream.endpoint),
+     request_instructions(state),
+-    summarize(state, _),
++    fn(request, captured) { summarize_captured(state, request, Some(captured)) },
+     original,
+     force,
+     state.upstream.images,
+@@ -737,6 +812,44 @@ fn prepare(
+       // The projection answers newest first, as the session keeps history.
+       |> result.map(list.reverse)
+     },
++    source_query: source_query,
++  )
++  |> result.map_error(fn(failure) {
++    let final =
++      request_context.reconcile(
++        request(state, request_instructions(state), original),
++        failure.captured,
++        runtime.request_estimate,
++        0,
++      )
++    let final =
++      request_context.Final(..final, fits: False, failure: Some(failure.reason))
++    state.record_context(final.request, None, False, final)
++    failure.reason
++  })
++}
++
++fn continued_query(current: String, steering: List(types.Input)) -> String {
++  case
++    list.any(steering, fn(input) {
++      case input {
++        types.User(_) | types.UserImage(..) -> True
++        _ -> False
++      }
++    })
++  {
++    True -> request_context.query(steering)
++    False -> current
++  }
++}
++
++fn ready(final: request_context.Final) -> Result(Nil, String) {
++  compaction.require(
++    final.fits,
++    option.unwrap(
++      final.failure,
++      "mandatory request content exceeds known context window",
++    ),
+   )
+ }
+ 
+@@ -800,6 +913,10 @@ fn call(
+     )
+   retry_stream(
+     fn(attempt) {
++      use _ <- result.try(
++        state.admit()
++        |> result.map_error(fn(reason) { types.InvalidRequest(reason) }),
++      )
+       use _ <- result.try(case publish(view.ProviderStarted) {
+         True -> Ok(Nil)
+         False -> Error(types.Cancelled)
+@@ -1173,6 +1290,10 @@ pub fn rebuild(
+   upstream: extension.Upstream,
+   original: List(types.Input),
+ ) -> Result(#(types.Request, requests.Prefix), String) {
++  use _ <- result.try(compaction.require(
++    !runtime.has_request_context(kernel),
++    "past dynamic request capture is unavailable; skip restart restoration",
++  ))
+   use prepared <- result.map(runtime.project_view_scoped(
+     host,
+     kernel,
+@@ -1243,6 +1364,15 @@ fn summarize(
+   state: Loop,
+   request: compaction.SummaryRequest,
+ ) -> Result(String, String) {
++  summarize_captured(state, request, None)
++}
++
++fn summarize_captured(
++  state: Loop,
++  request: compaction.SummaryRequest,
++  captured: Option(request_context.Prepared),
++) -> Result(String, String) {
++  use _ <- result.try(runtime.admit(state.host, state.kernel))
+   let compaction.SummaryRequest(
+     model,
+     previous,
+@@ -1287,6 +1417,20 @@ fn summarize(
+         cache: False,
+       ),
+     )
++  use summary_request <- result.try(case captured {
++    None -> Ok(summary_request)
++    Some(captured) -> {
++      let final =
++        request_context.reconcile(
++          summary_request,
++          captured,
++          runtime.request_estimate,
++          0,
++        )
++      use _ <- result.map(ready(final))
++      final.request
++    }
++  })
+   use #(_, turn, _, _) <- result.try(
+     call(
+       call_context(state),
+@@ -1294,7 +1438,7 @@ fn summarize(
+       summary_request,
+       // The summarizer's history is exactly what it says; nothing replaced.
+       requests.direct_prefix(
+-        instructions,
++        option.unwrap(summary_request.instructions, ""),
+         summary_request.tools,
+         summary_request.input,
+       ),
+diff --git a/src/albedo/harness/request_context.gleam b/src/albedo/harness/request_context.gleam
+new file mode 100644
+index 0000000000000000000000000000000000000000..02b28ab71bddf5f5d1feae3699fecd670da01344
+--- /dev/null
++++ b/src/albedo/harness/request_context.gleam
+@@ -0,0 +1,272 @@
++//// Captured native request contributions. Callbacks promise bounded read-only
++//// work; this interface is a semantic contract, not a closure sandbox.
++
++import albedo/daemon/store
++import albedo/harness/protect
++import albedo/openai_api/types
++import albedo/text_scalars
++import gleam/bit_array
++import gleam/list
++import gleam/option.{type Option, None, Some}
++import gleam/result
++import gleam/string
++
++pub type Budget {
++  Budget(
++    capacity_tokens: Option(Int),
++    capacity_source: Option(String),
++    static_tokens: Int,
++    remaining_tokens: Option(Int),
++  )
++}
++
++pub type Input {
++  Input(
++    store: store.Store,
++    session: String,
++    loaded: List(String),
++    query: String,
++    budget: Budget,
++  )
++}
++
++pub type Block {
++  Block(name: String, content: String, mandatory: Bool)
++}
++
++pub type Contribution {
++  Contribution(
++    snapshot_id: String,
++    instructions: List(Block),
++    data: List(Block),
++    diagnostics: List(String),
++  )
++}
++
++pub type Captured {
++  Captured(owner: String, value: Contribution)
++}
++
++pub type Kind {
++  Instructions
++  Data
++}
++
++pub type Selected {
++  Selected(owner: String, snapshot_id: String, kind: Kind, block: Block)
++}
++
++pub type Omission {
++  Omission(
++    owner: String,
++    snapshot_id: String,
++    kind: Kind,
++    name: String,
++    reason: String,
++  )
++}
++
++pub type Prepared {
++  Prepared(
++    contributions: List(Captured),
++    blocks: List(Selected),
++    omissions: List(Omission),
++    budget: Budget,
++  )
++}
++
++pub type Failure {
++  Failure(reason: String, captured: Prepared)
++}
++
++pub fn failure(reason: String, captured: Prepared) -> Failure {
++  Failure(text_scalars.take(reason, 2048), captured)
++}
++
++pub type Inspection {
++  Inspection(
++    captured: Prepared,
++    estimated_tokens: Int,
++    fits: Bool,
++    failure: Option(String),
++  )
++}
++
++pub type Final {
++  Final(
++    request: types.Request,
++    captured: Prepared,
++    estimated_tokens: Int,
++    fits: Bool,
++    failure: Option(String),
++  )
++}
++
++pub fn prepare(
++  callbacks: List(#(String, fn(Input) -> Result(Contribution, String))),
++  input: Input,
++) -> Result(Prepared, Failure) {
++  capture(callbacks, input, Prepared([], [], [], input.budget))
++}
++
++fn capture(
++  callbacks: List(#(String, fn(Input) -> Result(Contribution, String))),
++  input: Input,
++  prepared: Prepared,
++) -> Result(Prepared, Failure) {
++  case callbacks {
++    [] -> Ok(prepared)
++    [callback, ..rest] -> {
++      use value <- result.try(
++        protect.guarded(fn() { callback.1(input) })
++        |> result.map_error(fn(error) {
++          failure("request context " <> callback.0 <> ": " <> error, prepared)
++        }),
++      )
++      let selected = fn(kind, block) {
++        Selected(callback.0, value.snapshot_id, kind, block)
++      }
++      let blocks =
++        list.append(
++          list.map(value.instructions, selected(Instructions, _)),
++          list.map(value.data, selected(Data, _)),
++        )
++      capture(
++        rest,
++        input,
++        Prepared(
++          ..prepared,
++          contributions: list.append(prepared.contributions, [
++            Captured(callback.0, value),
++          ]),
++          blocks: list.append(prepared.blocks, blocks),
++        ),
++      )
++    }
++  }
++}
++
++/// Mandatory context reserves compaction space; optional context is admitted
++/// against the final projected history, so it cannot force avoidable eviction.
++pub fn mandatory(prepared: Prepared) -> Prepared {
++  Prepared(
++    ..prepared,
++    blocks: list.filter(prepared.blocks, fn(selected) {
++      selected.block.mandatory
++    }),
++  )
++}
++
++/// Recent user/steering text, never a complete transcript; UTF-8 scalars stay
++/// whole even when one crosses the byte boundary.
++pub fn query(history: List(types.Input)) -> String {
++  let text =
++    history
++    |> list.reverse
++    |> list.find_map(fn(input) {
++      case input {
++        types.User(text) | types.UserImage(text, _) -> Ok(text)
++        _ -> Error(Nil)
++      }
++    })
++    |> result.unwrap("")
++  let size = bounded_size(<<text:utf8>>, 4096, 0)
++  let assert <<prefix:bytes-size(size), _:bytes>> = <<text:utf8>>
++  bit_array.to_string(prefix) |> result.unwrap("")
++}
++
++fn bounded_size(bytes: BitArray, allowance: Int, used: Int) -> Int {
++  case bytes {
++    <<point:utf8_codepoint, rest:bytes>> -> {
++      let size = bit_array.byte_size(<<point:utf8_codepoint>>)
++      case size <= allowance {
++        True -> bounded_size(rest, allowance - size, used + size)
++        False -> used
++      }
++    }
++    _ -> used
++  }
++}
++
++pub fn render(selected: Selected) -> String {
++  "[request context: "
++  <> selected.block.name
++  <> "; snapshot "
++  <> selected.snapshot_id
++  <> "]\n"
++  <> selected.block.content
++}
++
++/// Pure assembly. Dynamic data precedes projected history and never becomes
++/// raw compaction input or a durable transcript row.
++pub fn assemble(base: types.Request, prepared: Prepared) -> types.Request {
++  let suffix =
++    prepared.blocks
++    |> list.filter(fn(block) { block.kind == Instructions })
++    |> list.map(fn(block) { "\n\n" <> render(block) })
++    |> string.concat
++  let data =
++    prepared.blocks
++    |> list.filter(fn(block) { block.kind == Data })
++    |> list.map(fn(block) { types.User(render(block)) })
++  types.Request(
++    ..base,
++    instructions: case suffix {
++      "" -> base.instructions
++      _ -> Some(option.unwrap(base.instructions, "") <> suffix)
++    },
++    input: list.append(data, base.input),
++  )
++}
++
++/// Price the actual assembled request once. Drop the last optional block
++/// whole until it fits. Earlier omissions stay omitted after pin settlement.
++/// `reserve` leaves room for history in the initial static reservation only.
++pub fn reconcile(
++  base: types.Request,
++  prepared: Prepared,
++  estimate: fn(types.Request) -> Int,
++  reserve: Int,
++) -> Final {
++  let request = assemble(base, prepared)
++  let estimated = estimate(request)
++  let fits = case prepared.budget.capacity_tokens {
++    None -> True
++    Some(capacity) -> estimated + reserve <= capacity
++  }
++  case fits {
++    True -> Final(request, prepared, estimated, True, None)
++    False -> {
++      let reversed = list.reverse(prepared.blocks)
++      let #(after, rest) =
++        list.split_while(reversed, fn(selected) { selected.block.mandatory })
++      case rest {
++        [] ->
++          Final(
++            request,
++            prepared,
++            estimated,
++            False,
++            Some("mandatory request content exceeds known context window"),
++          )
++        [omitted, ..before] -> {
++          let selected =
++            Prepared(
++              ..prepared,
++              blocks: list.reverse(list.append(after, before)),
++              omissions: list.append(prepared.omissions, [
++                Omission(
++                  omitted.owner,
++                  omitted.snapshot_id,
++                  omitted.kind,
++                  omitted.block.name,
++                  "whole optional block exceeds known request allowance",
++                ),
++              ]),
++            )
++          reconcile(base, selected, estimate, reserve)
++        }
++      }
++    }
++  }
++}
+diff --git a/src/albedo/harness/runtime.gleam b/src/albedo/harness/runtime.gleam
+index 0a17820dd8dfea00892c824d483a29c51896a6ce..63cda0dd290c930e87f64b1d26a5aa15af5a2f0f 100644
+--- a/src/albedo/harness/runtime.gleam
++++ b/src/albedo/harness/runtime.gleam
+@@ -3,6 +3,7 @@
+ import albedo/actor_call
+ import albedo/daemon/configuration
+ import albedo/daemon/session_configuration
++import albedo/daemon/session_requirements
+ import albedo/daemon/store
+ import albedo/harness/command
+ import albedo/harness/compaction
+@@ -16,6 +17,7 @@ import albedo/harness/extensions/python/link
+ import albedo/harness/hook
+ import albedo/harness/oauth
+ import albedo/harness/protect
++import albedo/harness/request_context
+ import albedo/harness/runtime/boot
+ import albedo/harness/runtime/catalog as session_catalog
+ import albedo/harness/runtime/kernels
+@@ -23,6 +25,7 @@ import albedo/harness/runtime/preparation
+ import albedo/harness/runtime/reload
+ import albedo/harness/runtime/state as runtime_state
+ import albedo/harness/runtime/upgrade
++import albedo/harness/session_lifecycle
+ import albedo/openai_api/types
+ import albedo/shared
+ import gleam/dict
+@@ -199,6 +202,7 @@ pub fn start_with_config(
+         error
+       }),
+     )
++    let declarations = installed
+     let #(installed, quarantined) = installation
+     list.each(quarantined, fn(failure) {
+       io.println_error(
+@@ -210,6 +214,8 @@ pub fn start_with_config(
+         installed,
+         default_enabled,
+         quarantined,
++        extension.lifecycle_owners(declarations, installed, quarantined),
++        extension.required_request_context(declarations),
+       ))
+     Ok(
+       actor.initialised(runtime_state.State(
+@@ -1326,6 +1332,135 @@ pub fn compact_history_scoped(
+   |> result.map(fn(prepared) { prepared.inputs })
+ }
+ 
++pub type PreparedRequest {
++  PreparedRequest(
++    history: compaction.Prepared,
++    captured: request_context.Prepared,
++  )
++}
++
++pub fn request_estimate(request: types.Request) -> Int {
++  compaction.estimate_pinned(
++    option.unwrap(request.instructions, ""),
++    request.tools,
++  )
++  + compaction.estimate_inputs(request.input)
++}
++
++pub fn has_request_context(session: Session) -> Bool {
++  composition.has_request_context(session.composition)
++}
++
++/// Current complete request contributors are the only capabilities admitted.
++pub fn request_capabilities(session: Session) -> List(String) {
++  composition.extensions(session.composition)
++  |> list.filter(fn(item) {
++    list.any(item.plugins, fn(plugin) {
++      case plugin {
++        extension.RequestContextPlugin(..) -> True
++        _ -> False
++      }
++    })
++  })
++  |> list.map(fn(item) { item.name })
++}
++
++fn required_request_owners(items: List(extension.Extension)) -> List(String) {
++  items
++  |> list.filter(fn(item) {
++    list.any(item.plugins, fn(plugin) {
++      case plugin {
++        extension.RequestContextPlugin(_, True) -> True
++        _ -> False
++      }
++    })
++  })
++  |> list.map(fn(item) { item.name })
++}
++
++pub fn admit(host: Runtime, session: Session) -> Result(Nil, String) {
++  use _ <- result.try(required_context_ready(host, session.id))
++  use selected <- result.try(enabled_for(host, session.id))
++  let names = list.map(selected, fn(item) { item.name })
++  let active = request_capabilities(session)
++  // Saved choices and retained kernels intentionally change at different times.
++  // A required owner may neither disappear nor appear silently between them,
++  // even after an explicit unbind has released every persistent requirement.
++  use _ <- result.try(
++    list.try_each(required_request_owners(selected), fn(name) {
++      case list.contains(active, name) {
++        True -> Ok(Nil)
++        False ->
++          Error(
++            "reload required: selected required request context "
++            <> name
++            <> " is not active",
++          )
++      }
++    }),
++  )
++  use _ <- result.try(
++    list.try_each(
++      required_request_owners(composition.extensions(session.composition)),
++      fn(name) {
++        case list.contains(names, name) {
++          True -> Ok(Nil)
++          False ->
++            Error(
++              "reload required: retained required request context "
++              <> name
++              <> " is no longer selected",
++            )
++        }
++      },
++    ),
++  )
++  session_requirements.check(
++    host.ledger,
++    session.id,
++    list.filter(active, fn(name) { list.contains(names, name) }),
++  )
++}
++
++/// Capture request contributors once, using the same resolved strategy settings
++/// for its budget and every projection/compaction in this preparation.
++pub fn prepare_request_scoped(
++  runtime: Runtime,
++  session: Session,
++  model: String,
++  source: String,
++  endpoint: Option(String),
++  instructions: String,
++  summarize: fn(compaction.SummaryRequest, request_context.Prepared) ->
++    Result(String, String),
++  history: List(types.Input),
++  force: Bool,
++  images: types.ImageLimits,
++  reported: Option(Int),
++  compacting: fn() -> Nil,
++  project: compaction.Project,
++  source_query source_query: String,
++) -> Result(PreparedRequest, request_context.Failure) {
++  view_scoped(
++    runtime,
++    session,
++    model,
++    source,
++    endpoint,
++    instructions,
++    summarize,
++    history,
++    force,
++    images,
++    reported,
++    compacting,
++    project,
++    compaction.prepare,
++    True,
++    Some(source_query),
++  )
++}
++
+ /// Prepare one provider request and its strategy-neutral inspection facts.
+ pub fn prepare_view_scoped(
+   runtime: Runtime,
+@@ -1342,6 +1477,10 @@ pub fn prepare_view_scoped(
+   compacting: fn() -> Nil,
+   project: compaction.Project,
+ ) -> Result(compaction.Prepared, String) {
++  use _ <- result.try(compaction.require(
++    !has_request_context(session),
++    "dynamic request context requires captured preparation",
++  ))
+   view_scoped(
+     runtime,
+     session,
+@@ -1349,7 +1488,7 @@ pub fn prepare_view_scoped(
+     source,
+     endpoint,
+     instructions,
+-    summarize,
++    fn(request, _) { summarize(request) },
+     history,
+     force,
+     images,
+@@ -1357,7 +1496,11 @@ pub fn prepare_view_scoped(
+     compacting,
+     project,
+     compaction.prepare,
++    False,
++    None,
+   )
++  |> result.map(fn(prepared) { prepared.history })
++  |> result.map_error(fn(failure) { failure.reason })
+ }
+ 
+ /// The request the active strategy's saved state makes of `history`, the
+@@ -1380,7 +1523,7 @@ pub fn project_view_scoped(
+     source,
+     endpoint,
+     instructions,
+-    fn(_) { Error("a projection never summarizes") },
++    fn(_, _) { Error("a projection never summarizes") },
+     history,
+     False,
+     images,
+@@ -1388,7 +1531,11 @@ pub fn project_view_scoped(
+     fn() { Nil },
+     compaction.unprojected,
+     compaction.project,
++    False,
++    None,
+   )
++  |> result.map(fn(prepared) { prepared.history })
++  |> result.map_error(fn(failure) { failure.reason })
+ }
+ 
+ fn view_scoped(
+@@ -1398,68 +1545,179 @@ fn view_scoped(
+   source: String,
+   endpoint: Option(String),
+   instructions: String,
+-  summarize: fn(compaction.SummaryRequest) -> Result(String, String),
++  summarize: fn(compaction.SummaryRequest, request_context.Prepared) ->
++    Result(String, String),
+   history: List(types.Input),
+   force: Bool,
+   images: types.ImageLimits,
+   reported: Option(Int),
+   compacting: fn() -> Nil,
+   project: compaction.Project,
+-  view: fn(compaction.Strategy, compaction.Context, List(types.Input)) ->
++  view: fn(compaction.Resolved, compaction.Context, List(types.Input)) ->
+     Result(compaction.Prepared, String),
+-) -> Result(compaction.Prepared, String) {
+-  use _ <- result.try(owned_by(runtime, session))
+-  let pinned_tokens = compaction.estimate_pinned(instructions, tools(session))
++  capture: Bool,
++  source_query: Option(String),
++) -> Result(PreparedRequest, request_context.Failure) {
++  let static = compaction.estimate_pinned(instructions, tools(session))
++  let absent =
++    request_context.Prepared(
++      [],
++      [],
++      [],
++      request_context.Budget(None, None, static, None),
++    )
++  let failed = fn(reason) { request_context.failure(reason, absent) }
++  use _ <- result.try(owned_by(runtime, session) |> result.map_error(failed))
+   let enabled = composition.extensions(session.composition)
++  use callbacks <- result.try(
++    case capture {
++      True -> {
++        use _ <- result.try(required_context_ready(runtime, session.id))
++        composition.request_contributors(session.composition)
++      }
++      False -> Ok([])
++    }
++    |> result.map_error(failed),
++  )
++  use _ <- result.try(admit(runtime, session) |> result.map_error(failed))
+   let info = model_info(session, model, endpoint)
+-  use window <- result.try(session_configuration.context_window(
+-    runtime.ledger,
+-    session.id,
+-  ))
+-  case extension.compaction(enabled) {
+-    None if force -> Error("no compaction strategy is enabled")
+-    None -> Ok(compaction.Prepared(history, None, False))
+-    Some(strategy) -> {
+-      let context =
+-        compaction.Context(
+-          runtime.ledger,
+-          session.id,
+-          session.kernel,
+-          model,
+-          source,
+-          pinned_tokens,
+-          capacity(info),
+-          window,
+-          force,
+-          summarize,
+-          compaction.compose_prior(
+-            list.filter(extension.folds(enabled), fn(folds) {
+-              folds.owner != strategy.name
+-            }),
+-            runtime.ledger,
+-            session.id,
+-            project,
+-          ),
+-          reader(info),
+-          images,
+-          reported,
+-          compacting,
+-          project,
+-        )
+-      // A strategy that raises fails the turn the way one returning an error
+-      // does, naming itself, rather than killing the turn's process.
+-      protect.guarded(fn() {
+-        use prepared <- result.try(view(strategy, context, history))
+-        list.try_fold(extension.notes(enabled), prepared, fn(prepared, layer) {
+-          case prepared.compacted {
+-            True -> layer.compact(context, history, prepared)
+-            False -> layer.project(context, history, prepared)
+-          }
++  use session_window <- result.try(
++    session_configuration.context_window(runtime.ledger, session.id)
++    |> result.map_error(failed),
++  )
++  let strategy = extension.compaction(enabled)
++  use resolved <- result.try(
++    case strategy {
++      None if force -> Error("no compaction strategy is enabled")
++      None -> Ok(None)
++      Some(strategy) ->
++        protect.guarded(fn() { strategy.resolve(capacity(info), reader(info)) })
++        |> result.map(Some)
++        |> result.map_error(fn(error) {
++          "compaction " <> strategy.name <> ": " <> error
+         })
++    }
++    |> result.map_error(failed),
++  )
++  let resolved =
++    option.map(resolved, fn(resolved) {
++      compaction.Resolved(..resolved, capacity: case session_window {
++        Some(tokens) ->
++          Some(compaction.Capacity(tokens, "this session's context window"))
++        None -> resolved.capacity
+       })
+-      |> result.map_error(fn(error) {
+-        "compaction " <> strategy.name <> ": " <> error
+-      })
++    })
++  let window = case session_window {
++    Some(tokens) ->
++      Some(compaction.Capacity(tokens, "this session's context window"))
++    None ->
++      case resolved {
++        Some(strategy) -> strategy.capacity
++        None -> capacity(info)
++      }
++  }
++  let budget =
++    request_context.Budget(
++      option.map(window, fn(capacity) { capacity.tokens }),
++      option.map(window, fn(capacity) { capacity.source }),
++      static,
++      option.map(window, fn(capacity) { int.max(0, capacity.tokens - static) }),
++    )
++  use captured <- result.try(request_context.prepare(
++    callbacks,
++    request_context.Input(
++      runtime.ledger,
++      session.id,
++      list.map(enabled, fn(item) { item.name }),
++      case source_query {
++        Some(query) -> request_context.query([types.User(query)])
++        None -> request_context.query(history)
++      },
++      budget,
++    ),
++  ))
++  let empty =
++    types.Request(
++      model,
++      Some(instructions),
++      [],
++      tools(session),
++      None,
++      types.defaults,
++    )
++  let initial =
++    request_context.reconcile(empty, captured, request_estimate, case resolved {
++      Some(_) -> 1
++      None -> 0
++    })
++  case initial.fits {
++    False ->
++      Error(request_context.failure(
++        "mandatory request content leaves no history allowance in known context window",
++        initial.captured,
++      ))
++    True -> {
++      use prepared <- result.map(
++        case strategy, resolved {
++          Some(strategy), Some(resolved) -> {
++            let context =
++              compaction.Context(
++                runtime.ledger,
++                session.id,
++                session.kernel,
++                model,
++                source,
++                request_estimate(request_context.assemble(
++                  empty,
++                  request_context.mandatory(initial.captured),
++                )),
++                window,
++                session_window,
++                force,
++                fn(request) {
++                  summarize(
++                    request,
++                    request_context.mandatory(initial.captured),
++                  )
++                },
++                compaction.compose_prior(
++                  list.filter(extension.folds(enabled), fn(folds) {
++                    folds.owner != strategy.name
++                  }),
++                  runtime.ledger,
++                  session.id,
++                  project,
++                ),
++                reader(info),
++                images,
++                reported,
++                compacting,
++                project,
++              )
++            protect.guarded(fn() {
++              use prepared <- result.try(view(resolved, context, history))
++              list.try_fold(
++                extension.notes(enabled),
++                prepared,
++                fn(prepared, layer) {
++                  case prepared.compacted {
++                    True -> layer.compact(context, history, prepared)
++                    False -> layer.project(context, history, prepared)
++                  }
++                },
++              )
++            })
++            |> result.map_error(fn(error) {
++              "compaction " <> strategy.name <> ": " <> error
++            })
++          }
++          _, _ -> Ok(compaction.Prepared(history, None, False))
++        }
++        |> result.map_error(fn(reason) {
++          request_context.failure(reason, initial.captured)
++        }),
++      )
++      PreparedRequest(prepared, initial.captured)
+     }
+   }
+ }
+@@ -1470,6 +1728,7 @@ pub fn inventory(host: Runtime) -> session_catalog.Inventory {
+     installed(host),
+     quarantined(host),
+     base_defaults(host),
++    shared.read(host.installed).required_request_context,
+   )
+ }
+ 
+@@ -1513,3 +1772,21 @@ fn observe_window(
+     }
+   })
+ }
++
++pub fn lifecycle_owners(host: Runtime) -> List(session_lifecycle.Owner) {
++  shared.read(host.installed).lifecycle_owners
++}
++
++pub fn required_context_ready(
++  host: Runtime,
++  id: String,
++) -> Result(Nil, String) {
++  let installed = shared.read(host.installed)
++  selection.required_context_ready(
++    host.ledger,
++    installed.extensions,
++    installed.required_request_context,
++    installed.default_enabled,
++    id,
++  )
++}
+diff --git a/src/albedo/harness/runtime/catalog.gleam b/src/albedo/harness/runtime/catalog.gleam
+index dfb7914a82408f72dfae782b383a2a2467b3dcbf..1bd705196bf7d034e78d8588e37fca75702ff7dc 100644
+--- a/src/albedo/harness/runtime/catalog.gleam
++++ b/src/albedo/harness/runtime/catalog.gleam
+@@ -55,6 +55,7 @@ pub type Inventory {
+     installed: List(extension.Extension),
+     quarantined: List(extension.Quarantined),
+     defaults: List(String),
++    required_request_context: List(extension.Extension),
+   )
+ }
+ 
+diff --git a/src/albedo/harness/runtime/observation.gleam b/src/albedo/harness/runtime/observation.gleam
+index c9787c990e678892ae85f92ef68438d8189ad866..d0201551cc9def2e59e57bc9e00baadae567e6cb 100644
+--- a/src/albedo/harness/runtime/observation.gleam
++++ b/src/albedo/harness/runtime/observation.gleam
+@@ -24,6 +24,7 @@ pub fn composition_inventory(
+     installed.extensions,
+     installed.quarantined,
+     installed.default_enabled,
++    installed.required_request_context,
+   )
+ }
+ 
+diff --git a/src/albedo/harness/runtime/preparation.gleam b/src/albedo/harness/runtime/preparation.gleam
+index efba17dddfa8ef4f0a068d1028085f3e6f6cc775..7df361436e3becd9b4a97ab6b28aff421eec91eb 100644
+--- a/src/albedo/harness/runtime/preparation.gleam
++++ b/src/albedo/harness/runtime/preparation.gleam
+@@ -38,6 +38,13 @@ pub fn build_cached(
+   required: List(String),
+   retained: List(runtime_state.Desired),
+ ) -> Result(runtime_state.Cached, String) {
++  use _ <- result.try(selection.required_context_ready(
++    inventory.ledger,
++    inventory.installed,
++    inventory.required_request_context,
++    inventory.defaults,
++    id,
++  ))
+   // Actual preparation refreshes the remote mirror before capturing its basis.
+   // Observation paths only read an existing mirror and never contact a host.
+   let _ = project_files.readable(cwd)
+@@ -53,6 +60,13 @@ pub fn build_cached(
+       )
+   })
+   let composed = composition.compose(selected, inventory.ledger, id, cwd)
++  use _ <- result.try(
++    composition.request_contributors(composed)
++    |> result.map_error(fn(error) {
++      composition.close(composed)
++      error
++    }),
++  )
+   // A session opening on its own composes around whatever is broken, but an
+   // extension the caller just asked for, and one a change must not break,
+   // fail here instead of going quiet.
+diff --git a/src/albedo/harness/runtime/state.gleam b/src/albedo/harness/runtime/state.gleam
+index 9caa419a1b2b60e4cb74b7effc1900470679f39d..8e7a7173f76cb5ef3fc3b07bac680eeeef5f794d 100644
+--- a/src/albedo/harness/runtime/state.gleam
++++ b/src/albedo/harness/runtime/state.gleam
+@@ -10,6 +10,7 @@ import albedo/harness/extension/composition
+ import albedo/harness/extension/selection
+ import albedo/harness/extensions/python/kernel as python
+ import albedo/harness/runtime/catalog as session_catalog
++import albedo/harness/session_lifecycle
+ import albedo/openai_api/types
+ import albedo/shared.{type Shared}
+ import gleam/dict.{type Dict}
+@@ -36,6 +37,8 @@ pub type Installed {
+     default_enabled: List(String),
+     /// Installed extensions the daemon will not run, with their reasons.
+     quarantined: List(extension.Quarantined),
++    lifecycle_owners: List(session_lifecycle.Owner),
++    required_request_context: List(extension.Extension),
+   )
+ }
+ 
+diff --git a/src/albedo/harness/session_lifecycle.gleam b/src/albedo/harness/session_lifecycle.gleam
+new file mode 100644
+index 0000000000000000000000000000000000000000..f5a2d73406d557f18e4057afca34d13b97b4987d
+--- /dev/null
++++ b/src/albedo/harness/session_lifecycle.gleam
+@@ -0,0 +1,65 @@
++//// Durable lifecycle contributions use the creator's transaction connection.
++//// Guards use bounded read-only SQL. Apply may write only on this connection:
++//// no actor reentry, nested transactions, bus, processes, kernels, providers
++//// or external effects. Declarations are trusted host code.
++
++import albedo/daemon/transcript
++import albedo/harness/protect
++import gleam/list
++import gleam/result
++import sqlight
++
++pub type Event {
++  Created(session: String)
++  Child(parent: String, child: String)
++  /// Actual copied rows in source order; excludes synthetic tool completions.
++  Fork(
++    parent: String,
++    child: String,
++    checkpoint: Int,
++    mapping: List(#(transcript.SourceRef, transcript.SourceRef)),
++  )
++}
++
++pub type Contribution {
++  Contribution(
++    needed_in: fn(sqlight.Connection, Event) -> Result(Bool, String),
++    apply_in: fn(sqlight.Connection, Event) -> Result(Nil, String),
++  )
++}
++
++pub type Availability {
++  Ready
++  Quarantined(reason: String)
++}
++
++pub type Owner {
++  Owner(
++    name: String,
++    availability: Availability,
++    contributions: List(Contribution),
++  )
++}
++
++/// Run inside the native transaction and admission mutation. Catchable crashes
++/// become errors in the same process so the caller rolls back all native writes.
++pub fn run_in(
++  db: sqlight.Connection,
++  owners: List(Owner),
++  event: Event,
++) -> Result(Nil, String) {
++  list.try_each(owners, fn(owner) {
++    list.try_each(owner.contributions, fn(contribution) {
++      protect.guarded(fn() {
++        use needed <- result.try(contribution.needed_in(db, event))
++        case needed, owner.availability {
++          False, _ -> Ok(Nil)
++          True, Ready -> contribution.apply_in(db, event)
++          True, Quarantined(reason) ->
++            Error("required lifecycle owner is quarantined: " <> reason)
++        }
++      })
++      |> result.map_error(fn(reason) { owner.name <> ": " <> reason })
++    })
++  })
++}
+diff --git a/test/daemon/conversation_test.gleam b/test/daemon/conversation_test.gleam
+index 6d47585ae836a05986f231124f3441e68ab0ec09..a575fab9444e02ea3ea2ddc3a1d20398b4e04f26 100644
+--- a/test/daemon/conversation_test.gleam
++++ b/test/daemon/conversation_test.gleam
+@@ -34,7 +34,7 @@ pub fn latest_user_title_survives_restart_and_legacy_migration_test() -> Nil {
+   let assert Ok(host) = runtime.start(path)
+   let ledger = runtime.ledger(host)
+   let assert Ok(_) = conversation.initialise(ledger)
+-  let assert Ok(_) = conversation.create(ledger, session("session"))
++  let assert Ok(_) = conversation.create(ledger, session("session"), [])
+   let assert Ok(_) =
+     conversation.commit(
+       ledger,
+@@ -87,8 +87,8 @@ pub fn migration_recovers_placeholder_titles_and_activity_order_test() -> Nil {
+   let assert Ok(host) = runtime.start(path)
+   let ledger = runtime.ledger(host)
+   let assert Ok(_) = conversation.initialise(ledger)
+-  let assert Ok(_) = conversation.create(ledger, session("first"))
+-  let assert Ok(_) = conversation.create(ledger, session("second"))
++  let assert Ok(_) = conversation.create(ledger, session("first"), [])
++  let assert Ok(_) = conversation.create(ledger, session("second"), [])
+   let assert Ok(_) =
+     conversation.commit(
+       ledger,
+@@ -128,7 +128,7 @@ pub fn transcript_timestamps_migrate_without_invention_and_roundtrip_test() -> N
+   let assert Ok(host) = runtime.start(path)
+   let ledger = runtime.ledger(host)
+   let assert Ok(_) = conversation.initialise(ledger)
+-  let assert Ok(_) = conversation.create(ledger, session("timestamped"))
++  let assert Ok(_) = conversation.create(ledger, session("timestamped"), [])
+   let assert Ok(_) =
+     conversation.commit(
+       ledger,
+diff --git a/test/daemon/image_store_test.gleam b/test/daemon/image_store_test.gleam
+index ebea711f117adaff657e3f1120e037afe79f8b91..9113fbadf110ad84d3c3d3f9b667ff91d68cf23d 100644
+--- a/test/daemon/image_store_test.gleam
++++ b/test/daemon/image_store_test.gleam
+@@ -86,7 +86,7 @@ fn loaded(ledger: store.Store, id: String) -> List(types.Input) {
+ 
+ pub fn commit_keeps_one_payload_and_rows_load_references_test() -> Nil {
+   let #(path, ledger) = ledger()
+-  let assert Ok(_) = conversation.create(ledger, session("s"))
++  let assert Ok(_) = conversation.create(ledger, session("s"), [])
+   let assert Ok(_) =
+     conversation.commit(ledger, "s", inputs(), conversation.Idle)
+ 
+@@ -114,8 +114,8 @@ pub fn commit_keeps_one_payload_and_rows_load_references_test() -> Nil {
+ pub fn deleting_a_session_releases_only_unshared_payloads_test() -> Nil {
+   let #(path, ledger) = ledger()
+   let assert Ok(_) = family.initialise(ledger)
+-  let assert Ok(_) = conversation.create(ledger, session("a"))
+-  let assert Ok(_) = conversation.create(ledger, session("b"))
++  let assert Ok(_) = conversation.create(ledger, session("a"), [])
++  let assert Ok(_) = conversation.create(ledger, session("b"), [])
+   let assert Ok(_) =
+     conversation.commit(ledger, "a", inputs(), conversation.Idle)
+   let assert Ok(_) =
+@@ -160,7 +160,7 @@ pub fn deleting_a_session_releases_only_unshared_payloads_test() -> Nil {
+ 
+ pub fn migration_moves_legacy_payloads_once_after_a_backup_test() -> Nil {
+   let #(path, ledger) = ledger()
+-  let assert Ok(_) = conversation.create(ledger, session("s"))
++  let assert Ok(_) = conversation.create(ledger, session("s"), [])
+   let assert Ok(_) =
+     store.query(ledger, fn(db) {
+       sqlight.query(
+@@ -185,7 +185,7 @@ pub fn migration_moves_legacy_payloads_once_after_a_backup_test() -> Nil {
+ 
+ pub fn migration_converts_text_images_without_changing_references_test() -> Nil {
+   let #(path, ledger) = ledger()
+-  let assert Ok(_) = conversation.create(ledger, session("s"))
++  let assert Ok(_) = conversation.create(ledger, session("s"), [])
+   let assert Ok(_) =
+     conversation.commit(
+       ledger,
+@@ -221,7 +221,7 @@ pub fn migration_converts_text_images_without_changing_references_test() -> Nil
+ 
+ pub fn failed_backup_keeps_text_images_untouched_test() -> Nil {
+   let #(path, ledger) = ledger()
+-  let assert Ok(_) = conversation.create(ledger, session("s"))
++  let assert Ok(_) = conversation.create(ledger, session("s"), [])
+   let assert Ok(_) =
+     conversation.commit(
+       ledger,
+@@ -239,7 +239,7 @@ pub fn failed_backup_keeps_text_images_untouched_test() -> Nil {
+ 
+ pub fn fingerprints_ignore_where_a_payload_lives_test() -> Nil {
+   let #(path, ledger) = ledger()
+-  let assert Ok(_) = conversation.create(ledger, session("s"))
++  let assert Ok(_) = conversation.create(ledger, session("s"), [])
+   let assert Ok(_) =
+     conversation.commit(
+       ledger,
+diff --git a/test/daemon/lifecycle_fixture_id.erl b/test/daemon/lifecycle_fixture_id.erl
+new file mode 100644
+index 0000000000000000000000000000000000000000..2ca6a95eee574a6d67cb78a5650f16cf54c978f2
+--- /dev/null
++++ b/test/daemon/lifecycle_fixture_id.erl
+@@ -0,0 +1,9 @@
++%% Stock admissions require current UUIDv7 operation IDs, unlike mail.new_id.
++-module(lifecycle_fixture_id).
++-export([operation_id/0]).
++operation_id() ->
++    Now = erlang:system_time(millisecond),
++    <<RandA:12, RandB:62, _:6>> = crypto:strong_rand_bytes(10),
++    Hex = binary:encode_hex(<<Now:48, 7:4, RandA:12, 2:2, RandB:62>>, lowercase),
++    <<A:8/binary, B:4/binary, C:4/binary, D:4/binary, E:12/binary>> = Hex,
++    <<A/binary, "-", B/binary, "-", C/binary, "-", D/binary, "-", E/binary>>.
+diff --git a/test/daemon/lifecycle_fixture_test.gleam b/test/daemon/lifecycle_fixture_test.gleam
+new file mode 100644
+index 0000000000000000000000000000000000000000..476e35cc914bfc4c784b704cb55fa30ff764c676
+--- /dev/null
++++ b/test/daemon/lifecycle_fixture_test.gleam
+@@ -0,0 +1,771 @@
++//// Native transactional contract tests: callback failure and exact fork cuts
++//// cannot be forced through stock HTTP because stock has no lifecycle owner.
++//// Real SQLite, runtime catalog, admission, family, inbox and history are used.
++
++import albedo/daemon/bus
++import albedo/daemon/conversation
++import albedo/daemon/family
++import albedo/daemon/history
++import albedo/daemon/mail
++import albedo/daemon/operations
++import albedo/daemon/session_configuration
++import albedo/daemon/store
++import albedo/harness/extension
++import albedo/harness/extensions
++import albedo/harness/extensions/lcm/graph
++import albedo/harness/runtime
++import albedo/harness/session_lifecycle as lifecycle
++import albedo/openai_api/types
++import gleam/dynamic/decode
++import gleam/erlang/process
++import gleam/json
++import gleam/list
++import gleam/option.{None, Some}
++import gleam/result
++import gleeunit
++import gleeunit/should
++import sqlight
++
++pub fn main() -> Nil {
++  gleeunit.main()
++}
++
++@external(erlang, "lifecycle_fixture_id", "operation_id")
++fn operation_id() -> String
++
++fn info(id: String) -> conversation.Info {
++  conversation.Info(
++    id,
++    "new session",
++    "/tmp",
++    "fixture",
++    "model",
++    types.Responses,
++    conversation.Idle,
++    None,
++    None,
++  )
++}
++
++fn initialise(ledger: store.Store) -> Result(Nil, String) {
++  store.query(ledger, fn(db) {
++    store.exec(
++      db,
++      "CREATE TABLE fixture_identity(session TEXT PRIMARY KEY,live TEXT NOT NULL); CREATE TABLE fixture_events(event TEXT,session TEXT); CREATE TABLE fixture_mapping(source_session TEXT,source_seq INTEGER,branch_session TEXT,branch_seq INTEGER);",
++    )
++  })
++}
++
++fn needed(
++  db: sqlight.Connection,
++  event: lifecycle.Event,
++) -> Result(Bool, String) {
++  let parent = case event {
++    lifecycle.Created(_) -> ""
++    lifecycle.Child(parent, _) | lifecycle.Fork(parent, _, _, _) -> parent
++  }
++  case event {
++    lifecycle.Created(_) -> Ok(True)
++    _ ->
++      store.rows(
++        db,
++        "SELECT live FROM fixture_identity WHERE session=?",
++        [sqlight.text(parent)],
++        decode.field(0, decode.string, decode.success),
++      )
++      |> result.map(fn(rows) { !list.is_empty(rows) })
++  }
++}
++
++fn apply(
++  db: sqlight.Connection,
++  event: lifecycle.Event,
++) -> Result(Nil, String) {
++  let #(kind, session) = case event {
++    lifecycle.Created(session) -> #("created", session)
++    lifecycle.Child(_, child) -> #("child", child)
++    lifecycle.Fork(_, child, _, _) -> #("fork", child)
++  }
++  use _ <- result.try(
++    store.run(db, "INSERT INTO fixture_events VALUES(?,?)", [
++      sqlight.text(kind),
++      sqlight.text(session),
++    ]),
++  )
++  case event {
++    lifecycle.Created(_) -> Ok(Nil)
++    lifecycle.Child(parent, child) ->
++      store.run(
++        db,
++        "INSERT INTO fixture_identity SELECT ?,live FROM fixture_identity WHERE session=?",
++        [sqlight.text(child), sqlight.text(parent)],
++      )
++    lifecycle.Fork(parent, child, _, mapping) -> {
++      use _ <- result.try(
++        store.run(
++          db,
++          "INSERT INTO fixture_identity SELECT ?,live FROM fixture_identity WHERE session=?",
++          [sqlight.text(child), sqlight.text(parent)],
++        ),
++      )
++      list.try_each(mapping, fn(pair) {
++        store.run(db, "INSERT INTO fixture_mapping VALUES(?,?,?,?)", [
++          sqlight.text(pair.0.session),
++          sqlight.int(pair.0.seq),
++          sqlight.text(pair.1.session),
++          sqlight.int(pair.1.seq),
++        ])
++      })
++    }
++  }
++}
++
++fn declaration() -> extension.Extension {
++  extension.Extension(
++    "fixture-lineage",
++    "Unrelated shared live ID acceptance owner",
++    [],
++    [extension.SessionLifecyclePlugin(lifecycle.Contribution(needed, apply))],
++    initialise,
++  )
++}
++
++fn host() -> runtime.Runtime {
++  let assert Ok(host) =
++    runtime.start_with_config(
++      ":memory:",
++      extensions.Config([declaration()], []),
++    )
++  let ledger = runtime.ledger(host)
++  let assert Ok(_) = conversation.initialise(ledger)
++  let assert Ok(_) = family.initialise(ledger)
++  let assert Ok(_) = mail.initialise(ledger)
++  host
++}
++
++fn count(ledger: store.Store, table: String) -> Int {
++  let assert Ok(count) =
++    store.query(ledger, fn(db) {
++      store.one(
++        db,
++        "SELECT count(*) FROM " <> table,
++        [],
++        decode.field(0, decode.int, decode.success),
++        "count failed",
++      )
++    })
++  count
++}
++
++fn parent(host: runtime.Runtime) -> Nil {
++  let ledger = runtime.ledger(host)
++  let assert Ok(_) = conversation.create(ledger, info("parent"), [])
++  let assert Ok(_) =
++    store.query(ledger, fn(db) {
++      store.exec(
++        db,
++        "INSERT INTO fixture_identity VALUES('parent','same-live-id');",
++      )
++    })
++  Nil
++}
++
++fn task(body: String) -> mail.Letter {
++  mail.Letter("task", "child", Some("parent"), "parent", mail.Task, body, 1)
++}
++
++fn failing(raise_crash: Bool) -> List(lifecycle.Owner) {
++  [
++    lifecycle.Owner("fixture-lineage", lifecycle.Ready, [
++      lifecycle.Contribution(needed, fn(db, event) {
++        use _ <- result.try(apply(db, event))
++        case raise_crash {
++          True -> panic as "fixture callback panic"
++          False -> Error("fixture callback refused")
++        }
++      }),
++    ]),
++  ]
++}
++
++pub fn disabled_declaration_still_inherits_live_identity_test() -> Nil {
++  let host = host()
++  parent(host)
++  let ledger = runtime.ledger(host)
++  let assert Ok(_) =
++    conversation.create_child(
++      ledger,
++      info("child"),
++      "parent",
++      "worker",
++      Some(task("do work")),
++      runtime.lifecycle_owners(host),
++    )
++  let assert Ok(live) =
++    store.query(ledger, fn(db) {
++      store.one(
++        db,
++        "SELECT live FROM fixture_identity WHERE session='child'",
++        [],
++        decode.field(0, decode.string, decode.success),
++        "missing identity",
++      )
++    })
++  live |> should.equal("same-live-id")
++  count(ledger, "mail") |> should.equal(1)
++  count(ledger, "session_family") |> should.equal(1)
++  runtime.stop(host)
++}
++
++pub fn invalid_initial_task_leaves_no_child_test() -> Nil {
++  let host = host()
++  parent(host)
++  let ledger = runtime.ledger(host)
++  conversation.create_child(
++    ledger,
++    info("child"),
++    "parent",
++    "worker",
++    Some(task("  ")),
++    runtime.lifecycle_owners(host),
++  )
++  |> should.be_error
++  count(ledger, "sessions") |> should.equal(1)
++  count(ledger, "session_family") |> should.equal(0)
++  count(ledger, "mail") |> should.equal(0)
++  count(ledger, "fixture_events") |> should.equal(0)
++  runtime.stop(host)
++}
++
++fn refused_child(raise_crash: Bool) -> Nil {
++  let host = host()
++  parent(host)
++  let ledger = runtime.ledger(host)
++  conversation.create_child(
++    ledger,
++    info("child"),
++    "parent",
++    "worker",
++    Some(task("work")),
++    failing(raise_crash),
++  )
++  |> should.be_error
++  count(ledger, "sessions") |> should.equal(1)
++  count(ledger, "session_family") |> should.equal(0)
++  count(ledger, "mail") |> should.equal(0)
++  count(ledger, "fixture_events") |> should.equal(0)
++  count(ledger, "fixture_identity") |> should.equal(1)
++  // The same store remains usable after returned errors and caught panics.
++  let assert Ok(_) =
++    conversation.create_child(
++      ledger,
++      info("child"),
++      "parent",
++      "worker",
++      None,
++      runtime.lifecycle_owners(host),
++    )
++  runtime.stop(host)
++}
++
++pub fn callback_error_rolls_back_family_task_and_identity_test() -> Nil {
++  refused_child(False)
++}
++
++pub fn callback_panic_rolls_back_and_store_remains_usable_test() -> Nil {
++  refused_child(True)
++}
++
++pub fn initial_mail_insert_failure_rolls_back_child_test() -> Nil {
++  let host = host()
++  parent(host)
++  let ledger = runtime.ledger(host)
++  let assert Ok(_) =
++    store.query(ledger, fn(db) {
++      store.exec(
++        db,
++        "CREATE TRIGGER reject_task BEFORE INSERT ON mail BEGIN SELECT RAISE(ABORT,'fixture mail rejected'); END;",
++      )
++    })
++  conversation.create_child(
++    ledger,
++    info("child"),
++    "parent",
++    "worker",
++    Some(task("work")),
++    runtime.lifecycle_owners(host),
++  )
++  |> should.be_error
++  count(ledger, "sessions") |> should.equal(1)
++  count(ledger, "session_family") |> should.equal(0)
++  count(ledger, "fixture_events") |> should.equal(0)
++  runtime.stop(host)
++}
++
++pub fn quarantined_owner_refuses_only_needed_lineage_test() -> Nil {
++  let host = host()
++  parent(host)
++  let ledger = runtime.ledger(host)
++  let owners = [
++    lifecycle.Owner(
++      "fixture-lineage",
++      lifecycle.Quarantined("fixture unavailable"),
++      [lifecycle.Contribution(needed, apply)],
++    ),
++  ]
++  conversation.create_child(
++    ledger,
++    info("child"),
++    "parent",
++    "worker",
++    None,
++    owners,
++  )
++  |> should.be_error
++  let assert Ok(_) = conversation.create(ledger, info("unrelated"), [])
++  let assert Ok(_) =
++    conversation.create_child(
++      ledger,
++      info("unrelated-child"),
++      "unrelated",
++      "worker",
++      None,
++      owners,
++    )
++  count(ledger, "fixture_events") |> should.equal(0)
++  runtime.stop(host)
++}
++
++pub fn guard_error_rolls_back_without_applying_test() -> Nil {
++  let host = host()
++  parent(host)
++  let ledger = runtime.ledger(host)
++  let owners = [
++    lifecycle.Owner("fixture-lineage", lifecycle.Ready, [
++      lifecycle.Contribution(fn(_, _) { Error("corrupt lineage") }, apply),
++    ]),
++  ]
++  conversation.create_child(
++    ledger,
++    info("child"),
++    "parent",
++    "worker",
++    None,
++    owners,
++  )
++  |> should.be_error
++  count(ledger, "sessions") |> should.equal(1)
++  count(ledger, "fixture_events") |> should.equal(0)
++  runtime.stop(host)
++}
++
++pub fn fresh_creation_callback_is_atomic_test() -> Nil {
++  let host = host()
++  let ledger = runtime.ledger(host)
++  conversation.create(ledger, info("fresh"), failing(False)) |> should.be_error
++  count(ledger, "sessions") |> should.equal(0)
++  count(ledger, "fixture_events") |> should.equal(0)
++  let assert Ok(_) =
++    conversation.create(ledger, info("fresh"), runtime.lifecycle_owners(host))
++  count(ledger, "fixture_events") |> should.equal(1)
++  runtime.stop(host)
++}
++
++fn creation(id: String, fingerprint: String) -> conversation.Creation {
++  conversation.Creation(
++    operations.Request(operation_id(), fingerprint, "create", id, None),
++    "{}",
++    "{}",
++    None,
++  )
++}
++
++pub fn identified_create_existing_and_deleted_never_repeat_callbacks_test() -> Nil {
++  let host = host()
++  let ledger = runtime.ledger(host)
++  let owners = runtime.lifecycle_owners(host)
++  let request = creation("fresh", "same")
++  let assert Ok(_) =
++    conversation.create_identified(ledger, info("fresh"), request, None, owners)
++  conversation.create_identified(ledger, info("fresh"), request, None, owners)
++  |> should.equal(Error("session_exists"))
++  let assert Ok(_) =
++    store.query(ledger, fn(db) {
++      store.exec(
++        db,
++        "DELETE FROM sessions WHERE id='fresh'; UPDATE session_creation SET deleted_at=1 WHERE session_id='fresh';",
++      )
++    })
++  conversation.create_identified(ledger, info("fresh"), request, None, owners)
++  |> should.equal(Error("session_deleted"))
++  count(ledger, "fixture_events") |> should.equal(1)
++  runtime.stop(host)
++}
++
++pub fn rejected_receipt_replay_skips_callback_test() -> Nil {
++  let host = host()
++  let ledger = runtime.ledger(host)
++  let request = creation("fresh", "same")
++  let assert Ok(_) =
++    operations.reject(
++      ledger,
++      request.request,
++      operations.Rejection(400, "fixture_rejected", "fixture rejection"),
++    )
++  let assert Ok(receipt) =
++    conversation.create_identified(
++      ledger,
++      info("fresh"),
++      request,
++      None,
++      failing(True),
++    )
++  receipt.status |> should.equal("rejected")
++  count(ledger, "sessions") |> should.equal(0)
++  count(ledger, "fixture_events") |> should.equal(0)
++  conversation.create_identified(
++    ledger,
++    info("fresh"),
++    conversation.Creation(
++      ..request,
++      request: operations.Request(..request.request, fingerprint: "changed"),
++    ),
++    None,
++    runtime.lifecycle_owners(host),
++  )
++  |> should.be_error
++  count(ledger, "fixture_events") |> should.equal(0)
++  runtime.stop(host)
++}
++
++pub fn fork_mapping_excludes_synthetic_tool_results_test() -> Nil {
++  let host = host()
++  parent(host)
++  let ledger = runtime.ledger(host)
++  let assert Ok(call) =
++    json.parse(
++      "{\"type\":\"function_call\",\"id\":\"item\",\"call_id\":\"pending\",\"name\":\"tool\",\"arguments\":\"{}\"}",
++      types.replay_decoder(types.Responses),
++    )
++  let assert Ok(_) =
++    conversation.commit(
++      ledger,
++      "parent",
++      [types.User("start"), types.Replay(call)],
++      conversation.Idle,
++    )
++  let assert Ok([first, second]) = conversation.load_sources(ledger, "parent")
++  // Introduce a global sequence gap with another session.
++  let assert Ok(_) = conversation.create(ledger, info("other"), [])
++  let assert Ok(_) =
++    conversation.commit(ledger, "other", [types.User("gap")], conversation.Idle)
++  let assert Ok(_) =
++    history.fork(
++      ledger,
++      "parent",
++      "branch",
++      second.source.seq,
++      runtime.lifecycle_owners(host),
++    )
++  let assert Ok([branch_first, branch_second, synthetic]) =
++    conversation.load_sources(ledger, "branch")
++  let assert Ok(mapping) =
++    store.query(ledger, fn(db) {
++      store.rows(
++        db,
++        "SELECT source_seq,branch_seq FROM fixture_mapping ORDER BY source_seq",
++        [],
++        {
++          use source <- decode.field(0, decode.int)
++          use branch <- decode.field(1, decode.int)
++          decode.success(#(source, branch))
++        },
++      )
++    })
++  mapping
++  |> should.equal([
++    #(first.source.seq, branch_first.source.seq),
++    #(second.source.seq, branch_second.source.seq),
++  ])
++  synthetic.entry.input
++  |> should.equal(
++    types.ToolOutput("pending", "not executed after branch checkpoint", []),
++  )
++  runtime.stop(host)
++}
++
++pub fn fork_callback_failure_rolls_back_copied_prefix_test() -> Nil {
++  let host = host()
++  parent(host)
++  let ledger = runtime.ledger(host)
++  let assert Ok(_) =
++    conversation.commit(
++      ledger,
++      "parent",
++      [types.User("start")],
++      conversation.Idle,
++    )
++  let assert Ok([row]) = conversation.load_sources(ledger, "parent")
++  history.fork(ledger, "parent", "branch", row.source.seq, failing(False))
++  |> should.be_error
++  count(ledger, "sessions") |> should.equal(1)
++  count(ledger, "transcript") |> should.equal(1)
++  count(ledger, "fixture_mapping") |> should.equal(0)
++  runtime.stop(host)
++}
++
++pub fn omitted_lcm_memory_declaration_preserves_native_fork_inheritance_test() -> Nil {
++  let host = host()
++  parent(host)
++  let ledger = runtime.ledger(host)
++  let assert Ok(_) = graph.initialise(ledger)
++  let assert Ok(_) =
++    conversation.commit(
++      ledger,
++      "parent",
++      [types.User("first"), types.Assistant("answer"), types.User("next")],
++      conversation.Idle,
++    )
++  let assert Ok([first, second, third]) =
++    conversation.load_sources(ledger, "parent")
++  let assert Ok(_) =
++    graph.save_leaves(ledger, "parent", [
++      graph.Leaf(first.source.seq, second.source.seq, "complete fold"),
++      graph.Leaf(third.source.seq, third.source.seq, "later fold"),
++    ])
++  let assert Ok(_) =
++    history.fork(ledger, "parent", "branch", second.source.seq, [])
++  let assert Ok([node]) = graph.frontier(ledger, "branch")
++  node.summary |> should.equal("complete fold")
++  let assert Ok([_, branch_second]) =
++    conversation.load_sources(ledger, "branch")
++  graph.last_seq(ledger, "branch") |> should.equal(Ok(branch_second.source.seq))
++  runtime.stop(host)
++}
++
++pub fn canonical_healthy_owner_is_not_quarantined_by_duplicate_test() -> Nil {
++  let first = declaration()
++  let duplicate =
++    extension.Extension(..first, initialise: fn(_) {
++      Error("must not start duplicate")
++    })
++  let assert Ok(host) =
++    runtime.start_with_config(
++      ":memory:",
++      extensions.Config([first, duplicate], []),
++    )
++  let assert [owner] = runtime.lifecycle_owners(host)
++  owner.availability |> should.equal(lifecycle.Ready)
++  list.length(runtime.quarantined(host)) |> should.equal(1)
++  runtime.stop(host)
++}
++
++pub fn failed_canonical_owner_reports_its_initialiser_failure_test() -> Nil {
++  let failed =
++    extension.Extension(..declaration(), initialise: fn(_) {
++      Error("fixture unavailable")
++    })
++  let assert Ok(host) =
++    runtime.start_with_config(
++      ":memory:",
++      extensions.Config([failed, failed], []),
++    )
++  let assert [owner] = runtime.lifecycle_owners(host)
++  owner.availability
++  |> should.equal(lifecycle.Quarantined(
++    "it did not install: fixture unavailable",
++  ))
++  let ledger = runtime.ledger(host)
++  let assert Ok(_) = conversation.initialise(ledger)
++  conversation.create(ledger, info("fresh"), runtime.lifecycle_owners(host))
++  |> should.equal(Error(
++    "fixture-lineage: required lifecycle owner is quarantined: it did not install: fixture unavailable",
++  ))
++  count(ledger, "sessions") |> should.equal(0)
++  runtime.stop(host)
++}
++
++pub fn failed_initialiser_retains_guard_but_never_applies_test() -> Nil {
++  let failed =
++    extension.Extension(..declaration(), initialise: fn(_) {
++      Error("fixture unavailable")
++    })
++  let assert Ok(host) =
++    runtime.start_with_config(":memory:", extensions.Config([failed], []))
++  let assert [owner] = runtime.lifecycle_owners(host)
++  case owner.availability {
++    lifecycle.Quarantined(_) -> Nil
++    _ -> panic as "failed declaration lost quarantine"
++  }
++  let ledger = runtime.ledger(host)
++  let assert Ok(_) = conversation.initialise(ledger)
++  // Created guard is true without touching the unavailable fixture table.
++  conversation.create(ledger, info("fresh"), runtime.lifecycle_owners(host))
++  |> should.be_error
++  count(ledger, "sessions") |> should.equal(0)
++  runtime.stop(host)
++}
++
++pub fn commit_failure_rolls_back_child_task_and_callback_writes_test() -> Nil {
++  let host = host()
++  parent(host)
++  let ledger = runtime.ledger(host)
++  let assert Ok(_) =
++    store.query(ledger, fn(db) {
++      store.exec(
++        db,
++        "CREATE TABLE fixture_deferred(id TEXT REFERENCES sessions(id) DEFERRABLE INITIALLY DEFERRED);",
++      )
++    })
++  let owners = [
++    lifecycle.Owner("fixture-lineage", lifecycle.Ready, [
++      lifecycle.Contribution(needed, fn(db, event) {
++        use _ <- result.try(apply(db, event))
++        store.exec(db, "INSERT INTO fixture_deferred VALUES('missing');")
++      }),
++    ]),
++  ]
++  conversation.create_child(
++    ledger,
++    info("child"),
++    "parent",
++    "worker",
++    Some(task("work")),
++    owners,
++  )
++  |> should.be_error
++  count(ledger, "sessions") |> should.equal(1)
++  count(ledger, "mail") |> should.equal(0)
++  count(ledger, "fixture_events") |> should.equal(0)
++  count(ledger, "fixture_deferred") |> should.equal(0)
++  let assert Ok(_) =
++    conversation.create_child(
++      ledger,
++      info("child"),
++      "parent",
++      "worker",
++      Some(task("work")),
++      runtime.lifecycle_owners(host),
++    )
++  runtime.stop(host)
++}
++
++pub fn identified_child_task_and_callback_share_admission_test() -> Nil {
++  let host = host()
++  parent(host)
++  let ledger = runtime.ledger(host)
++  let input_id = operation_id()
++  let request =
++    conversation.ChildCreation(
++      info("child"),
++      creation("child", "same"),
++      "parent",
++      "worker",
++      operations.Request(input_id, "task-fingerprint", "message", "child", None),
++      <<1, 2, 3>>,
++      mail.Letter(..task("work"), id: input_id),
++    )
++  conversation.create_child_identified(ledger, request, failing(False))
++  |> should.equal(Error("fixture-lineage: fixture callback refused"))
++  count(ledger, "sessions") |> should.equal(1)
++  count(ledger, "pending_inputs") |> should.equal(0)
++  count(ledger, "operations") |> should.equal(0)
++  count(ledger, "mail") |> should.equal(0)
++  let assert Ok(_) =
++    conversation.create_child_identified(
++      ledger,
++      request,
++      runtime.lifecycle_owners(host),
++    )
++  count(ledger, "pending_inputs") |> should.equal(1)
++  count(ledger, "operations") |> should.equal(2)
++  count(ledger, "fixture_events") |> should.equal(1)
++  conversation.create_child_identified(ledger, request, failing(True))
++  |> should.equal(Error("session_exists"))
++  count(ledger, "fixture_events") |> should.equal(1)
++  runtime.stop(host)
++}
++
++pub fn identified_fork_callback_is_inside_admission_test() -> Nil {
++  let host = host()
++  parent(host)
++  let ledger = runtime.ledger(host)
++  let assert Ok(_) =
++    conversation.commit(
++      ledger,
++      "parent",
++      [types.User("start")],
++      conversation.Idle,
++    )
++  let assert Ok([row]) = conversation.load_sources(ledger, "parent")
++  let request =
++    history.ForkCreation(
++      "parent",
++      "branch",
++      row.source.seq,
++      creation("branch", "same"),
++    )
++  history.fork_identified(ledger, request, failing(False))
++  |> should.equal(Error("fixture-lineage: fixture callback refused"))
++  count(ledger, "operations") |> should.equal(0)
++  count(ledger, "sessions") |> should.equal(1)
++  let assert Ok(_) =
++    history.fork_identified(ledger, request, runtime.lifecycle_owners(host))
++  count(ledger, "operations") |> should.equal(1)
++  count(ledger, "fixture_events") |> should.equal(1)
++  history.fork_identified(ledger, request, failing(True))
++  |> should.equal(Error("session_exists"))
++  runtime.stop(host)
++}
++
++pub fn creation_is_silent_until_caller_announces_committed_task_test() -> Nil {
++  let host = host()
++  parent(host)
++  let ledger = runtime.ledger(host)
++  let subscription =
++    bus.subscribe_filtered(process.self(), fn() { Nil }, ["parent", "child"])
++  conversation.create_child(
++    ledger,
++    info("child"),
++    "parent",
++    "worker",
++    Some(task("work")),
++    failing(False),
++  )
++  |> should.be_error
++  bus.drain(subscription) |> should.equal(bus.Batch([], False))
++  let assert Ok(_) =
++    conversation.create_child(
++      ledger,
++      info("child"),
++      "parent",
++      "worker",
++      Some(task("work")),
++      runtime.lifecycle_owners(host),
++    )
++  bus.drain(subscription) |> should.equal(bus.Batch([], False))
++  count(ledger, "mail") |> should.equal(1)
++  mail.announce(task("work"))
++  let assert bus.Batch([event], False) = bus.drain(subscription)
++  let assert Ok(kind) =
++    json.parse(event, decode.field("type", decode.string, decode.success))
++  kind |> should.equal("mail")
++  runtime.stop(host)
++}
++
++pub fn identified_creation_preserves_context_window_test() -> Nil {
++  let host = host()
++  let ledger = runtime.ledger(host)
++  let assert Ok(_) =
++    conversation.create_identified(
++      ledger,
++      info("window"),
++      creation("window", "window"),
++      Some(65_536),
++      runtime.lifecycle_owners(host),
++    )
++  let assert Ok(saved) =
++    store.query(ledger, session_configuration.read_in(_, "window"))
++  saved.context_window |> should.equal(Some(65_536))
++  runtime.stop(host)
++}
+diff --git a/test/daemon/mail_commit_test.gleam b/test/daemon/mail_commit_test.gleam
+index 8e5a52c07a8f30cbaad152d0958f75ebd45e1df2..e0b5458fd8d298248d72b06f100206cb8a5b73f2 100644
+--- a/test/daemon/mail_commit_test.gleam
++++ b/test/daemon/mail_commit_test.gleam
+@@ -34,9 +34,9 @@ pub fn close_before_mail_commit_rolls_back_turn_and_preserves_letter_test() -> N
+       None,
+       None,
+     )
+-  let assert Ok(_) = conversation.create(ledger, parent)
++  let assert Ok(_) = conversation.create(ledger, parent, [])
+   let assert Ok(_) =
+-    conversation.create(ledger, conversation.Info(..parent, id: "child"))
++    conversation.create(ledger, conversation.Info(..parent, id: "child"), [])
+   let assert Ok(_) =
+     store.query(ledger, fn(connection) {
+       family.link_in(connection, "child", "parent", "child")
+diff --git a/test/daemon/session_requirements_test.gleam b/test/daemon/session_requirements_test.gleam
+new file mode 100644
+index 0000000000000000000000000000000000000000..73ffb6e62c5ee9e2b0ac9d66b381752fa4539814
+--- /dev/null
++++ b/test/daemon/session_requirements_test.gleam
+@@ -0,0 +1,188 @@
++//// Direct transaction faults and absent core tables cannot be injected through
++//// HTTP. These tests exercise persisted admission independently of extensions.
++
++import albedo/daemon/conversation
++import albedo/daemon/family
++import albedo/daemon/history
++import albedo/daemon/mail
++import albedo/daemon/session_requirements as requirements
++import albedo/daemon/store
++import albedo/openai_api/types
++import gleam/dynamic/decode
++import gleam/option.{None}
++import gleam/result
++import gleeunit/should
++
++pub fn missing_storage_fails_closed_test() -> Nil {
++  let assert Ok(ledger) = store.start(":memory:", "")
++  requirements.check(ledger, "session", []) |> should.be_error
++  store.close(ledger)
++}
++
++pub fn requirements_and_binding_rollback_together_test() -> Nil {
++  let assert Ok(ledger) =
++    store.start(
++      ":memory:",
++      "CREATE TABLE sessions(id TEXT PRIMARY KEY); INSERT INTO sessions VALUES('session'); CREATE TABLE binding(session TEXT);",
++    )
++  let assert Ok(_) = requirements.initialise(ledger)
++  let outcome =
++    store.query(ledger, fn(db) {
++      store.transaction(db, fn() {
++        use _ <- result.try(store.exec(
++          db,
++          "INSERT INTO binding VALUES('session')",
++        ))
++        use _ <- result.try(requirements.require_in(
++          db,
++          "session",
++          "personality",
++        ))
++        Error("rollback")
++      })
++    })
++  outcome |> should.equal(Error("rollback"))
++  store.query(ledger, fn(db) {
++    store.one(
++      db,
++      "SELECT count(*) FROM binding",
++      [],
++      decode.field(0, decode.int, decode.success),
++      "count failed",
++    )
++  })
++  |> should.equal(Ok(0))
++  store.query(ledger, requirements.required_in(_, "session"))
++  |> should.equal(Ok([]))
++  let assert Ok(_) =
++    store.query(ledger, requirements.require_in(_, "session", "personality"))
++  requirements.check(ledger, "session", []) |> should.be_error
++  requirements.check(ledger, "session", ["personality"])
++  |> should.equal(Ok(Nil))
++  store.query(ledger, requirements.descendant_allowed_in(_, "session"))
++  |> should.be_error
++  let assert Ok(_) =
++    store.query(ledger, requirements.release_in(_, "session", "personality"))
++  requirements.check(ledger, "session", []) |> should.equal(Ok(Nil))
++  store.close(ledger)
++}
++
++pub fn required_identity_blocks_native_descendants_without_extension_test() -> Nil {
++  let assert Ok(ledger) = store.start(":memory:", "")
++  let assert Ok(_) = conversation.initialise(ledger)
++  let assert Ok(_) = family.initialise(ledger)
++  let assert Ok(_) = mail.initialise(ledger)
++  let parent =
++    conversation.Info(
++      "parent",
++      "new session",
++      "/tmp",
++      "fixture",
++      "model",
++      types.Responses,
++      conversation.Idle,
++      None,
++      None,
++    )
++  let assert Ok(_) = conversation.create(ledger, parent, [])
++  let assert Ok(_) =
++    conversation.commit(
++      ledger,
++      "parent",
++      [types.User("start")],
++      conversation.Idle,
++    )
++  let assert Ok([first]) = conversation.load_sources(ledger, "parent")
++  let assert Ok(_) =
++    store.query(ledger, requirements.require_in(_, "parent", "personality"))
++  conversation.create_child(
++    ledger,
++    conversation.Info(..parent, id: "child"),
++    "parent",
++    "child",
++    None,
++    [],
++  )
++  |> should.equal(Error(
++    "session requires capabilities; descendant inheritance is unavailable",
++  ))
++  history.fork(ledger, "parent", "fork", first.source.seq, [])
++  |> should.equal(Error(
++    "session requires capabilities; descendant inheritance is unavailable",
++  ))
++  history.rewind(ledger, "parent", "archive", first.source.seq, None, None, [])
++  |> should.equal(Error(
++    "session requires capabilities; descendant inheritance is unavailable",
++  ))
++  store.query(ledger, conversation.read_info(_, "child")) |> should.be_error
++  store.query(ledger, conversation.read_info(_, "fork")) |> should.be_error
++  store.query(ledger, conversation.read_info(_, "archive")) |> should.be_error
++  store.close(ledger)
++}
++
++@external(erlang, "albedo_runtime_test_support", "temporary_database")
++fn temporary_database() -> String
++
++@external(erlang, "albedo_runtime_test_support", "cleanup")
++fn cleanup(path: String) -> Nil
++
++pub fn requirements_survive_reopen_and_delete_with_session_test() -> Nil {
++  let path = temporary_database()
++  let assert Ok(ledger) =
++    store.start(
++      path,
++      "CREATE TABLE sessions(id TEXT PRIMARY KEY); INSERT INTO sessions VALUES('session');",
++    )
++  let assert Ok(_) = requirements.initialise(ledger)
++  let assert Ok(_) =
++    store.query(ledger, requirements.require_in(_, "session", "personality"))
++  store.close(ledger)
++  let assert Ok(reopened) = store.start(path, "")
++  let assert Ok(_) = requirements.initialise(reopened)
++  requirements.check(reopened, "session", []) |> should.be_error
++  requirements.check(reopened, "session", ["personality"])
++  |> should.equal(Ok(Nil))
++  let assert Ok(_) =
++    store.query(reopened, fn(db) {
++      store.exec(
++        db,
++        "PRAGMA foreign_keys=ON; DELETE FROM sessions WHERE id='session';",
++      )
++    })
++  store.query(reopened, requirements.required_in(_, "session"))
++  |> should.equal(Ok([]))
++  store.close(reopened)
++  cleanup(path)
++}
++
++pub fn restart_does_not_recreate_lost_requirement_storage_test() -> Nil {
++  let path = temporary_database()
++  let assert Ok(ledger) =
++    store.start(
++      path,
++      "CREATE TABLE sessions(id TEXT PRIMARY KEY); INSERT INTO sessions VALUES('session');",
++    )
++  let assert Ok(_) = requirements.initialise(ledger)
++  let assert Ok(_) =
++    store.query(ledger, requirements.require_in(_, "session", "personality"))
++  let assert Ok(_) =
++    store.query(ledger, fn(db) {
++      store.exec(db, "DROP TABLE session_requirements")
++    })
++  store.close(ledger)
++  let assert Ok(reopened) = store.start(path, "")
++  requirements.initialise(reopened) |> should.be_error
++  requirements.check(reopened, "session", []) |> should.be_error
++  store.close(reopened)
++  cleanup(path)
++}
++
++pub fn incompatible_requirement_storage_refuses_initialisation_test() -> Nil {
++  let assert Ok(ledger) =
++    store.start(
++      ":memory:",
++      "CREATE TABLE sessions(id TEXT PRIMARY KEY); CREATE VIEW session_requirements AS SELECT id AS session, 'personality' AS capability FROM sessions;",
++    )
++  requirements.initialise(ledger) |> should.be_error
++  store.close(ledger)
++}
+diff --git a/test/daemon/transcript_sources_test.gleam b/test/daemon/transcript_sources_test.gleam
+index bee0af2109a699ebd8742aa7100e9ea42ab8f165..4e8a82cfc7c621399ce15434978e52af64ee44f0 100644
+--- a/test/daemon/transcript_sources_test.gleam
++++ b/test/daemon/transcript_sources_test.gleam
+@@ -73,7 +73,7 @@ pub fn metadata_range_and_backfill_resume_test() -> Nil {
+   let assert Ok(host) = runtime.start(path)
+   let ledger = runtime.ledger(host)
+   let assert Ok(_) = conversation.initialise(ledger)
+-  let assert Ok(_) = conversation.create(ledger, session())
++  let assert Ok(_) = conversation.create(ledger, session(), [])
+   let inputs = list.repeat(types.User("[note] daemon boundary"), 260)
+   let assert Ok(_) =
+     conversation.commit(ledger, "session", inputs, conversation.Idle)
+@@ -122,7 +122,7 @@ pub fn ranged_images_equal_full_history_with_later_fits_test() -> Nil {
+   let ledger = runtime.ledger(host)
+   let assert Ok(_) = conversation.initialise(ledger)
+   let assert Ok(_) = family.initialise(ledger)
+-  let assert Ok(_) = conversation.create(ledger, session())
++  let assert Ok(_) = conversation.create(ledger, session(), [])
+   let data = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAAD"
+   let assert Ok(original) = types.image("image/png", data, 2, 3, 24)
+   let assert Ok(second) = types.image("image/png", data <> "AAAA", 2, 3, 27)
+@@ -184,7 +184,7 @@ pub fn ranged_images_equal_full_history_with_later_fits_test() -> Nil {
+       conversation.Continue([fingerprint(row.entry.input), ..acc])
+     })
+   before |> should.equal([fingerprint(types.UserImage("reuse", [original]))])
+-  let assert Ok(_) = history.fork(ledger, "session", "branch", 2)
++  let assert Ok(_) = history.fork(ledger, "session", "branch", 2, [])
+   let assert Ok(branch) = conversation.snapshot(ledger, "branch")
+   let assert Ok(branch_stats) = conversation.source_stats(ledger, branch, 0)
+   branch_stats.uncovered_users |> should.equal(2)
+diff --git a/test/e2e/context_test.py b/test/e2e/context_test.py
+index 524814daceefa9a3cb0bbcb347d2de907c2cd7c7..3ede1e359f2cf6692fcdccc916e82198ed145557 100644
+--- a/test/e2e/context_test.py
++++ b/test/e2e/context_test.py
+@@ -113,9 +113,19 @@ class ContextTest(unittest.TestCase):
+         compaction = snapshot["compaction"]
+         self.assertEqual(compaction["provider_input_tokens"], 20)
+         self.assertIsNone(compaction["provider_cached_input_tokens"])
++        captured = snapshot["request_context"]
+         self.assertEqual(
+-            compaction["estimate_method"],
+-            "local byte-based estimate; not provider token usage",
++            compaction["estimated_input_tokens"], captured["estimated_tokens"]
++        )
++        self.assertGreater(captured["estimated_tokens"], captured["static_tokens"])
++        self.assertEqual(captured["capacity_tokens"], snapshot["context_window_tokens"])
++        self.assertEqual(
++            captured["fits"],
++            captured["estimated_tokens"] <= captured["capacity_tokens"],
++        )
++        self.assertIsNone(captured["failure"])
++        self.assertNotEqual(
++            compaction["estimated_input_tokens"], compaction["provider_input_tokens"]
+         )
+         self.assertEqual(compaction["status"], "not_needed")
+         self.assertEqual(compaction["input_limit_tokens"], 200000)
+diff --git a/test/harness/cache_fade_test.gleam b/test/harness/cache_fade_test.gleam
+index 20647edecade1505c44193011f2bcf714a169bf0..fccee0b618b68b7cd4d2ec46ffea1b41238d37de 100644
+--- a/test/harness/cache_fade_test.gleam
++++ b/test/harness/cache_fade_test.gleam
+@@ -114,8 +114,8 @@ pub fn the_ledger_measures_a_head_across_sessions_test() -> Nil {
+       )
+     Nil
+   }
+-  let assert Ok(_) = conversation.create(ledger, info("parent"))
+-  let assert Ok(_) = conversation.create(ledger, info("fork"))
++  let assert Ok(_) = conversation.create(ledger, info("parent"), [])
++  let assert Ok(_) = conversation.create(ledger, info("fork"), [])
+   // The parent wrote the head after reading its tools: 2k + 18k.
+   record("parent", "claude", "opus", "head", usage(2000, 500, 18_000))
+   // The fork reads it whole, tail and all, which measures nothing.
+diff --git a/test/harness/extension_failure_test.gleam b/test/harness/extension_failure_test.gleam
+index 7c6bc2d50e9ab0e6d80869b0ad9a973ec752512a..ac5c587b23a260856d8d87d598e259e57cf911c5 100644
+--- a/test/harness/extension_failure_test.gleam
++++ b/test/harness/extension_failure_test.gleam
+@@ -51,6 +51,7 @@ fn host(
+         None,
+         None,
+       ),
++      [],
+     )
+   let assert Ok(session) =
+     runtime.open_session(host, "broken-extension-test", "/tmp")
+diff --git a/test/harness/idle_service_test.gleam b/test/harness/idle_service_test.gleam
+new file mode 100644
+index 0000000000000000000000000000000000000000..b2646e6238c9720228b05401bfd7cd8152c12bf1
+--- /dev/null
++++ b/test/harness/idle_service_test.gleam
+@@ -0,0 +1,154 @@
++import albedo/daemon/active_output
++import albedo/daemon/conversation
++import albedo/daemon/event_buffer
++import albedo/daemon/session_activity
++import albedo/daemon/session_configure
++import albedo/daemon/session_state
++import albedo/daemon/store
++import albedo/daemon/tool_progress
++import albedo/daemon/turn
++import albedo/harness/command
++import albedo/harness/extensions
++import albedo/harness/loop
++import albedo/harness/runtime
++import albedo/openai_api/types
++import gleam/dict
++import gleam/erlang/process
++import gleam/json
++import gleam/option.{None, Some}
++import gleam/result
++import gleeunit/should
++
++fn fixture(host: runtime.Runtime) -> session_state.State(Nil) {
++  session_state.State(
++    active_output: active_output.new("/tmp", "idle-fixture", "generation"),
++    info: conversation.Info(
++      "idle-fixture",
++      "test",
++      "/tmp",
++      "none",
++      "none",
++      types.Responses,
++      conversation.Idle,
++      None,
++      None,
++    ),
++    host: host,
++    kernel: None,
++    released: None,
++    home: "/tmp",
++    self: process.new_subject(),
++    history: None,
++    latest_usage: None,
++    activity: turn.Resting,
++    steering: [],
++    active_submissions: [],
++    sequence: 0,
++    events: event_buffer.new(),
++    watchers: [],
++    notice: None,
++    context: session_state.unprepared(),
++    pin: loop.Unpinned,
++    prepared_head: None,
++    last_touch: 0,
++    booting: None,
++    blocked_until: 0,
++    generation: "generation",
++    composition_generation: 0,
++    tool_progress: tool_progress.new(),
++    progress_timer_token: 0,
++    progress_timer: None,
++    live_activity: session_activity.new(0),
++    announced_status: None,
++    pending_output: [],
++    output_timer: None,
++    output_published_at: 0,
++    publish_output: Nil,
++  )
++}
++
++pub fn idle_callback_gets_native_store_and_session_and_propagates_error_test() -> Nil {
++  let assert Ok(host) =
++    runtime.start_with_config(":memory:", extensions.Config([], []))
++  let state = fixture(host)
++  let applied =
++    session_configure.apply_idle(state, fn(db, id) {
++      use _ <- result.try(
++        store.write(db, "CREATE TABLE idle_bridge_test(value TEXT)", []),
++      )
++      Ok(json.string(id))
++    })
++  let failed =
++    session_configure.apply_idle(state, fn(_, _) {
++      Error("transaction refused")
++    })
++  runtime.stop(host)
++  applied |> result.map(json.to_string) |> should.equal(Ok("\"idle-fixture\""))
++  failed |> should.equal(Error("transaction refused"))
++}
++
++pub fn booting_or_running_refuses_before_callback_test() -> Nil {
++  let assert Ok(host) =
++    runtime.start_with_config(":memory:", extensions.Config([], []))
++  let state = fixture(host)
++  let called = process.new_subject()
++  let run = fn(_, _) {
++    process.send(called, Nil)
++    Ok(json.null())
++  }
++  let booting =
++    session_configure.apply_idle(
++      session_state.State(..state, booting: Some(#(1, []))),
++      run,
++    )
++  let monitor = process.monitor(process.self())
++  let active =
++    turn.Running(turn.Run(
++      "run",
++      process.self(),
++      monitor,
++      False,
++      turn.latch(),
++      turn.Turn(None, False),
++    ))
++  let running =
++    session_configure.apply_idle(
++      session_state.State(..state, activity: active),
++      run,
++    )
++  process.demonitor_process(monitor)
++  runtime.stop(host)
++  booting |> should.equal(Error("session_busy"))
++  running |> should.equal(Error("session_busy"))
++  process.receive(called, 0) |> should.be_error
++}
++
++pub fn callback_crash_is_caught_test() -> String {
++  let assert Ok(host) =
++    runtime.start_with_config(":memory:", extensions.Config([], []))
++  let outcome =
++    session_configure.apply_idle(fixture(host), fn(_, _) {
++      panic as "fixture crash"
++    })
++  runtime.stop(host)
++  outcome |> should.be_error
++}
++
++pub fn input_preparation_cannot_forward_idle_mutation_test() -> Nil {
++  let called = process.new_subject()
++  let context =
++    command.Context(fn(_) {
++      process.send(called, Nil)
++      Ok(json.null())
++    })
++  let operation =
++    command.Command("/fixture", "", [], False, True, False, None, fn(ctx, _, _) {
++      use _ <- result.try(
++        ctx.state(command.ApplyIdle(fn(_, _) { Ok(json.null()) })),
++      )
++      Ok(command.Turn("display", "text"))
++    })
++  command.prepare_input(operation, context, dict.new())
++  |> should.equal(Error("input preparation cannot mutate session state"))
++  process.receive(called, 0) |> should.be_error
++}
+diff --git a/test/harness/lcm_preparation_test.gleam b/test/harness/lcm_preparation_test.gleam
+index d34d251fb92c052ba36fb3e24953481c53576dce..c7da248b8dcda5e234bd3177e2b4c597c436b468 100644
+--- a/test/harness/lcm_preparation_test.gleam
++++ b/test/harness/lcm_preparation_test.gleam
+@@ -47,6 +47,7 @@ pub fn below_trigger_and_stored_prior_do_not_decode_archived_payloads_test() ->
+         None,
+         None,
+       ),
++      [],
+     )
+   let archived =
+     list.repeat(Nil, 400)
+diff --git a/test/harness/lcm_test.gleam b/test/harness/lcm_test.gleam
+index 9faffffb7c8c45ec19e6268a9d63927f6e67ef5a..1005e455557c912ef56d406b3b8e8b3555a60bac 100644
+--- a/test/harness/lcm_test.gleam
++++ b/test/harness/lcm_test.gleam
+@@ -59,6 +59,7 @@ fn host_with(
+         None,
+         None,
+       ),
++      [],
+     )
+   let assert Ok(session) = runtime.open_session(host, "lcm-test", "/tmp")
+   #(host, session)
+@@ -101,7 +102,7 @@ pub fn lcm_fork_inside_summary_reuses_only_complete_child_nodes_test() -> Nil {
+     graph.save_parent(ledger, "lcm-test", [one, two, three], "all three units")
+ 
+   let assert Ok(_) =
+-    history.fork(ledger, "lcm-test", "partial", fourth.source.seq)
++    history.fork(ledger, "lcm-test", "partial", fourth.source.seq, [])
+   let assert Ok([branch_one, branch_two]) = graph.frontier(ledger, "partial")
+   branch_one.summary |> should.equal("first unit")
+   branch_two.summary |> should.equal("second unit")
+@@ -111,7 +112,7 @@ pub fn lcm_fork_inside_summary_reuses_only_complete_child_nodes_test() -> Nil {
+   |> should.equal(Ok(branch_fourth.source.seq))
+ 
+   let assert Ok(_) =
+-    history.fork(ledger, "lcm-test", "mid-leaf", third.source.seq)
++    history.fork(ledger, "lcm-test", "mid-leaf", third.source.seq, [])
+   let assert Ok([only_complete]) = graph.frontier(ledger, "mid-leaf")
+   only_complete.summary |> should.equal("first unit")
+   let assert Ok([_, middle_second, _]) =
+@@ -743,6 +744,7 @@ fn tight(capacity: Int, tail: Int) -> #(runtime.Runtime, runtime.Session) {
+         None,
+         None,
+       ),
++      [],
+     )
+   let assert Ok(session) = runtime.open_session(host, "lcm-test", "/tmp")
+   #(host, session)
+diff --git a/test/harness/retrieval_performance_test.gleam b/test/harness/retrieval_performance_test.gleam
+index ac500dfecfa4a3e9ebb2254dabc0aafbaeb134a3..ce7d39e6afb62dcb2506e6fd0f441f9f037dcd90 100644
+--- a/test/harness/retrieval_performance_test.gleam
++++ b/test/harness/retrieval_performance_test.gleam
+@@ -51,6 +51,7 @@ fn fixture() -> #(runtime.Runtime, store.Store) {
+             None,
+             None,
+           ),
++          [],
+         )
+     })
+   #(host, ledger)
+diff --git a/test/harness/session_fixture.gleam b/test/harness/session_fixture.gleam
+index 59b11a6d9ddfc0570a8e9a54a8f4a6d7b4b0e9c3..b54f03203559b93281cd9cd269de6f5e264119f5 100644
+--- a/test/harness/session_fixture.gleam
++++ b/test/harness/session_fixture.gleam
+@@ -29,6 +29,7 @@ pub fn create(host: runtime.Runtime, id: String, workspace: String) -> Nil {
+         None,
+         None,
+       ),
++      [],
+     )
+   Nil
+ }
+diff --git a/test/harness/tool_error_test.gleam b/test/harness/tool_error_test.gleam
+index 049c74db2099e70b79f3e9a34d5d2e7dcc117ea9..97a0a7ba7f2e63056f7691797a38f3215f37d771 100644
+--- a/test/harness/tool_error_test.gleam
++++ b/test/harness/tool_error_test.gleam
+@@ -38,6 +38,7 @@ fn host() -> #(runtime.Runtime, runtime.Session) {
+         None,
+         None,
+       ),
++      [],
+     )
+   let assert Ok(session) = runtime.open_session(host, "tool-error-test", "/tmp")
+   #(host, session)

@@ -4,6 +4,7 @@ The stdout file descriptor is exclusively a 4-byte-length-framed JSON channel.
 Cell stdout and stderr are redirected into a bounded in-memory prefix. This is
 trusted local execution, not a security sandbox.
 """
+
 from __future__ import annotations
 
 import ast
@@ -45,7 +46,9 @@ async def read_frame(stream: asyncio.StreamReader) -> bytes | None:
 
 
 def write_frame(stream: BinaryIO, value: dict[str, Any]) -> None:
-    payload = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    payload = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8"
+    )
     if len(payload) > MAX_FRAME_BYTES:
         raise ValueError("response frame exceeds protocol limit")
     stream.write(struct.pack(">I", len(payload)))
@@ -101,7 +104,9 @@ class CellScope:
         self.active = True
 
 
-_CURRENT_CELL: contextvars.ContextVar[CellScope | None] = contextvars.ContextVar("cell_output", default=None)
+_CURRENT_CELL: contextvars.ContextVar[CellScope | None] = contextvars.ContextVar(
+    "cell_output", default=None
+)
 
 
 class RoutedOutput(io.TextIOBase):
@@ -111,6 +116,7 @@ class RoutedOutput(io.TextIOBase):
     scope prevents later writes mutating a receipt that was already published.
     Raw OS descriptor writes remain unsupported protocol contamination.
     """
+
     def __init__(self, native):
         self.native = native
 
@@ -131,7 +137,11 @@ class RoutedOutput(io.TextIOBase):
         pass
 
 
-async def evaluate(tree: ast.AST, mode: str, namespace: dict[str, Any]) -> Any:
+async def evaluate(
+    tree: ast.Module | ast.Expression | ast.Interactive,
+    mode: str,
+    namespace: dict[str, Any],
+) -> Any:
     code = compile(tree, "<successor-cell>", mode, flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
     value = eval(code, namespace, namespace)
     # Await compiled top-level-await code, not an arbitrary awaitable result:
@@ -139,16 +149,21 @@ async def evaluate(tree: ast.AST, mode: str, namespace: dict[str, Any]) -> Any:
     return await value if code.co_flags & inspect.CO_COROUTINE else value
 
 
-async def execute(source: str, namespace: dict[str, Any], capture: Capture) -> tuple[bool, str]:
+async def execute(
+    source: str, namespace: dict[str, Any], capture: Capture
+) -> tuple[bool, str]:
     try:
         tree = ast.parse(source, filename="<successor-cell>", mode="exec")
         if tree.body and isinstance(tree.body[-1], ast.Expr):
             prefix = ast.Module(body=tree.body[:-1], type_ignores=tree.type_ignores)
             if prefix.body:
                 await evaluate(prefix, "exec", namespace)
-            value = await evaluate(ast.Expression(tree.body[-1].value), "eval", namespace)
+            value = await evaluate(
+                ast.Expression(tree.body[-1].value), "eval", namespace
+            )
             if value is not None:
                 from successor_tools.api import Text
+
                 display = str(value) if isinstance(value, Text) else repr(value)
                 capture.write(display)
                 if not display.endswith("\n"):
@@ -168,6 +183,7 @@ def _terminate_group(_signum: int, _frame: object) -> None:
 
 class OutputView:
     """Expose inspection, not registry allocation, in the public namespace."""
+
     __slots__ = ("_registry",)
 
     def __init__(self, registry):
@@ -192,18 +208,30 @@ async def serve() -> int:
     output = OutputRegistry(workspace / ".successor-runtime" / "output")
     runtime = JobRuntime(workspace, output)
     files.initialize(runtime)
-    injected = {"files": files, "run": runtime.run, "jobs": runtime.jobs,
-                "output": OutputView(output), "Path": Path, "asyncio": asyncio}
-    namespace: dict[str, Any] = {"__name__": "__main__", "__builtins__": __builtins__, **injected}
+    injected = {
+        "files": files,
+        "run": runtime.run,
+        "jobs": runtime.jobs,
+        "output": OutputView(output),
+        "Path": Path,
+        "asyncio": asyncio,
+    }
+    namespace: dict[str, Any] = {
+        "__name__": "__main__",
+        "__builtins__": __builtins__,
+        **injected,
+    }
     outgoing = sys.stdout.buffer
     native = output.capture("native")
     sys.stdout = sys.stderr = RoutedOutput(native)
     incoming = asyncio.StreamReader(limit=65536)
     transport, _ = await asyncio.get_running_loop().connect_read_pipe(
-        lambda: asyncio.StreamReaderProtocol(incoming), sys.stdin.buffer)
-    write_frame(outgoing, {
-        "v": PROTOCOL, "type": "ready", "pid": os.getpid(), "pgid": os.getpgrp()
-    })
+        lambda: asyncio.StreamReaderProtocol(incoming), sys.stdin.buffer
+    )
+    write_frame(
+        outgoing,
+        {"v": PROTOCOL, "type": "ready", "pid": os.getpid(), "pgid": os.getpgrp()},
+    )
     try:
         while True:
             try:
@@ -238,9 +266,12 @@ async def serve() -> int:
                     scope.active = False
                     _CURRENT_CELL.reset(token)
                 response: dict[str, Any] = {
-                    "v": PROTOCOL, "type": "result", "id": cell_id,
+                    "v": PROTOCOL,
+                    "type": "result",
+                    "id": cell_id,
                     "status": "succeeded" if ok else "failed",
-                    "output": capture.text(), "truncated": capture.truncated,
+                    "output": capture.text(),
+                    "truncated": capture.truncated,
                 }
                 if not ok:
                     response["error"] = error

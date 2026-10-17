@@ -1,0 +1,69 @@
+name = "albedo"
+version = "1.0.0"
+# 1.18 and 1.19 format constants differently; one formatter must own the tree.
+gleam = ">= 1.19.0"
+
+# Fill out these fields if you intend to generate HTML documentation or publish
+# your project to the Hex package manager.
+#
+# description = ""
+# licences = ["Apache-2.0"]
+# repository = { type = "github", user = "", repo = "" }
+# links = [{ title = "Website", href = "" }]
+#
+# For a full reference of all the available options, you can have a look at
+# https://gleam.run/writing-gleam/gleam-toml/.
+
+[dependencies]
+gleam_stdlib = ">= 1.0.0 and < 2.0.0"
+gleam_json = ">= 3.1.0 and < 4.0.0"
+sqlight = ">= 1.2.0 and < 2.0.0"
+gleam_otp = ">= 1.3.0 and < 2.0.0"
+gleam_erlang = ">= 1.3.0 and < 2.0.0"
+mist = ">= 6.0.3 and < 7.0.0"
+gleam_http = ">= 4.4.0 and < 5.0.0"
+yamerl = ">= 0.10.0 and < 1.0.0"
+barrel_mcp = ">= 4.0.0 and < 5.0.0"
+gleam_crypto = ">= 1.0.0 and < 2.0.0"
+
+[dev_dependencies]
+gleeunit = ">= 1.0.0 and < 2.0.0"
+
+# Commit lint profile. See robot-docs/gleam-lint.md for review and audit modes.
+[tools.glinter]
+include = ["src/", "test/"]
+stats = true
+warnings_as_errors = true
+
+[tools.glinter.rules]
+missing_type_annotation = "error"
+missing_labels = "error"
+unqualified_import = "error"
+unnecessary_variable = "error"
+duplicate_import = "error"
+echo = "error"
+avoid_todo = "error"
+todo_without_message = "error"
+division_by_zero = "error"
+short_variable_name = "off"
+trailing_underscore = "off"
+nolint_unused = "error"
+nolint_inline = "error"
+assert_ok_pattern = "off"
+avoid_panic = "off"
+panic_without_message = "off"
+discarded_result = "off"
+thrown_away_error = "off"
+error_context_lost = "off"
+unused_exports = "off"
+redundant_case = "off"
+label_possible = "off"
+prefer_guard_clause = "off"
+stringly_typed_error = "off"
+unwrap_used = "off"
+unnecessary_string_concatenation = "off"
+function_complexity = "off"
+module_complexity = "off"
+deep_nesting = "off"
+string_inspect = "off"
+ffi_usage = "off"

@@ -7,3 +7,6 @@ erl_crash.dump
 __pycache__/
 *.py[cod]
 /conformance/__pycache__/
+
+# Workspace-local static tool checkout
+.cache/

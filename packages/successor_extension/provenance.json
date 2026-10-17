@@ -1,0 +1,64 @@
+{
+  "reference_commit": "fb1f4dc4099d915ee926139fc49a5c55bb63eac4",
+  "reference_sources": {
+    "types.gleam": {
+      "path": "albedo-personality/src/albedo/harness/extensions/personality/types.gleam",
+      "sha256": "114fd3bd75bebe0a55939c326a990dd24e04453c89986d578b2aa53aeb880c7a",
+      "extraction": "reference source; main-identity adaptation adds independently retained Inspection.binding_generation"
+    },
+    "domain.gleam": {
+      "path": "albedo-personality/src/albedo/harness/extensions/personality/domain.gleam",
+      "sha256": "56e181930e507e7932d336666198df38831ac493955d6e431d52e343c596e9e6",
+      "extraction": "full source; import namespace and formatter ordering changed"
+    },
+    "migrations/schema.gleam": {
+      "path": "albedo-personality/src/albedo/harness/extensions/personality/migrations/schema.gleam",
+      "sha256": "04cd532faf2ff1a655a3f2873609cea9b441dbde533af63c1a8e80ef6f62f2c6",
+      "extraction": "constants and validate only; excludes apply"
+    }
+  },
+  "upstream": {
+    "repo": "https://tangled.org/okami.mom/albedo",
+    "commit": "e9df547f67f6819ebcd217649be326e53111027c",
+    "tree": "542057beeeb5eb67edbc3dca260060c12c493679",
+    "archive_sha256": "131e95379caf8501ff8c0e04f42ddb7837d4df5d5f83faa830b3a0c49e61c69b",
+    "source_entries": 1013,
+    "compatibility_patches": [],
+    "qualification": "source pin only; FAILED/OPEN"
+  },
+  "upstream_copyright": "Copyright (C) 2026 albedo contributors (okami.mom & ptr.pet)",
+  "upstream_license": "WTFPL version 2; UPSTREAM-LICENSE.txt",
+  "license_scope": "preserves upstream attribution; no new repository-wide license grant",
+  "historical_qualification": "FAILED/OPEN",
+  "test_support_source": {
+    "path": "albedo-personality/test/harness/albedo_personality_edit_test_support.erl",
+    "sha256": "8af12bb799f848ce3c58e5270fcedbce93eb9800e6db2bba736d0820c35b0ef9",
+    "extraction": "test-only count_replacements helper; module name and explanatory comment changed"
+  },
+  "bounded_main_identity_adaptation": {
+    "host_commit": "e086179bbaa8beda2b2a20e688dfa86bfe39b190",
+    "qualification": "45 package tests pass; gleam check and format pass; HTTP/provider and whole-host acceptance tracked separately",
+    "candidate_sources": {
+      "src/successor/personality/bindings.gleam": "119b463bf84fbef4b19c1b7d71047b989c906001b1845c008f36c23b5672a0f2",
+      "src/successor/personality/extension.gleam": "ab95ae74fae25307fd07889f8caa57b634a6cda51a3e421ec8a3bbc24bbddee6",
+      "src/successor/personality/ledger.gleam": "15c4e985a22aa8b728e0e4f2ee39b5f7ed0e886046c8cd934b64ac5355bf6dcd",
+      "src/successor/personality/projection.gleam": "7bb9997b0f9dd827310e6fca6e9f1c3e4a27d39172a3605aa9a67709acc2f17d",
+      "src/successor/personality/schema.gleam": "90205ecd945ab30d7682cf07a49730c9e19e756559e750ed98ea1e47f1438dea",
+      "src/successor/personality/service.gleam": "f66c6210e749a63b8a49b9be1437c0b86f037fcbccceb20078ad2efa224d4555",
+      "src/successor/personality/tools.gleam": "59c1e35d388a4c984cb8a4dc4800841eb8de12e6f6583934bd9d0bd036c74c6f",
+      "test/successor/personality/adapter_test.gleam": "628f946680e8f27132b30af005cd55a5631b221727780c5498d7e0e6f89ffac3",
+      "test/successor/personality/cleanup_test.gleam": "98da311e9d4588481558f7140735b02e8a2bc6937f1c27ddf6db4c59e76e9128",
+      "test/successor/personality/initialization_test.gleam": "ecd93ec3a3755c59a1db8c6dab758fc06c23a10f57faa7828d0e38ddf6c668a7",
+      "test/successor/personality/ledger_test.gleam": "6e3291412b733630ca34627daa8adc921eb19af050ba71e05e91c0ebfc3a7c6b"
+    },
+    "changes": [
+      "Retain fresh v2 schema and extracted domain validation; extend inspection types with retained binding generation",
+      "Remove automatic default binding, additional identities, mutable default selection and delegate inheritance",
+      "Require atomic host personality requirement for owner binding; refuse legacy missing requirement without backfill",
+      "Require expected revision for write and edit; native actor and operation identity only",
+      "Project whole mandatory identity document; host rejects capacity overflow",
+      "Use explicit authenticated idle setup/bind/unbind; retain selected setup-required state after unbind",
+      "Filter model receipt recovery by stored owner_agent actor and exact session/call metadata; opaque provider IDs including human: prefixes remain valid"
+    ]
+  }
+}

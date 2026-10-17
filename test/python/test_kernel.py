@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import select
 import struct
 import subprocess
 import sys
@@ -47,6 +46,8 @@ class Kernel:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        assert self.process.stdin is not None
+        assert self.process.stdout is not None
         self.input = self.process.stdin
         self.output = self.process.stdout
         ready = self.read()
@@ -58,13 +59,17 @@ class Kernel:
         return json.loads(exact(self.output, size))
 
     def execute(self, cell_id: str, source: str, maximum: int = 262144):
-        self.input.write(frame({
-            "v": 1,
-            "type": "execute",
-            "id": cell_id,
-            "source": source,
-            "max_output_bytes": maximum,
-        }))
+        self.input.write(
+            frame(
+                {
+                    "v": 1,
+                    "type": "execute",
+                    "id": cell_id,
+                    "source": source,
+                    "max_output_bytes": maximum,
+                }
+            )
+        )
         self.input.flush()
         return self.read()
 
@@ -80,6 +85,7 @@ class Kernel:
                     pass
                 self.process.wait(timeout=1)
         for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+            assert stream is not None
             stream.close()
 
 
@@ -103,7 +109,9 @@ class KernelTests(unittest.TestCase):
 
     def test_namespace_persists_and_last_expression_displays(self):
         kernel = self.kernel()
-        self.assertEqual(kernel.execute("one", "answer = 40\nanswer + 2")["output"], "42\n")
+        self.assertEqual(
+            kernel.execute("one", "answer = 40\nanswer + 2")["output"], "42\n"
+        )
         self.assertEqual(kernel.execute("two", "answer += 1\nanswer")["output"], "41\n")
 
     def test_exception_retains_prior_state(self):
@@ -124,8 +132,12 @@ class KernelTests(unittest.TestCase):
     def test_workspaces_have_independent_namespace_and_cwd(self):
         left, right = self.kernel(), self.kernel()
         left.execute("set", "shared = 1\nopen('left.txt', 'w').write('left')")
-        self.assertEqual(right.execute("cwd", "import os; (os.getcwd(), 'shared' in globals())")["output"],
-                         f"('{self.directories[1].name}', False)\n")
+        self.assertEqual(
+            right.execute("cwd", "import os; (os.getcwd(), 'shared' in globals())")[
+                "output"
+            ],
+            f"('{self.directories[1].name}', False)\n",
+        )
         self.assertFalse((Path(self.directories[1].name) / "left.txt").exists())
 
     def test_minimal_environment_does_not_inherit_synthetic_secret(self):
@@ -134,7 +146,9 @@ class KernelTests(unittest.TestCase):
         os.environ["SUCCESSOR_SYNTHETIC_SECRET"] = "must-not-cross"
         self.addCleanup(os.environ.pop, "SUCCESSOR_SYNTHETIC_SECRET", None)
         kernel = self.kernel()
-        result = kernel.execute("env", "import os; os.environ.get('SUCCESSOR_SYNTHETIC_SECRET')")
+        result = kernel.execute(
+            "env", "import os; os.environ.get('SUCCESSOR_SYNTHETIC_SECRET')"
+        )
         self.assertEqual(result["output"], "")
 
     def test_malformed_and_truncated_frames_end_transport(self):
@@ -146,9 +160,17 @@ class KernelTests(unittest.TestCase):
 
     def test_native_stdout_cannot_manufacture_success(self):
         kernel = self.kernel()
-        kernel.input.write(frame({"v": 1, "type": "execute", "id": "raw",
-                                  "source": "import os; os.write(1, b'junk')",
-                                  "max_output_bytes": 100}))
+        kernel.input.write(
+            frame(
+                {
+                    "v": 1,
+                    "type": "execute",
+                    "id": "raw",
+                    "source": "import os; os.write(1, b'junk')",
+                    "max_output_bytes": 100,
+                }
+            )
+        )
         kernel.input.flush()
         # Raw fd 1 bytes corrupt the packet stream. A host must classify this as
         # unknown and close it; it is not silently accepted as a cell result.
@@ -163,8 +185,17 @@ class KernelTests(unittest.TestCase):
         for cell_id, output_limit, effect in cases:
             kernel = self.kernel()
             source = f"open({effect!r}, 'w').write('must not run')"
-            kernel.input.write(frame({"v": 1, "type": "execute", "id": cell_id,
-                                      "source": source, "max_output_bytes": output_limit}))
+            kernel.input.write(
+                frame(
+                    {
+                        "v": 1,
+                        "type": "execute",
+                        "id": cell_id,
+                        "source": source,
+                        "max_output_bytes": output_limit,
+                    }
+                )
+            )
             kernel.input.flush()
             self.assertEqual(kernel.process.wait(timeout=2), 2)
             self.assertFalse((Path(self.directories[-1].name) / effect).exists())
@@ -172,17 +203,23 @@ class KernelTests(unittest.TestCase):
     def test_write_frame_enforces_hard_response_limit(self):
         import importlib.util
         import io
+
         spec = importlib.util.spec_from_file_location("tested_successor_kernel", SCRIPT)
+        assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         assert spec.loader is not None
         spec.loader.exec_module(module)
-        module.MAX_FRAME_BYTES = 100
+        # The dynamically loaded kernel intentionally uses a small limit here.
+        setattr(module, "MAX_FRAME_BYTES", 100)
         with self.assertRaisesRegex(ValueError, "response frame exceeds"):
             module.write_frame(io.BytesIO(), {"output": chr(0) * 20})
 
     def test_termination_reaps_nonadversarial_child_group(self):
         kernel = self.kernel()
-        result = kernel.execute("child", "import subprocess; child = subprocess.Popen(['sleep', '30']); child.pid")
+        result = kernel.execute(
+            "child",
+            "import subprocess; child = subprocess.Popen(['sleep', '30']); child.pid",
+        )
         child_pid = int(result["output"].strip())
         kernel.close()
         deadline = time.monotonic() + 2

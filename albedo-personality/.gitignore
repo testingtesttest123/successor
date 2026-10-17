@@ -1,0 +1,36 @@
+/result
+*.beam
+!test/fixtures/build-digest/ebin/**/*.beam
+*.ez
+/build
+/docs/api-reference.html
+erl_crash.dump
+
+__pycache__/
+*.pyc
+/.albedo/
+# a loopback ssh stages remote bundles under a literal ~ in its cwd
+/~/
+.makima/
+
+.DS_Store
+
+# no trailing slash: mbx leaves a symlink here
+/native/render/target
+/priv/bin/*
+!/priv/bin/albedo-daemon
+/cli/bin/albedo
+
+/.direnv
+/.envrc
+/.research/
+
+# Generated Gleam audit inventories belong outside the repository.
+/robot-docs/gleam-*-review.csv
+
+# pulled by scripts/prompts.ts
+scripts/prompts.txt
+
+# Go test executables are build artifacts.
+/cli/**/*.test
+/cli/*.test

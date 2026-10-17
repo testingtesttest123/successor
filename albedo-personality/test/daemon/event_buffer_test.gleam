@@ -1,0 +1,57 @@
+/// Unicode eviction and replay gaps are impractical on the shared E2E event stream.
+import albedo/daemon/event_buffer as buffer
+import gleam/int
+import gleam/json
+import gleam/list
+import gleam/result
+import gleam/string
+import gleeunit/should
+
+/// Replayed events as the text a client receives: the buffer keeps them encoded.
+fn texts(replayed: Result(List(json.Json), Nil)) -> Result(List(String), Nil) {
+  result.map(replayed, list.map(_, json.to_string))
+}
+
+pub fn replay_is_ordered_and_only_a_gap_requires_reset_test() -> Nil {
+  let events =
+    int.range(1, 301, buffer.new(), fn(events, n) {
+      buffer.push(events, n, json.int(n))
+    })
+  buffer.since(events, 42, 300) |> should.equal(Error(Nil))
+  buffer.since(events, -1, 300) |> should.equal(Error(Nil))
+  buffer.since(events, 301, 300) |> should.equal(Error(Nil))
+  let assert Ok(retained) = buffer.since(events, 44, 300)
+  list.length(retained) |> should.equal(256)
+  list.first(retained) |> should.equal(Ok(json.int(45)))
+  buffer.since(events, 298, 300)
+  |> should.equal(Ok([json.int(299), json.int(300)]))
+  buffer.since(events, 300, 300) |> should.equal(Ok([]))
+  buffer.since(buffer.new(), 0, 0) |> should.equal(Ok([]))
+}
+
+pub fn byte_budget_evicts_oldest_without_splitting_unicode_test() -> Nil {
+  // Two of these fit the budget; a third event evicts the oldest.
+  let large = json.string(string.repeat("é", buffer.budget / 4 - 1))
+  let events =
+    buffer.new()
+    |> buffer.push(1, large)
+    |> buffer.push(2, large)
+  let large = json.to_string(large)
+  buffer.since(events, 0, 2) |> texts |> should.equal(Ok([large, large]))
+  let events = buffer.push(events, 3, json.string("next"))
+  buffer.since(events, 0, 3) |> should.equal(Error(Nil))
+  buffer.since(events, 1, 3)
+  |> texts
+  |> should.equal(Ok([large, "\"next\""]))
+}
+
+pub fn oversized_event_leaves_a_replay_gap_until_the_client_resets_test() -> Nil {
+  let events = buffer.new() |> buffer.push(1, json.string("before"))
+  let events =
+    buffer.push(events, 2, json.string(string.repeat("x", buffer.budget)))
+  buffer.since(events, 1, 2) |> should.equal(Error(Nil))
+  buffer.since(events, 2, 2) |> should.equal(Ok([]))
+  let events = buffer.push(events, 3, json.string("after"))
+  buffer.since(events, 1, 3) |> should.equal(Error(Nil))
+  buffer.since(events, 2, 3) |> texts |> should.equal(Ok(["\"after\""]))
+}

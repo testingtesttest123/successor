@@ -13,7 +13,9 @@ import unittest
 ROOT = Path(__file__).parents[2]
 
 
-@unittest.skipUnless(shutil.which("erl") and shutil.which("erlc"), "Erlang toolchain required")
+@unittest.skipUnless(
+    shutil.which("erl") and shutil.which("erlc"), "Erlang toolchain required"
+)
 class ErlangTransportTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -24,13 +26,23 @@ class ErlangTransportTests(unittest.TestCase):
         ebin.mkdir(parents=True)
         python.mkdir(parents=True)
         subprocess.run(
-            ["erlc", "-Werror", "-o", str(ebin), str(ROOT / "src" / "successor_python_ffi.erl")],
-            check=True, capture_output=True,
+            [
+                "erlc",
+                "-Werror",
+                "-o",
+                str(ebin),
+                str(ROOT / "src" / "successor_python_ffi.erl"),
+            ],
+            check=True,
+            capture_output=True,
         )
         shutil.copy(ROOT / "priv" / "python" / "kernel.py", python)
         shutil.copy(ROOT / "priv" / "python" / "lock.py", python)
-        shutil.copytree(ROOT / "priv" / "python" / "successor_tools", python / "successor_tools",
-                        ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(
+            ROOT / "priv" / "python" / "successor_tools",
+            python / "successor_tools",
+            ignore=shutil.ignore_patterns("__pycache__"),
+        )
         (ebin / "successor.app").write_text(
             '{application, successor, [{vsn,"1.0.0"},{modules,[successor_python_ffi]}]}.'
         )
@@ -39,10 +51,15 @@ class ErlangTransportTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.temporary.cleanup()
 
-    def erl(self, expression: str, timeout: float = 10) -> subprocess.CompletedProcess[str]:
+    def erl(
+        self, expression: str, timeout: float = 10
+    ) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(
             ["erl", "-pa", str(self.library / "ebin"), "-noshell", "-eval", expression],
-            check=True, capture_output=True, text=True, timeout=timeout,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
         return result
 
@@ -55,7 +72,6 @@ class ErlangTransportTests(unittest.TestCase):
           {ok,{succeeded,<<"40\n">>,false}}=successor_python_ffi:execute(K,<<"c">>,<<"x">>,1000,1000),
           nil=successor_python_ffi:close(K), timer:sleep(50), false=is_process_alive(K), halt().""")
 
-
     def test_workspace_lock_refuses_duplicate_and_reacquires_after_close(self):
         self.erl(r"""
           application:load(successor),
@@ -67,8 +83,6 @@ class ErlangTransportTests(unittest.TestCase):
           nil=successor_python_ffi:close(K1),
           {ok,K3}=successor_python_ffi:start(Same),
           nil=successor_python_ffi:close(K2), nil=successor_python_ffi:close(K3), halt().""")
-
-
 
     def test_bounded_escaped_metadata_does_not_lose_healthy_namespace(self):
         self.erl(r"""
@@ -94,7 +108,6 @@ class ErlangTransportTests(unittest.TestCase):
           true=(erlang:monotonic_time(millisecond)-T < 1000),
           timer:sleep(30), false=is_process_alive(K), halt().""")
 
-
     def test_native_stderr_is_protocol_contamination_not_host_log_output(self):
         result = self.erl(r"""
           application:load(successor),
@@ -116,9 +129,9 @@ class ErlangTransportTests(unittest.TestCase):
           receive {done,{ok,{unknown,_}}} -> ok after 1000 -> error(deadline_extended) end,
           true=(erlang:monotonic_time(millisecond)-T < 1000), halt().""")
 
-
     def test_maximum_escaped_output_frame_and_plus_one_admission(self):
-        self.erl(r"""
+        self.erl(
+            r"""
           application:load(successor),
           {ok,K}=successor_python_ffi:start(list_to_binary("/tmp/successor-ffi-output-bound-"++os:getpid())),
           Max=(67108864-65536) div 6,
@@ -131,7 +144,9 @@ class ErlangTransportTests(unittest.TestCase):
           Max=byte_size(Output), 0=binary:last(Output),
           {ok,{succeeded,<<"(False, False)\n">>,false}}=successor_python_ffi:execute(
             K,<<"healthy">>,<<"('ran_bad_id' in globals(), 'ran_too_large' in globals())">>,1000,1000),
-          nil=successor_python_ffi:close(K), halt().""", timeout=45)
+          nil=successor_python_ffi:close(K), halt().""",
+            timeout=45,
+        )
 
     def test_invalid_timer_is_refused_before_dispatch_and_kernel_stays_healthy(self):
         self.erl(r"""
@@ -169,15 +184,22 @@ class ErlangTransportTests(unittest.TestCase):
     def test_cpu_bound_kernel_timeout_reaps_guarded_target_and_forked_child(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            program = ("import os,subprocess,time; from pathlib import Path; "
-                       "p=subprocess.Popen(['python3','-c','import time;time.sleep(30)']); "
-                       "Path('owned-pids').write_text(f'{os.getpid()} {p.pid}'); "
-                       "Path('effect').write_text('once'); time.sleep(30)")
-            source = (f"job=run('python3','-c',{program!r})\n"
-                      "while not Path('effect').exists(): await asyncio.sleep(.01)\nprint('ready')")
+            program = (
+                "import os,subprocess,time; from pathlib import Path; "
+                "p=subprocess.Popen(['python3','-c','import time;time.sleep(30)']); "
+                "Path('owned-pids').write_text(f'{os.getpid()} {p.pid}'); "
+                "Path('effect').write_text('once'); time.sleep(30)"
+            )
+            source = (
+                f"job=run('python3','-c',{program!r})\n"
+                "while not Path('effect').exists(): await asyncio.sleep(.01)\nprint('ready')"
+            )
+
             def binary(text):
                 return f"unicode:characters_to_binary({json.dumps(text)})"
-            self.erl(f"""
+
+            self.erl(
+                f"""
               application:load(successor), W=list_to_binary({json.dumps(temporary)}),
               {{ok,K}}=successor_python_ffi:start(W),
               {{ok,{{succeeded,<<"ready\\n">>,false}}}}=successor_python_ffi:execute(
@@ -186,10 +208,17 @@ class ErlangTransportTests(unittest.TestCase):
               {{ok,K2}}=successor_python_ffi:start(W),
               {{ok,{{succeeded,<<"False once\\n">>,false}}}}=successor_python_ffi:execute(
                 K2,<<"fresh">>,<<"print('job' in globals(), Path('effect').read_text())">>,1000,2000),
-              nil=successor_python_ffi:close(K2), halt().""", timeout=15)
+              nil=successor_python_ffi:close(K2), halt().""",
+                timeout=15,
+            )
             for pid in map(int, (root / "owned-pids").read_text().split()):
                 try:
-                    stat = Path(f"/proc/{pid}/stat").read_bytes().rsplit(b")", 1)[1].split()
+                    stat = (
+                        Path(f"/proc/{pid}/stat")
+                        .read_bytes()
+                        .rsplit(b")", 1)[1]
+                        .split()
+                    )
                 except FileNotFoundError:
                     continue
                 self.assertEqual(stat[0], b"Z", f"owned pid {pid} is still runnable")
@@ -199,37 +228,46 @@ class ErlangTransportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             program = "from pathlib import Path; import time; Path('ran').write_text('once'); time.sleep(30)"
-            source = (f"job=run('python3','-c',{program!r})\n"
-                      "while not Path('ran').exists(): await asyncio.sleep(.01)\n"
-                      "Path('guard-pid').write_text(str(job._command.process.pid))\n"
-                      "import os,signal; os.kill(job._command.process.pid,signal.SIGSTOP)")
+            source = (
+                f"job=run('python3','-c',{program!r})\n"
+                "while not Path('ran').exists(): await asyncio.sleep(.01)\n"
+                "Path('guard-pid').write_text(str(job._command.process.pid))\n"
+                "import os,signal; os.kill(job._command.process.pid,signal.SIGSTOP)"
+            )
             binary = f"unicode:characters_to_binary({json.dumps(source)})"
             try:
-                self.erl(f"""
+                self.erl(
+                    f"""
                   application:load(successor), W=list_to_binary({json.dumps(temporary)}),
                   {{ok,K}}=successor_python_ffi:start(W),
                   {{ok,{{succeeded,_,false}}}}=successor_python_ffi:execute(K,<<"spawn">>,{binary},5000,2000),
                   {{ok,{{unknown,_}}}}=successor_python_ffi:execute(K,<<"die">>,
                       <<"import os,signal; os.kill(os.getpid(),signal.SIGKILL)">>,1000,2000),
                   {{error,<<"python workspace is already active">>}}=successor_python_ffi:start(W),
-                  halt().""", timeout=12)
+                  halt().""",
+                    timeout=12,
+                )
             finally:
-                if (root / 'guard-pid').exists():
-                    pid = int((root / 'guard-pid').read_text())
-                    try: os.kill(pid, signal.SIGCONT)
-                    except ProcessLookupError: pass
+                if (root / "guard-pid").exists():
+                    pid = int((root / "guard-pid").read_text())
+                    try:
+                        os.kill(pid, signal.SIGCONT)
+                    except ProcessLookupError:
+                        pass
             # A new real native startup, not a forged receipt, proves the inherited
             # lease has been released. No old command source is replayed.
             deadline = time.monotonic() + 6
             import fcntl
+
             while True:
-                with (root / '.successor-runtime' / 'jobs.lock').open('rb') as lock:
+                with (root / ".successor-runtime" / "jobs.lock").open("rb") as lock:
                     try:
                         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                         break
                     except BlockingIOError:
-                        if time.monotonic() >= deadline: raise AssertionError('guardian did not drain')
-                time.sleep(.02)
+                        if time.monotonic() >= deadline:
+                            raise AssertionError("guardian did not drain")
+                time.sleep(0.02)
             self.erl(f"""
               application:load(successor), W=list_to_binary({json.dumps(temporary)}),
               {{ok,K}}=successor_python_ffi:start(W),
@@ -241,53 +279,73 @@ class ErlangTransportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             program = "from pathlib import Path; import os,time; Path('survivor-pid').write_text(str(os.getpid())); time.sleep(30)"
-            source = (f"job=run('python3','-c',{program!r})\n"
-                      "while not Path('survivor-pid').exists(): await asyncio.sleep(.005)\n"
-                      "import os,signal; os.kill(job._command.process.pid,signal.SIGKILL)")
+            source = (
+                f"job=run('python3','-c',{program!r})\n"
+                "while not Path('survivor-pid').exists(): await asyncio.sleep(.005)\n"
+                "import os,signal; os.kill(job._command.process.pid,signal.SIGKILL)"
+            )
             binary = f"unicode:characters_to_binary({json.dumps(source)})"
             try:
-                self.erl(f"""
+                self.erl(
+                    f"""
                   application:load(successor), W=list_to_binary({json.dumps(temporary)}),
                   {{ok,K}}=successor_python_ffi:start(W),
                   {{ok,{{succeeded,_,false}}}}=successor_python_ffi:execute(K,<<"spawn">>,{binary},5000,2000),
                   nil=successor_python_ffi:close(K),
                   {{error,<<"python workspace is already active">>}}=successor_python_ffi:start(W),
-                  halt().""", timeout=12)
+                  halt().""",
+                    timeout=12,
+                )
                 import fcntl
-                with (root / '.successor-runtime' / 'jobs.lock').open('rb') as lock:
+
+                with (root / ".successor-runtime" / "jobs.lock").open("rb") as lock:
                     # Guardian is gone, so the original lease ALONE would admit.
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                markers = list((root / '.successor-runtime' / 'active-jobs').iterdir())
+                markers = list((root / ".successor-runtime" / "active-jobs").iterdir())
                 self.assertEqual(len(markers), 1)
-                pid = int((root / 'survivor-pid').read_text())
-                self.assertTrue(Path(f'/proc/{pid}').exists())
+                pid = int((root / "survivor-pid").read_text())
+                self.assertTrue(Path(f"/proc/{pid}").exists())
                 self.assertEqual(os.getpgid(pid), pid)
             finally:
                 # Trusted test/operator reconciliation of our own captured token,
                 # never a retry of command source or deletion without process proof.
-                records = list((root / '.successor-runtime').glob('*.status.json'))
+                records = list((root / ".successor-runtime").glob("*.status.json"))
                 for status_path in records:
                     record = json.loads(status_path.read_text())
-                    pid = record['pid']
+                    pid = record["pid"]
                     try:
-                        token = Path(f'/proc/{pid}/stat').read_bytes().rsplit(b')',1)[1].split()[19].decode()
-                        if token == record['leader']:
+                        token = (
+                            Path(f"/proc/{pid}/stat")
+                            .read_bytes()
+                            .rsplit(b")", 1)[1]
+                            .split()[19]
+                            .decode()
+                        )
+                        if token == record["leader"]:
                             os.killpg(pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
                     except FileNotFoundError:
                         pass
-                deadline = time.monotonic()+3
+                deadline = time.monotonic() + 3
                 for record_path in records:
-                    pid = json.loads(record_path.read_text())['pid']
-                    while Path(f'/proc/{pid}/stat').exists():
-                        state = Path(f'/proc/{pid}/stat').read_bytes().rsplit(b')',1)[1].split()[0]
-                        if state==b'Z': break
-                        if time.monotonic()>=deadline: raise AssertionError('owned target cleanup unproved')
-                        time.sleep(.01)
-                active = root / '.successor-runtime' / 'active-jobs'
+                    pid = json.loads(record_path.read_text())["pid"]
+                    while Path(f"/proc/{pid}/stat").exists():
+                        state = (
+                            Path(f"/proc/{pid}/stat")
+                            .read_bytes()
+                            .rsplit(b")", 1)[1]
+                            .split()[0]
+                        )
+                        if state == b"Z":
+                            break
+                        if time.monotonic() >= deadline:
+                            raise AssertionError("owned target cleanup unproved")
+                        time.sleep(0.01)
+                active = root / ".successor-runtime" / "active-jobs"
                 if active.exists():
-                    for marker in active.iterdir(): marker.unlink()
+                    for marker in active.iterdir():
+                        marker.unlink()
             self.erl(f"""
               application:load(successor), W=list_to_binary({json.dumps(temporary)}),
               {{ok,K}}=successor_python_ffi:start(W),

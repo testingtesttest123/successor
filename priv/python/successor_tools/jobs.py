@@ -8,6 +8,7 @@ minimal environment, bounded queue-backed feeds, and the successor guardian /
 lease protocol; daemon wakes, remote execution, tracing, shell shims, and host
 hooks were removed.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -44,9 +45,17 @@ class JobPolicy:
     retained_limit: int = 64
 
     def __post_init__(self) -> None:
-        if isinstance(self.active_limit, bool) or not isinstance(self.active_limit, int) or self.active_limit < 1:
+        if (
+            isinstance(self.active_limit, bool)
+            or not isinstance(self.active_limit, int)
+            or self.active_limit < 1
+        ):
             raise ValueError("active_limit must be a positive integer")
-        if isinstance(self.retained_limit, bool) or not isinstance(self.retained_limit, int) or self.retained_limit < 0:
+        if (
+            isinstance(self.retained_limit, bool)
+            or not isinstance(self.retained_limit, int)
+            or self.retained_limit < 0
+        ):
             raise ValueError("retained_limit must be a nonnegative integer")
 
 
@@ -65,7 +74,9 @@ class Feed:
         try:
             while True:
                 async with self._condition:
-                    await self._condition.wait_for(lambda: self._chunks or self.ended or self.broken)
+                    await self._condition.wait_for(
+                        lambda: self._chunks or self.ended or self.broken
+                    )
                     if self.broken:
                         return
                     if not self._chunks:
@@ -95,7 +106,11 @@ class Feed:
     async def write(self, data: bytes) -> None:
         async with self._condition:
             await self._condition.wait_for(
-                lambda: self.broken or self._bytes == 0 or self._bytes + len(data) <= FEED_LIMIT
+                lambda: (
+                    self.broken
+                    or self._bytes == 0
+                    or self._bytes + len(data) <= FEED_LIMIT
+                )
             )
             if self.broken:
                 return
@@ -137,6 +152,7 @@ class Outlet:
 @dataclass
 class Command:
     """The guardian process transporting one target command."""
+
     process: asyncio.subprocess.Process
     lifetime: int | None
 
@@ -153,6 +169,7 @@ class Command:
             os.close(fd)
         except OSError:
             pass
+
     status_path: Path
 
 
@@ -166,7 +183,10 @@ def _fsync_directory(path: Path) -> None:
 
 def _create_active_record(directory: Path, id: str) -> Path:
     path = directory / id
-    payload = json.dumps({"v": 1, "id": id}, separators=(",", ":"), sort_keys=True).encode() + b"\n"
+    payload = (
+        json.dumps({"v": 1, "id": id}, separators=(",", ":"), sort_keys=True).encode()
+        + b"\n"
+    )
     fd: int | None = None
     created = False
     try:
@@ -176,13 +196,16 @@ def _create_active_record(directory: Path, id: str) -> Path:
         if written != len(payload):
             raise OSError("short active-record write")
         os.fsync(fd)
-        os.close(fd); fd = None
+        os.close(fd)
+        fd = None
         _fsync_directory(directory)
         return path
     except BaseException:
         if fd is not None:
-            try: os.close(fd)
-            except OSError: pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         if created:
             try:
                 path.unlink()
@@ -201,8 +224,16 @@ class _AmbiguousSpawnError(Exception):
 
 
 class Job(JobOutput):
-    def __init__(self, runtime: "JobRuntime", argv: tuple[str, ...], timeout: float, *, cwd: str,
-                 env: dict[str, str], stdin: str | bytes | os.PathLike[str] | "Job" | None) -> None:
+    def __init__(
+        self,
+        runtime: "JobRuntime",
+        argv: tuple[str, ...],
+        timeout: float,
+        *,
+        cwd: str,
+        env: dict[str, str],
+        stdin: str | bytes | os.PathLike[str] | "Job" | None,
+    ) -> None:
         self.runtime = runtime
         self.id = uuid.uuid4().hex
         self.argv = list(argv)
@@ -211,8 +242,12 @@ class Job(JobOutput):
         self.cwd = cwd
         self.env = env
         self.source = stdin if isinstance(stdin, Job) else None
-        self._sources: tuple[Job, ...] = (() if self.source is None else (*self.source._sources, self.source))
-        self._pipeline_text = f"{self.source.pipeline} | {self.command}" if self.source else self.command
+        self._sources: tuple[Job, ...] = (
+            () if self.source is None else (*self.source._sources, self.source)
+        )
+        self._pipeline_text = (
+            f"{self.source.pipeline} | {self.command}" if self.source else self.command
+        )
         self._stdin = None if self.source is not None else stdin
         self.feed = self.source._reader() if self.source is not None else None
         self.outlet = Outlet()
@@ -239,13 +274,23 @@ class Job(JobOutput):
     def pipeline(self) -> str:
         return self._pipeline_text
 
-    def pipe(self, program: object, *args: object, cwd: str | os.PathLike[str] | None = None,
-             env: dict[str, object] | None = None, timeout: float = 300) -> "Job":
-        return self.runtime.run(program, *args, cwd=cwd, env=env, stdin=self, timeout=timeout)
+    def pipe(
+        self,
+        program: object,
+        *args: object,
+        cwd: str | os.PathLike[str] | None = None,
+        env: dict[str, object] | None = None,
+        timeout: float = 300,
+    ) -> "Job":
+        return self.runtime.run(
+            program, *args, cwd=cwd, env=env, stdin=self, timeout=timeout
+        )
 
     def _reader(self) -> Feed:
         if self.capture.seen > len(self.capture.data):
-            raise ValueError(f"job {self.id} has incomplete in-memory history; attach pipe before it runs")
+            raise ValueError(
+                f"job {self.id} has incomplete in-memory history; attach pipe before it runs"
+            )
         feed = Feed(self, bytes(self.capture.data))
         self.outlet.feeds.append(feed)
         if self.outlet.closed:
@@ -264,43 +309,71 @@ class Job(JobOutput):
         try:
             os.set_inheritable(lifetime_r, True)
             os.set_inheritable(lifetime_w, False)
-            lease = os.open(self.runtime.lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+            lease = os.open(
+                self.runtime.lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600
+            )
             fcntl.flock(lease, fcntl.LOCK_SH | fcntl.LOCK_NB)
             os.set_inheritable(lease, True)
         except BaseException as error:
             for fd in (lifetime_r, lifetime_w, lease):
                 if fd is not None:
-                    try: os.close(fd)
-                    except OSError: pass
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
             raise _DefinitiveSpawnError(str(error)) from error
         try:
             active_record = _create_active_record(self.runtime.active_dir, self.id)
         except BaseException as error:
             for fd in (lifetime_r, lifetime_w, lease):
-                try: os.close(fd)
-                except OSError: pass
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
             raise _DefinitiveSpawnError(f"active record: {error}") from error
         deadline = time.monotonic() + self.timeout
         guardian = Path(__file__).with_name("guardian.py")
         guardian_argv = (
-            sys.executable, "-I", "-u", str(guardian), "--lifetime-fd", str(lifetime_r),
-            "--lease-fd", str(lease), "--status", str(status),
-            "--active-record", str(active_record), "--deadline", repr(deadline), "--", *self.argv,
+            sys.executable,
+            "-I",
+            "-u",
+            str(guardian),
+            "--lifetime-fd",
+            str(lifetime_r),
+            "--lease-fd",
+            str(lease),
+            "--status",
+            str(status),
+            "--active-record",
+            str(active_record),
+            "--deadline",
+            repr(deadline),
+            "--",
+            *self.argv,
         )
         try:
             process = await asyncio.create_subprocess_exec(
-                *guardian_argv, stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-                cwd=self.cwd, env=self.env, pass_fds=(lifetime_r, lease), start_new_session=True,
+                *guardian_argv,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=self.cwd,
+                env=self.env,
+                pass_fds=(lifetime_r, lease),
+                start_new_session=True,
             )
         except BaseException as error:
-            try: os.close(lifetime_w)
-            except OSError: pass
+            try:
+                os.close(lifetime_w)
+            except OSError:
+                pass
             raise _AmbiguousSpawnError(str(error)) from error
         finally:
             for fd in (lifetime_r, lease):
-                try: os.close(fd)
-                except OSError: pass
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
         return Command(process, lifetime_w, status)
 
     async def _feed_stdin(self, stream: asyncio.StreamWriter) -> None:
@@ -312,17 +385,21 @@ class Job(JobOutput):
             if isinstance(data, (str, bytes)):
                 payload = data.encode() if isinstance(data, str) else data
                 for offset in range(0, len(payload), _READ_CHUNK):
-                    stream.write(payload[offset:offset + _READ_CHUNK]); await stream.drain()
+                    stream.write(payload[offset : offset + _READ_CHUNK])
+                    await stream.drain()
             elif isinstance(data, os.PathLike):
                 with open(data, "rb") as source:
                     while chunk := source.read(_READ_CHUNK):
-                        stream.write(chunk); await stream.drain()
+                        stream.write(chunk)
+                        await stream.drain()
         except (BrokenPipeError, ConnectionResetError) as error:
             raise RuntimeError("stdin closed before complete delivery") from error
         finally:
             stream.close()
-            try: await stream.wait_closed()
-            except (BrokenPipeError, ConnectionResetError): pass
+            try:
+                await stream.wait_closed()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
     async def _read_output(self, stream: asyncio.StreamReader) -> None:
         self.outlet.reading = getattr(stream, "_transport", None)
@@ -337,26 +414,42 @@ class Job(JobOutput):
             if not raw or len(raw) > STATUS_LIMIT:
                 raise ValueError("status size is invalid")
             value = json.loads(raw)
-            if not isinstance(value, dict) or value.get("v") != 1 or value.get("state") != "terminated":
+            if (
+                not isinstance(value, dict)
+                or value.get("v") != 1
+                or value.get("state") != "terminated"
+            ):
                 raise ValueError("guardian did not publish v1 terminal status")
-            if isinstance(value.get("pid"), bool) or not isinstance(value.get("pid"), int):
+            if isinstance(value.get("pid"), bool) or not isinstance(
+                value.get("pid"), int
+            ):
                 raise ValueError("pid is invalid")
-            if value.get("leader") is not None and not isinstance(value.get("leader"), str):
+            if value.get("leader") is not None and not isinstance(
+                value.get("leader"), str
+            ):
                 raise ValueError("leader is invalid")
             rc = value.get("returncode")
             if rc is not None and (isinstance(rc, bool) or not isinstance(rc, int)):
                 raise ValueError("returncode is invalid")
-            if not isinstance(value.get("timed_out"), bool) or not isinstance(value.get("reason"), str):
+            if not isinstance(value.get("timed_out"), bool) or not isinstance(
+                value.get("reason"), str
+            ):
                 raise ValueError("terminal facts are invalid")
             term = value.get("termination")
             if not isinstance(term, dict) or term.get("gone") is not True:
                 raise ValueError("terminated status lacks exact gone proof")
             pgid = term.get("pgid")
-            if pgid is not None and (isinstance(pgid, bool) or not isinstance(pgid, int)):
+            if pgid is not None and (
+                isinstance(pgid, bool) or not isinstance(pgid, int)
+            ):
                 raise ValueError("termination pgid is invalid")
-            if not isinstance(term.get("signals"), list) or not all(isinstance(x, str) for x in term["signals"]):
+            if not isinstance(term.get("signals"), list) or not all(
+                isinstance(x, str) for x in term["signals"]
+            ):
                 raise ValueError("termination signals are invalid")
-            if not isinstance(term.get("failures"), list) or not all(isinstance(x, str) for x in term["failures"]):
+            if not isinstance(term.get("failures"), list) or not all(
+                isinstance(x, str) for x in term["failures"]
+            ):
                 raise ValueError("termination failures are invalid")
             if not isinstance(term.get("note"), str):
                 raise ValueError("termination note is invalid")
@@ -368,15 +461,22 @@ class Job(JobOutput):
         term = status["termination"]
         self.exit_code = status["returncode"]
         self.timed_out = status["timed_out"]
-        self.termination = Termination(term["pgid"], tuple(term["signals"]), True,
-                                       tuple(term["failures"]), term["note"])
+        self.termination = Termination(
+            term["pgid"],
+            tuple(term["signals"]),
+            True,
+            tuple(term["failures"]),
+            term["note"],
+        )
 
     async def _execute(self) -> None:
         try:
             self._command = await asyncio.shield(self.spawning)
         except _DefinitiveSpawnError as error:
             self.capture.write(f"spawn failed before dispatch: {error}\n")
-            self.termination = Termination(None, (), True, (), "spawn failed before dispatch")
+            self.termination = Termination(
+                None, (), True, (), "spawn failed before dispatch"
+            )
             return
         except BaseException as error:
             self.capture.write(f"spawn outcome unknown: {error}\n")
@@ -394,8 +494,13 @@ class Job(JobOutput):
         while not (output_task.done() and wait_task.done()):
             if watching_stdin and stdin_task.done():
                 watching_stdin = False
-                if not stdin_task.cancelled() and (error := stdin_task.exception()) is not None:
-                    self._delivery_error = f"stdin delivery failed: {type(error).__name__}: {error}"
+                if (
+                    not stdin_task.cancelled()
+                    and (error := stdin_task.exception()) is not None
+                ):
+                    self._delivery_error = (
+                        f"stdin delivery failed: {type(error).__name__}: {error}"
+                    )
                     self.capture.write(f"\n[{self._delivery_error}]\n")
                     await self._request_stop()
             watched = {task for task in (output_task, wait_task) if not task.done()}
@@ -404,8 +509,14 @@ class Job(JobOutput):
             if watched:
                 await asyncio.wait(watched, return_when=asyncio.FIRST_COMPLETED)
         await asyncio.gather(stdin_task, output_task, wait_task, return_exceptions=True)
-        if watching_stdin and not stdin_task.cancelled() and (error := stdin_task.exception()) is not None:
-            self._delivery_error = f"stdin delivery failed: {type(error).__name__}: {error}"
+        if (
+            watching_stdin
+            and not stdin_task.cancelled()
+            and (error := stdin_task.exception()) is not None
+        ):
+            self._delivery_error = (
+                f"stdin delivery failed: {type(error).__name__}: {error}"
+            )
             self.capture.write(f"\n[{self._delivery_error}]\n")
         try:
             self._accept_status(self._read_status(command.status_path))
@@ -433,7 +544,11 @@ class Job(JobOutput):
         if self._command is not None:
             self._command.close_lifetime()
         self.capture.end_spill()
-        if self.termination is not None and self.termination.gone and self._unknown_reason is None:
+        if (
+            self.termination is not None
+            and self.termination.gone
+            and self._unknown_reason is None
+        ):
             self.duration = self.runtime.loop.time() - self.started
         self.runtime._completed(self)
         self.runtime._pipeline_done()
@@ -458,7 +573,10 @@ class Job(JobOutput):
                 return
         # Do not tear the lifetime pipe out from under guardian bootstrap. Its
         # running record proves it captured identity and authorized the gate.
-        while not self._command.status_path.exists() and self._command.process.returncode is None:
+        while (
+            not self._command.status_path.exists()
+            and self._command.process.returncode is None
+        ):
             await asyncio.sleep(0.005)
         self._command.close_lifetime(b"S")
 
@@ -467,10 +585,17 @@ class Job(JobOutput):
 
     async def stop(self) -> Termination | None:
         members = self._members()
-        for job in members: job._read = True
-        await asyncio.gather(*(job._request_stop() for job in members), return_exceptions=True)
-        await asyncio.gather(*(asyncio.shield(job._execution) for job in members), return_exceptions=True)
-        await asyncio.gather(*(job._finalize() for job in members), return_exceptions=True)
+        for job in members:
+            job._read = True
+        await asyncio.gather(
+            *(job._request_stop() for job in members), return_exceptions=True
+        )
+        await asyncio.gather(
+            *(asyncio.shield(job._execution) for job in members), return_exceptions=True
+        )
+        await asyncio.gather(
+            *(job._finalize() for job in members), return_exceptions=True
+        )
         if any(job.termination is None or not job.termination.gone for job in members):
             return None
         return self.termination
@@ -485,14 +610,17 @@ class Job(JobOutput):
             raise RuntimeError(self._pipeline_error)
         for job in members:
             if job._unknown_reason is not None:
-                raise RuntimeError(f"job {job.id} outcome unknown: {job._unknown_reason}")
+                raise RuntimeError(
+                    f"job {job.id} outcome unknown: {job._unknown_reason}"
+                )
             if job._delivery_error is not None:
                 raise RuntimeError(f"job {job.id} {job._delivery_error}")
             job._read = True
         return self
 
     def poll(self) -> int | None:
-        if self.duration is not None: self._read = True
+        if self.duration is not None:
+            self._read = True
         return self.exit_code
 
     @property
@@ -500,8 +628,10 @@ class Job(JobOutput):
         return self.poll()
 
     def __repr__(self) -> str:
-        return (f"Job(id={self.id!r}, exit_code={self.exit_code!r}, timed_out={self.timed_out!r}, "
-                f"duration={self.duration!r}, bytes={self.capture.seen})")
+        return (
+            f"Job(id={self.id!r}, exit_code={self.exit_code!r}, timed_out={self.timed_out!r}, "
+            f"duration={self.duration!r}, bytes={self.capture.seen})"
+        )
 
 
 class JobRuntime:
@@ -511,8 +641,13 @@ class JobRuntime:
     without limit. They are operational guards, not a trusted-code heap sandbox:
     child programs and ordinary Python objects can still consume host resources.
     """
-    def __init__(self, workspace: str | os.PathLike[str], output_registry: OutputRegistry,
-                 policy: JobPolicy | None = None) -> None:
+
+    def __init__(
+        self,
+        workspace: str | os.PathLike[str],
+        output_registry: OutputRegistry,
+        policy: JobPolicy | None = None,
+    ) -> None:
         self.workspace = Path(workspace).expanduser().resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.runtime_dir = self.workspace / ".successor-runtime"
@@ -547,9 +682,12 @@ class JobRuntime:
     @staticmethod
     def _argv(program: object, args: tuple[object, ...]) -> tuple[str, ...]:
         values = (program, *args)
-        if not values:
-            raise ValueError("program is required")
-        argv = tuple(os.fsdecode(os.fspath(value)) if isinstance(value, os.PathLike) else str(value) for value in values)
+        argv = tuple(
+            os.fsdecode(os.fspath(value))
+            if isinstance(value, os.PathLike)
+            else str(value)
+            for value in values
+        )
         if not argv[0] or any("\x00" in value for value in argv):
             raise ValueError("program and arguments must be nonempty/NUL-free")
         if sum(len(os.fsencode(value)) + 1 for value in argv) > ARGV_LIMIT:
@@ -565,15 +703,25 @@ class JobRuntime:
             raise ValueError(f"timeout must be finite and in (0, {MAX_TIMEOUT:g}]")
         return result
 
-    def run(self, program: object, *args: object, cwd: str | os.PathLike[str] | None = None,
-            env: dict[str, object] | None = None,
-            stdin: str | bytes | os.PathLike[str] | Job | None = None,
-            timeout: float = 300) -> Job:
+    def run(
+        self,
+        program: object,
+        *args: object,
+        cwd: str | os.PathLike[str] | None = None,
+        env: dict[str, object] | None = None,
+        stdin: str | bytes | os.PathLike[str] | Job | None = None,
+        timeout: float = 300,
+    ) -> Job:
         if self._closed:
             raise RuntimeError("job runtime is shut down")
         timeout_value = self._timeout(timeout)
-        if len(self._active) >= self.policy.active_limit or not self._marker_capacity_available():
-            raise RuntimeError(f"{self.policy.active_limit} jobs are active or latched; reconcile one first")
+        if (
+            len(self._active) >= self.policy.active_limit
+            or not self._marker_capacity_available()
+        ):
+            raise RuntimeError(
+                f"{self.policy.active_limit} jobs are active or latched; reconcile one first"
+            )
         if not (stdin is None or isinstance(stdin, (str, bytes, os.PathLike, Job))):
             raise TypeError("stdin must be text, bytes, a path, or a Job")
         if isinstance(stdin, Job) and stdin.runtime is not self:
@@ -583,7 +731,11 @@ class JobRuntime:
         directory = directory.resolve()
         if not directory.is_dir():
             raise FileNotFoundError(f"cwd is not a directory: {directory}")
-        minimal = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL", "TMPDIR") if key in os.environ}
+        minimal = {
+            key: os.environ[key]
+            for key in ("PATH", "LANG", "LC_ALL", "TMPDIR")
+            if key in os.environ
+        }
         minimal.setdefault("PATH", os.defpath)
         minimal["HOME"] = str(self.workspace)
         if env is not None:
@@ -592,9 +744,17 @@ class JobRuntime:
             for key, value in env.items():
                 k, v = str(key), str(value)
                 if not k or "=" in k or "\x00" in k or "\x00" in v:
-                    raise ValueError("environment keys/values must be valid and NUL-free")
+                    raise ValueError(
+                        "environment keys/values must be valid and NUL-free"
+                    )
                 minimal[k] = v
-        if sum(len(os.fsencode(k)) + len(os.fsencode(v)) + 2 for k, v in minimal.items()) > ENV_LIMIT:
+        if (
+            sum(
+                len(os.fsencode(k)) + len(os.fsencode(v)) + 2
+                for k, v in minimal.items()
+            )
+            > ENV_LIMIT
+        ):
             raise ValueError(f"environment exceeds {ENV_LIMIT} bytes")
         if isinstance(stdin, str):
             if len(stdin) > STDIN_LIMIT:
@@ -602,13 +762,18 @@ class JobRuntime:
             stdin = stdin.encode()
         if isinstance(stdin, bytes) and len(stdin) > STDIN_LIMIT:
             raise ValueError(f"stdin exceeds {STDIN_LIMIT} bytes")
-        if os.sep not in argv[0] and shutil.which(argv[0], path=minimal.get("PATH")) is None:
+        if (
+            os.sep not in argv[0]
+            and shutil.which(argv[0], path=minimal.get("PATH")) is None
+        ):
             raise FileNotFoundError(f"{argv[0]}: no such program on PATH")
         if isinstance(stdin, os.PathLike):
             stdin = Path(stdin).expanduser().resolve()
             if not stdin.is_file():
                 raise FileNotFoundError(f"stdin is not a file: {stdin}")
-        job = Job(self, argv, timeout_value, cwd=str(directory), env=minimal, stdin=stdin)
+        job = Job(
+            self, argv, timeout_value, cwd=str(directory), env=minimal, stdin=stdin
+        )
         self.jobs[job.id] = job
         self._active[job.id] = job
         return job
@@ -621,8 +786,10 @@ class JobRuntime:
             if members and all(member.id not in self._active for member in members):
                 errors = [
                     f"job {member.id} outcome unknown: {member._unknown_reason}"
-                    if member._unknown_reason else f"job {member.id} {member._delivery_error}"
-                    for member in members if member._unknown_reason or member._delivery_error
+                    if member._unknown_reason
+                    else f"job {member.id} {member._delivery_error}"
+                    for member in members
+                    if member._unknown_reason or member._delivery_error
                 ]
                 if errors:
                     job._pipeline_error = "; ".join(errors)
@@ -657,6 +824,12 @@ class JobRuntime:
     async def shutdown(self) -> None:
         self._closed = True
         owned = list(self._active.values())
-        await asyncio.gather(*(job._request_stop() for job in owned), return_exceptions=True)
-        await asyncio.gather(*(asyncio.shield(job._execution) for job in owned), return_exceptions=True)
-        await asyncio.gather(*(job._finalize() for job in owned), return_exceptions=True)
+        await asyncio.gather(
+            *(job._request_stop() for job in owned), return_exceptions=True
+        )
+        await asyncio.gather(
+            *(asyncio.shield(job._execution) for job in owned), return_exceptions=True
+        )
+        await asyncio.gather(
+            *(job._finalize() for job in owned), return_exceptions=True
+        )

@@ -1,0 +1,1004 @@
+diff --git a/src/albedo/daemon/conversation.gleam b/src/albedo/daemon/conversation.gleam
+index 4230c0c..6052608 100644
+--- a/src/albedo/daemon/conversation.gleam
++++ b/src/albedo/daemon/conversation.gleam
+@@ -16,6 +16,7 @@ import albedo/daemon/transcript
+ import albedo/daemon/usage
+ import albedo/harness/cache_fade
+ import albedo/harness/extensions/python/cells as journal
++import albedo/harness/session_lifecycle
+ import albedo/openai_api/types
+ import gleam/bool
+ import gleam/dynamic/decode
+@@ -244,6 +245,7 @@ pub fn create_identified(
+   ledger: store.Store,
+   info: Info,
+   creation: Creation,
++  owners: List(session_lifecycle.Owner),
+ ) -> Result(operations.Receipt, String) {
+   store.query(ledger, fn(db) {
+     store.transaction(db, fn() {
+@@ -256,7 +258,12 @@ pub fn create_identified(
+         None,
+         fn(db) {
+           use _ <- result.try(create_in(db, info))
+-          record_creation_in(db, info.id, creation)
++          use _ <- result.try(record_creation_in(db, info.id, creation))
++          session_lifecycle.run_in(
++            db,
++            owners,
++            session_lifecycle.Created(info.id),
++          )
+         },
+       )
+     })
+@@ -266,6 +273,7 @@ pub fn create_identified(
+ pub fn create_child_identified(
+   ledger: store.Store,
+   child: ChildCreation,
++  owners: List(session_lifecycle.Owner),
+ ) -> Result(operations.Receipt, String) {
+   store.query(ledger, fn(db) {
+     store.transaction(db, fn() {
+@@ -302,6 +310,7 @@ pub fn create_child_identified(
+             Ok(Some(_)) -> Error("input_conflict")
+             Error(error) -> Error(error)
+           })
++          use _ <- result.try(mail.validate(child.task))
+           use _ <- result.try(create_in(db, info))
+           use _ <- result.try(family.link_in(
+             db,
+@@ -319,8 +328,18 @@ pub fn create_child_identified(
+             True -> Ok(Nil)
+             False -> Error("child task inbox is full")
+           })
+-          operations.admit_pending_in(db, child.input, child.payload, 202, "{}")
+-          |> result.replace(Nil)
++          use _ <- result.try(operations.admit_pending_in(
++            db,
++            child.input,
++            child.payload,
++            202,
++            "{}",
++          ))
++          session_lifecycle.run_in(
++            db,
++            owners,
++            session_lifecycle.Child(child.parent_id, child.info.id),
++          )
+         },
+       )
+     })
+@@ -1083,21 +1102,63 @@ pub fn create_child(
+   info: Info,
+   parent: String,
+   name: String,
++  initial_task: Option(mail.Letter),
++  owners: List(session_lifecycle.Owner),
+ ) -> Result(#(Info, family.Member), String) {
+   store.query(ledger, fn(db) {
+     store.transaction(db, fn() {
++      use _ <- result.try(case initial_task {
++        None -> Ok(Nil)
++        Some(task) -> {
++          use _ <- result.try(
++            case
++              task.recipient == info.id
++              && task.sender == Some(parent)
++              && task.kind == mail.Task
++            {
++              True -> Ok(Nil)
++              False -> Error("invalid child task identity")
++            },
++          )
++          mail.validate(task)
++        }
++      })
+       use above <- result.try(session_configuration.read_in(db, parent))
+       use _ <- result.try(family.available_in(db, parent))
+       let info = Info(..info, cwd: above.workspace)
+       use _ <- result.try(create_in(db, info))
+       use member <- result.try(family.link_in(db, info.id, parent, name))
++      use _ <- result.try(case initial_task {
++        None -> Ok(Nil)
++        Some(task) -> {
++          use inserted <- result.try(mail.insert_silent(db, task, mail.Inbox))
++          case inserted {
++            True -> Ok(Nil)
++            False -> Error("child task inbox is full")
++          }
++        }
++      })
++      use _ <- result.try(session_lifecycle.run_in(
++        db,
++        owners,
++        session_lifecycle.Child(parent, info.id),
++      ))
+       Ok(#(info, member))
+     })
+   })
+ }
+ 
+-pub fn create(store: store.Store, info: Info) -> Result(Nil, String) {
+-  store.query(store, create_in(_, info))
++pub fn create(
++  store: store.Store,
++  info: Info,
++  owners: List(session_lifecycle.Owner),
++) -> Result(Nil, String) {
++  store.query(store, fn(db) {
++    store.transaction(db, fn() {
++      use _ <- result.try(create_in(db, info))
++      session_lifecycle.run_in(db, owners, session_lifecycle.Created(info.id))
++    })
++  })
+ }
+ 
+ fn create_in(db: sqlight.Connection, info: Info) -> Result(Nil, String) {
+diff --git a/src/albedo/daemon/history.gleam b/src/albedo/daemon/history.gleam
+index cdf4182..78644f5 100644
+--- a/src/albedo/daemon/history.gleam
++++ b/src/albedo/daemon/history.gleam
+@@ -5,8 +5,10 @@ import albedo/daemon/message_content as events
+ import albedo/daemon/operations
+ import albedo/daemon/session_configuration
+ import albedo/daemon/store
++import albedo/daemon/transcript
+ import albedo/daemon/usage
+ import albedo/harness/extensions/lcm/graph as lcm_graph
++import albedo/harness/session_lifecycle
+ import albedo/openai_api/types
+ import gleam/dynamic/decode
+ import gleam/json
+@@ -37,6 +39,7 @@ pub type ForkCreation {
+ pub fn fork_identified(
+   ledger: store.Store,
+   request: ForkCreation,
++  owners: List(session_lifecycle.Owner),
+ ) -> Result(operations.Receipt, String) {
+   store.query(ledger, fn(db) {
+     store.transaction(db, fn() {
+@@ -56,6 +59,7 @@ pub fn fork_identified(
+             request.source_id,
+             request.branch_id,
+             request.checkpoint,
++            owners,
+           ))
+           conversation.record_creation_in(
+             db,
+@@ -76,9 +80,12 @@ pub fn fork(
+   source_id: String,
+   branch_id: String,
+   checkpoint: Int,
++  owners: List(session_lifecycle.Owner),
+ ) -> Result(conversation.Info, String) {
+   store.query(ledger, fn(db) {
+-    store.transaction(db, fn() { fork_in(db, source_id, branch_id, checkpoint) })
++    store.transaction(db, fn() {
++      fork_in(db, source_id, branch_id, checkpoint, owners)
++    })
+   })
+ }
+ 
+@@ -87,6 +94,7 @@ fn fork_in(
+   source_id: String,
+   branch_id: String,
+   checkpoint: Int,
++  owners: List(session_lifecycle.Owner),
+ ) -> Result(conversation.Info, String) {
+   use _ <- result.try(
+     case
+@@ -110,7 +118,13 @@ fn fork_in(
+   use pending <- result.try(unmatched_calls(rows))
+   let title = prefix_title(rows)
+   use _ <- result.try(insert_session(db, source, branch_id, title))
+-  use _ <- result.try(copy_prefix(db, source_id, branch_id, checkpoint, rows))
++  use mapping <- result.try(copy_prefix(
++    db,
++    source_id,
++    branch_id,
++    checkpoint,
++    rows,
++  ))
+   use _ <- result.try(lcm_graph.inherit_fork_prefix(
+     db,
+     source_id,
+@@ -125,6 +139,11 @@ fn fork_in(
+     source.provider,
+     pending,
+   ))
++  use _ <- result.try(session_lifecycle.run_in(
++    db,
++    owners,
++    session_lifecycle.Fork(source_id, branch_id, checkpoint, mapping),
++  ))
+   Ok(conversation.Info(
+     branch_id,
+     title,
+@@ -224,7 +243,7 @@ fn copy_prefix(
+   branch_id: String,
+   checkpoint: Int,
+   rows: List(Row),
+-) -> Result(Nil, String) {
++) -> Result(List(#(transcript.SourceRef, transcript.SourceRef)), String) {
+   use _ <- result.try(
+     store.run(
+       db,
+@@ -242,50 +261,64 @@ fn copy_prefix(
+     [sqlight.text(branch_id)],
+     decode.field(0, decode.int, decode.success),
+   ))
+-  list.try_each(list.zip(rows, positions), fn(pair) {
+-    use _ <- result.try(conversation.index_entry_in(
+-      db,
+-      branch_id,
+-      pair.1,
+-      pair.0.input,
+-    ))
+-    use _ <- result.try(copy_input_metadata(
+-      db,
+-      source_id,
+-      branch_id,
+-      #(pair.0.seq, pair.1),
+-      checkpoint,
+-    ))
+-    case pair.0.input {
+-      types.ToolOutput(_, output, _) -> {
+-        case
+-          json.parse(
+-            output,
+-            decode.field("cell_id", decode.string, decode.success),
+-          )
+-        {
+-          Error(_) -> Ok(Nil)
+-          Ok(cell_id) -> {
+-            use traces <- result.try(
+-              conversation.traces_in(db, source_id, [cell_id]),
++  use pairs <- result.try(
++    list.strict_zip(rows, positions)
++    |> result.replace_error("fork transcript copy changed its source row count"),
++  )
++  use _ <- result.try(
++    list.try_each(pairs, fn(pair) {
++      use _ <- result.try(conversation.index_entry_in(
++        db,
++        branch_id,
++        pair.1,
++        pair.0.input,
++      ))
++      use _ <- result.try(copy_input_metadata(
++        db,
++        source_id,
++        branch_id,
++        #(pair.0.seq, pair.1),
++        checkpoint,
++      ))
++      case pair.0.input {
++        types.ToolOutput(_, output, _) -> {
++          case
++            json.parse(
++              output,
++              decode.field("cell_id", decode.string, decode.success),
+             )
+-            list.try_each(traces, fn(trace) {
+-              store.run(
+-                db,
+-                "INSERT OR IGNORE INTO transcript_traces(session,cell_id,payload) VALUES(?,?,?)",
+-                [
+-                  sqlight.text(branch_id),
+-                  sqlight.text(trace.0),
+-                  sqlight.text(json.to_string(trace.1)),
+-                ],
++          {
++            Error(_) -> Ok(Nil)
++            Ok(cell_id) -> {
++              use traces <- result.try(
++                conversation.traces_in(db, source_id, [cell_id]),
+               )
+-            })
++              list.try_each(traces, fn(trace) {
++                store.run(
++                  db,
++                  "INSERT OR IGNORE INTO transcript_traces(session,cell_id,payload) VALUES(?,?,?)",
++                  [
++                    sqlight.text(branch_id),
++                    sqlight.text(trace.0),
++                    sqlight.text(json.to_string(trace.1)),
++                  ],
++                )
++              })
++            }
+           }
+         }
++        _ -> Ok(Nil)
+       }
+-      _ -> Ok(Nil)
+-    }
+-  })
++    }),
++  )
++  Ok(
++    list.map(pairs, fn(pair) {
++      #(
++        transcript.SourceRef(source_id, pair.0.seq),
++        transcript.SourceRef(branch_id, pair.1),
++      )
++    }),
++  )
+ }
+ 
+ fn copy_input_metadata(
+diff --git a/src/albedo/daemon/mail.gleam b/src/albedo/daemon/mail.gleam
+index d14cae6..23083e6 100644
+--- a/src/albedo/daemon/mail.gleam
++++ b/src/albedo/daemon/mail.gleam
+@@ -206,17 +206,9 @@ pub fn post(
+   kind: Kind,
+   body: String,
+ ) -> Result(Letter, String) {
+-  let empty = string.trim(body) == ""
+-  let oversize = string.byte_size(body) > body_limit
+-  use _ <- result.try(case empty, oversize, sender == Some(recipient) {
+-    True, _, _ -> Error("mail body is empty")
+-    _, True, _ ->
+-      Error("mail body is over 1 MiB; write it to a file and send the path")
+-    _, _, True -> Error("an agent cannot mail itself")
+-    False, False, False -> Ok(Nil)
+-  })
+   let letter =
+     Letter(id, recipient, sender, sender_name, kind, body, usage.now())
++  use _ <- result.try(validate(letter))
+   store.query(db, fn(connection) { insert(connection, letter, Inbox) })
+   |> result.try(fn(inserted) {
+     case inserted {
+@@ -226,6 +218,20 @@ pub fn post(
+   })
+ }
+ 
++/// Validate initial tasks before their creation transaction makes any writes.
++pub fn validate(letter: Letter) -> Result(Nil, String) {
++  let Letter(_, recipient, sender, _, _, body, _) = letter
++  let empty = string.trim(body) == ""
++  let oversize = string.byte_size(body) > body_limit
++  case empty, oversize, sender == Some(recipient) {
++    True, _, _ -> Error("mail body is empty")
++    _, True, _ ->
++      Error("mail body is over 1 MiB; write it to a file and send the path")
++    _, _, True -> Error("an agent cannot mail itself")
++    False, False, False -> Ok(Nil)
++  }
++}
++
+ /// Store a letter inside the caller's transaction: False when the recipient's
+ /// inbox is full. Producers with their own records (a webhook's raw body) write
+ /// both in one transaction.
+@@ -233,6 +239,23 @@ pub fn insert(
+   connection: sqlight.Connection,
+   letter: Letter,
+   owner: DeliveryOwner,
++) -> Result(Bool, String) {
++  insert_silent(connection, letter, owner)
++  |> result.map(fn(inserted) {
++    case inserted, owner {
++      True, Inbox -> announce(letter)
++      _, _ -> Nil
++    }
++    inserted
++  })
++}
++
++/// A creator uses this inside its transaction and announces only after commit.
++/// Existing producers keep `insert`'s notification behavior.
++pub fn insert_silent(
++  connection: sqlight.Connection,
++  letter: Letter,
++  owner: DeliveryOwner,
+ ) -> Result(Bool, String) {
+   let Letter(id, recipient, sender, sender_name, kind, body, created_at) =
+     letter
+@@ -264,26 +287,19 @@ pub fn insert(
+       False -> e.message
+     }
+   })
+-  |> result.map(fn(rows) {
+-    case rows {
+-      [] -> False
+-      _ -> {
+-        case owner {
+-          IdentifiedInput -> Nil
+-          Inbox ->
+-            bus.mailed(
+-              id,
+-              sender,
+-              sender_name,
+-              recipient,
+-              kind_name(kind),
+-              string.byte_size(body),
+-            )
+-        }
+-        True
+-      }
+-    }
+-  })
++  |> result.map(fn(rows) { !list.is_empty(rows) })
++}
++
++/// Announce a committed inbox letter; never call from a creation callback.
++pub fn announce(letter: Letter) -> Nil {
++  bus.mailed(
++    letter.id,
++    letter.sender,
++    letter.sender_name,
++    letter.recipient,
++    kind_name(letter.kind),
++    string.byte_size(letter.body),
++  )
+ }
+ 
+ /// The oldest undelivered letters, excluding closed recipients before the limit.
+diff --git a/src/albedo/daemon/registry.gleam b/src/albedo/daemon/registry.gleam
+index f97f76b..806a7a1 100644
+--- a/src/albedo/daemon/registry.gleam
++++ b/src/albedo/daemon/registry.gleam
+@@ -204,7 +204,11 @@ fn serve(state: State, message: Message) -> actor.Next(State, a) {
+         {
+           False -> Error("expected a model")
+           True ->
+-            conversation.create(runtime.ledger(state.host), info)
++            conversation.create(
++              runtime.ledger(state.host),
++              info,
++              runtime.lifecycle_owners(state.host),
++            )
+             |> result.replace(info)
+         }
+       }
+@@ -889,39 +893,46 @@ fn create_child(
+         protocol: provider.protocol,
+         effort: extension.default_effort(efforts),
+       )
+-    conversation.create_child(db, info, parent, name)
++    let letter =
++      mail.Letter(
++        mail.new_id(),
++        info.id,
++        Some(parent),
++        family.name_of(db, parent),
++        mail.Task,
++        task,
++        usage.now(),
++      )
++    conversation.create_child(
++      db,
++      info,
++      parent,
++      name,
++      Some(letter),
++      runtime.lifecycle_owners(state.host),
++    )
++    |> result.map(fn(created) { #(created, letter) })
+   }
+   case created {
+     Error(error) -> #(state, Error(error))
+-    Ok(#(info, member)) -> {
++    Ok(#(#(info, member), letter)) -> {
+       bus.spawned(member)
++      mail.announce(letter)
+       let state =
+         State(
+           ..state,
+           sessions: dict.insert(state.sessions, info.id, #(info, None)),
+         )
+       let #(state, worker) = activate(state, info.id)
+-      let sent = {
+-        use letter <- result.try(mail.post(
+-          db,
+-          mail.new_id(),
+-          info.id,
+-          Some(parent),
+-          family.name_of(db, parent),
+-          mail.Task,
+-          task,
+-        ))
+-        // Off the registry: admitting the task may boot the child's kernel.
+-        // The letter is durable, so a failed hand-off is the dispatcher's.
+-        case worker {
+-          Ok(worker) -> {
+-            process.spawn_unlinked(fn() { session.submit_mail(worker, letter) })
+-            Ok(Nil)
+-          }
+-          Error(_) -> Ok(Nil)
++      // The committed letter survives a failed hand-off; the dispatcher retries.
++      case worker {
++        Ok(worker) -> {
++          process.spawn_unlinked(fn() { session.submit_mail(worker, letter) })
++          Nil
+         }
++        Error(_) -> Nil
+       }
+-      #(state, sent |> result.replace(#(info, member)))
++      #(state, Ok(#(info, member)))
+     }
+   }
+ }
+@@ -1184,7 +1195,12 @@ fn create_identified(
+             conversation.Creation(operation, submitted, resolved, name)
+           let result = case intent {
+             session_creation.NewSession(..) ->
+-              conversation.create_identified(db, info, creation)
++              conversation.create_identified(
++                db,
++                info,
++                creation,
++                runtime.lifecycle_owners(state.host),
++              )
+             session_creation.ForkSession(source, checkpoint, _) -> {
+               use checkpoint <- result.try(
+                 int.parse(checkpoint)
+@@ -1193,6 +1209,7 @@ fn create_identified(
+               history.fork_identified(
+                 db,
+                 history.ForkCreation(source, id, checkpoint, creation),
++                runtime.lifecycle_owners(state.host),
+               )
+             }
+             session_creation.ChildSession(
+@@ -1237,6 +1254,7 @@ fn create_identified(
+                   session_submission.encode(submitted),
+                   letter,
+                 ),
++                runtime.lifecycle_owners(state.host),
+               )
+             }
+           }
+diff --git a/src/albedo/harness/extension.gleam b/src/albedo/harness/extension.gleam
+index 95c38f8..f6cceaf 100644
+--- a/src/albedo/harness/extension.gleam
++++ b/src/albedo/harness/extension.gleam
+@@ -11,6 +11,7 @@ import albedo/harness/host
+ import albedo/harness/oauth
+ import albedo/harness/page
+ import albedo/harness/protect
++import albedo/harness/session_lifecycle
+ import albedo/harness/web_search
+ import albedo/openai_api/types
+ import gleam/bool
+@@ -274,6 +275,8 @@ pub type Cleaner =
+   fn(sqlight.Connection, String) -> Result(Nil, String)
+ 
+ pub type Plugin {
++  /// Durable creation hooks, independent of per-session enablement.
++  SessionLifecyclePlugin(contribution: session_lifecycle.Contribution)
+   ContextPlugin(load: fn(String) -> Result(String, String))
+   ToolPlugin(
+     instructions: String,
+@@ -461,6 +464,49 @@ fn quarantined(extension: Extension, reason: String) -> Quarantined {
+   Quarantined(extension.name, extension.description, reason)
+ }
+ 
++/// Retain canonical declarations before installation discards failed owners.
++/// A duplicate's quarantine cannot change the first owner's availability.
++pub fn lifecycle_owners(
++  declarations: List(Extension),
++  installed: List(Extension),
++  failures: List(Quarantined),
++) -> List(session_lifecycle.Owner) {
++  let #(canonical, _) = distinctly_named(declarations)
++  list.filter_map(canonical, fn(declaration) {
++    let contributions =
++      plugin_values([declaration], fn(_, plugin) {
++        case plugin {
++          SessionLifecyclePlugin(value) -> Ok(value)
++          _ -> Error(Nil)
++        }
++      })
++    case contributions {
++      [] -> Error(Nil)
++      _ -> {
++        let ready =
++          list.any(installed, fn(ext) { ext.name == declaration.name })
++        let availability = case ready {
++          True -> session_lifecycle.Ready
++          False -> {
++            let reason =
++              list.find(failures, fn(failure) {
++                failure.name == declaration.name
++              })
++              |> result.map(fn(failure) { failure.reason })
++              |> result.unwrap("owner was not installed")
++            session_lifecycle.Quarantined(reason)
++          }
++        }
++        Ok(session_lifecycle.Owner(
++          declaration.name,
++          availability,
++          contributions,
++        ))
++      }
++    }
++  })
++}
++
+ /// Split `installed` in order: each extension `check` accepts is kept, and
+ /// each one it refuses is quarantined with the reason it gave. `check` sees
+ /// what has been kept so far, since a conflict is with an earlier one.
+diff --git a/src/albedo/harness/extension/selection.gleam b/src/albedo/harness/extension/selection.gleam
+index ae00cb0..ee88bef 100644
+--- a/src/albedo/harness/extension/selection.gleam
++++ b/src/albedo/harness/extension/selection.gleam
+@@ -529,6 +529,7 @@ pub fn summaries(
+         list.map(ext.plugins, fn(plugin) {
+           case plugin {
+             extension.ContextPlugin(_) -> "context"
++            extension.SessionLifecyclePlugin(_) -> "session_lifecycle"
+             extension.ToolPlugin(_, _, _, _) -> "tool"
+             extension.ManagedPlugin(_) -> "managed"
+             extension.CommandPlugin(_) -> "commands"
+diff --git a/src/albedo/harness/runtime.gleam b/src/albedo/harness/runtime.gleam
+index bf0aaf4..9003d77 100644
+--- a/src/albedo/harness/runtime.gleam
++++ b/src/albedo/harness/runtime.gleam
+@@ -21,6 +21,7 @@ import albedo/harness/runtime/preparation
+ import albedo/harness/runtime/reload
+ import albedo/harness/runtime/state as runtime_state
+ import albedo/harness/runtime/upgrade
++import albedo/harness/session_lifecycle
+ import albedo/openai_api/types
+ import albedo/shared
+ import gleam/dict
+@@ -208,6 +209,7 @@ pub fn start_with_config(
+         installed,
+         default_enabled,
+         quarantined,
++        extension.lifecycle_owners(config.extensions, installed, quarantined),
+       ))
+     Ok(
+       actor.initialised(runtime_state.State(
+@@ -1121,6 +1123,11 @@ pub fn installed(runtime: Runtime) -> List(extension.Extension) {
+   shared.read(runtime.installed).extensions
+ }
+ 
++/// Immutable creation owners include disabled and quarantined declarations.
++pub fn lifecycle_owners(runtime: Runtime) -> List(session_lifecycle.Owner) {
++  shared.read(runtime.installed).lifecycle_owners
++}
++
+ pub fn quarantined(runtime: Runtime) -> List(extension.Quarantined) {
+   shared.read(runtime.installed).quarantined
+ }
+diff --git a/src/albedo/harness/runtime/state.gleam b/src/albedo/harness/runtime/state.gleam
+index 5c0f68f..4992cb3 100644
+--- a/src/albedo/harness/runtime/state.gleam
++++ b/src/albedo/harness/runtime/state.gleam
+@@ -10,6 +10,7 @@ import albedo/harness/extension/composition
+ import albedo/harness/extension/selection
+ import albedo/harness/extensions/python/kernel as python
+ import albedo/harness/runtime/catalog as session_catalog
++import albedo/harness/session_lifecycle
+ import albedo/openai_api/types
+ import albedo/shared.{type Shared}
+ import gleam/dict.{type Dict}
+@@ -36,6 +37,7 @@ pub type Installed {
+     default_enabled: List(String),
+     /// Installed extensions the daemon will not run, with their reasons.
+     quarantined: List(extension.Quarantined),
++    lifecycle_owners: List(session_lifecycle.Owner),
+   )
+ }
+ 
+diff --git a/src/albedo/harness/session_lifecycle.gleam b/src/albedo/harness/session_lifecycle.gleam
+new file mode 100644
+index 0000000..f5a2d73
+--- /dev/null
++++ b/src/albedo/harness/session_lifecycle.gleam
+@@ -0,0 +1,65 @@
++//// Durable lifecycle contributions use the creator's transaction connection.
++//// Guards use bounded read-only SQL. Apply may write only on this connection:
++//// no actor reentry, nested transactions, bus, processes, kernels, providers
++//// or external effects. Declarations are trusted host code.
++
++import albedo/daemon/transcript
++import albedo/harness/protect
++import gleam/list
++import gleam/result
++import sqlight
++
++pub type Event {
++  Created(session: String)
++  Child(parent: String, child: String)
++  /// Actual copied rows in source order; excludes synthetic tool completions.
++  Fork(
++    parent: String,
++    child: String,
++    checkpoint: Int,
++    mapping: List(#(transcript.SourceRef, transcript.SourceRef)),
++  )
++}
++
++pub type Contribution {
++  Contribution(
++    needed_in: fn(sqlight.Connection, Event) -> Result(Bool, String),
++    apply_in: fn(sqlight.Connection, Event) -> Result(Nil, String),
++  )
++}
++
++pub type Availability {
++  Ready
++  Quarantined(reason: String)
++}
++
++pub type Owner {
++  Owner(
++    name: String,
++    availability: Availability,
++    contributions: List(Contribution),
++  )
++}
++
++/// Run inside the native transaction and admission mutation. Catchable crashes
++/// become errors in the same process so the caller rolls back all native writes.
++pub fn run_in(
++  db: sqlight.Connection,
++  owners: List(Owner),
++  event: Event,
++) -> Result(Nil, String) {
++  list.try_each(owners, fn(owner) {
++    list.try_each(owner.contributions, fn(contribution) {
++      protect.guarded(fn() {
++        use needed <- result.try(contribution.needed_in(db, event))
++        case needed, owner.availability {
++          False, _ -> Ok(Nil)
++          True, Ready -> contribution.apply_in(db, event)
++          True, Quarantined(reason) ->
++            Error("required lifecycle owner is quarantined: " <> reason)
++        }
++      })
++      |> result.map_error(fn(reason) { owner.name <> ": " <> reason })
++    })
++  })
++}
+diff --git a/test/daemon/conversation_test.gleam b/test/daemon/conversation_test.gleam
+index 6d47585..a575fab 100644
+--- a/test/daemon/conversation_test.gleam
++++ b/test/daemon/conversation_test.gleam
+@@ -34,7 +34,7 @@ pub fn latest_user_title_survives_restart_and_legacy_migration_test() -> Nil {
+   let assert Ok(host) = runtime.start(path)
+   let ledger = runtime.ledger(host)
+   let assert Ok(_) = conversation.initialise(ledger)
+-  let assert Ok(_) = conversation.create(ledger, session("session"))
++  let assert Ok(_) = conversation.create(ledger, session("session"), [])
+   let assert Ok(_) =
+     conversation.commit(
+       ledger,
+@@ -87,8 +87,8 @@ pub fn migration_recovers_placeholder_titles_and_activity_order_test() -> Nil {
+   let assert Ok(host) = runtime.start(path)
+   let ledger = runtime.ledger(host)
+   let assert Ok(_) = conversation.initialise(ledger)
+-  let assert Ok(_) = conversation.create(ledger, session("first"))
+-  let assert Ok(_) = conversation.create(ledger, session("second"))
++  let assert Ok(_) = conversation.create(ledger, session("first"), [])
++  let assert Ok(_) = conversation.create(ledger, session("second"), [])
+   let assert Ok(_) =
+     conversation.commit(
+       ledger,
+@@ -128,7 +128,7 @@ pub fn transcript_timestamps_migrate_without_invention_and_roundtrip_test() -> N
+   let assert Ok(host) = runtime.start(path)
+   let ledger = runtime.ledger(host)
+   let assert Ok(_) = conversation.initialise(ledger)
+-  let assert Ok(_) = conversation.create(ledger, session("timestamped"))
++  let assert Ok(_) = conversation.create(ledger, session("timestamped"), [])
+   let assert Ok(_) =
+     conversation.commit(
+       ledger,
+diff --git a/test/daemon/image_store_test.gleam b/test/daemon/image_store_test.gleam
+index ebea711..9113fba 100644
+--- a/test/daemon/image_store_test.gleam
++++ b/test/daemon/image_store_test.gleam
+@@ -86,7 +86,7 @@ fn loaded(ledger: store.Store, id: String) -> List(types.Input) {
+ 
+ pub fn commit_keeps_one_payload_and_rows_load_references_test() -> Nil {
+   let #(path, ledger) = ledger()
+-  let assert Ok(_) = conversation.create(ledger, session("s"))
++  let assert Ok(_) = conversation.create(ledger, session("s"), [])
+   let assert Ok(_) =
+     conversation.commit(ledger, "s", inputs(), conversation.Idle)
+ 
+@@ -114,8 +114,8 @@ pub fn commit_keeps_one_payload_and_rows_load_references_test() -> Nil {
+ pub fn deleting_a_session_releases_only_unshared_payloads_test() -> Nil {
+   let #(path, ledger) = ledger()
+   let assert Ok(_) = family.initialise(ledger)
+-  let assert Ok(_) = conversation.create(ledger, session("a"))
+-  let assert Ok(_) = conversation.create(ledger, session("b"))
++  let assert Ok(_) = conversation.create(ledger, session("a"), [])
++  let assert Ok(_) = conversation.create(ledger, session("b"), [])
+   let assert Ok(_) =
+     conversation.commit(ledger, "a", inputs(), conversation.Idle)
+   let assert Ok(_) =
+@@ -160,7 +160,7 @@ pub fn deleting_a_session_releases_only_unshared_payloads_test() -> Nil {
+ 
+ pub fn migration_moves_legacy_payloads_once_after_a_backup_test() -> Nil {
+   let #(path, ledger) = ledger()
+-  let assert Ok(_) = conversation.create(ledger, session("s"))
++  let assert Ok(_) = conversation.create(ledger, session("s"), [])
+   let assert Ok(_) =
+     store.query(ledger, fn(db) {
+       sqlight.query(
+@@ -185,7 +185,7 @@ pub fn migration_moves_legacy_payloads_once_after_a_backup_test() -> Nil {
+ 
+ pub fn migration_converts_text_images_without_changing_references_test() -> Nil {
+   let #(path, ledger) = ledger()
+-  let assert Ok(_) = conversation.create(ledger, session("s"))
++  let assert Ok(_) = conversation.create(ledger, session("s"), [])
+   let assert Ok(_) =
+     conversation.commit(
+       ledger,
+@@ -221,7 +221,7 @@ pub fn migration_converts_text_images_without_changing_references_test() -> Nil
+ 
+ pub fn failed_backup_keeps_text_images_untouched_test() -> Nil {
+   let #(path, ledger) = ledger()
+-  let assert Ok(_) = conversation.create(ledger, session("s"))
++  let assert Ok(_) = conversation.create(ledger, session("s"), [])
+   let assert Ok(_) =
+     conversation.commit(
+       ledger,
+@@ -239,7 +239,7 @@ pub fn failed_backup_keeps_text_images_untouched_test() -> Nil {
+ 
+ pub fn fingerprints_ignore_where_a_payload_lives_test() -> Nil {
+   let #(path, ledger) = ledger()
+-  let assert Ok(_) = conversation.create(ledger, session("s"))
++  let assert Ok(_) = conversation.create(ledger, session("s"), [])
+   let assert Ok(_) =
+     conversation.commit(
+       ledger,
+diff --git a/test/daemon/mail_commit_test.gleam b/test/daemon/mail_commit_test.gleam
+index 8e5a52c..e0b5458 100644
+--- a/test/daemon/mail_commit_test.gleam
++++ b/test/daemon/mail_commit_test.gleam
+@@ -34,9 +34,9 @@ pub fn close_before_mail_commit_rolls_back_turn_and_preserves_letter_test() -> N
+       None,
+       None,
+     )
+-  let assert Ok(_) = conversation.create(ledger, parent)
++  let assert Ok(_) = conversation.create(ledger, parent, [])
+   let assert Ok(_) =
+-    conversation.create(ledger, conversation.Info(..parent, id: "child"))
++    conversation.create(ledger, conversation.Info(..parent, id: "child"), [])
+   let assert Ok(_) =
+     store.query(ledger, fn(connection) {
+       family.link_in(connection, "child", "parent", "child")
+diff --git a/test/daemon/transcript_sources_test.gleam b/test/daemon/transcript_sources_test.gleam
+index bee0af2..4e8a82c 100644
+--- a/test/daemon/transcript_sources_test.gleam
++++ b/test/daemon/transcript_sources_test.gleam
+@@ -73,7 +73,7 @@ pub fn metadata_range_and_backfill_resume_test() -> Nil {
+   let assert Ok(host) = runtime.start(path)
+   let ledger = runtime.ledger(host)
+   let assert Ok(_) = conversation.initialise(ledger)
+-  let assert Ok(_) = conversation.create(ledger, session())
++  let assert Ok(_) = conversation.create(ledger, session(), [])
+   let inputs = list.repeat(types.User("[note] daemon boundary"), 260)
+   let assert Ok(_) =
+     conversation.commit(ledger, "session", inputs, conversation.Idle)
+@@ -122,7 +122,7 @@ pub fn ranged_images_equal_full_history_with_later_fits_test() -> Nil {
+   let ledger = runtime.ledger(host)
+   let assert Ok(_) = conversation.initialise(ledger)
+   let assert Ok(_) = family.initialise(ledger)
+-  let assert Ok(_) = conversation.create(ledger, session())
++  let assert Ok(_) = conversation.create(ledger, session(), [])
+   let data = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAAD"
+   let assert Ok(original) = types.image("image/png", data, 2, 3, 24)
+   let assert Ok(second) = types.image("image/png", data <> "AAAA", 2, 3, 27)
+@@ -184,7 +184,7 @@ pub fn ranged_images_equal_full_history_with_later_fits_test() -> Nil {
+       conversation.Continue([fingerprint(row.entry.input), ..acc])
+     })
+   before |> should.equal([fingerprint(types.UserImage("reuse", [original]))])
+-  let assert Ok(_) = history.fork(ledger, "session", "branch", 2)
++  let assert Ok(_) = history.fork(ledger, "session", "branch", 2, [])
+   let assert Ok(branch) = conversation.snapshot(ledger, "branch")
+   let assert Ok(branch_stats) = conversation.source_stats(ledger, branch, 0)
+   branch_stats.uncovered_users |> should.equal(2)
+diff --git a/test/harness/cache_fade_test.gleam b/test/harness/cache_fade_test.gleam
+index 37a7eff..c2846de 100644
+--- a/test/harness/cache_fade_test.gleam
++++ b/test/harness/cache_fade_test.gleam
+@@ -109,8 +109,8 @@ pub fn the_ledger_measures_a_head_across_sessions_test() -> Nil {
+       )
+     Nil
+   }
+-  let assert Ok(_) = conversation.create(ledger, info("parent"))
+-  let assert Ok(_) = conversation.create(ledger, info("fork"))
++  let assert Ok(_) = conversation.create(ledger, info("parent"), [])
++  let assert Ok(_) = conversation.create(ledger, info("fork"), [])
+   // The parent wrote the head after reading its tools: 2k + 18k.
+   record("parent", "claude", "opus", "head", usage(2000, 500, 18_000))
+   // The fork reads it whole, tail and all, which measures nothing.
+diff --git a/test/harness/extension_failure_test.gleam b/test/harness/extension_failure_test.gleam
+index 7c6bc2d..ac5c587 100644
+--- a/test/harness/extension_failure_test.gleam
++++ b/test/harness/extension_failure_test.gleam
+@@ -51,6 +51,7 @@ fn host(
+         None,
+         None,
+       ),
++      [],
+     )
+   let assert Ok(session) =
+     runtime.open_session(host, "broken-extension-test", "/tmp")
+diff --git a/test/harness/lcm_preparation_test.gleam b/test/harness/lcm_preparation_test.gleam
+index 425fec8..c99bade 100644
+--- a/test/harness/lcm_preparation_test.gleam
++++ b/test/harness/lcm_preparation_test.gleam
+@@ -46,6 +46,7 @@ pub fn below_trigger_and_stored_prior_do_not_decode_archived_payloads_test() ->
+         None,
+         None,
+       ),
++      [],
+     )
+   let archived =
+     list.repeat(Nil, 400)
+diff --git a/test/harness/lcm_test.gleam b/test/harness/lcm_test.gleam
+index 279016e..9e0de15 100644
+--- a/test/harness/lcm_test.gleam
++++ b/test/harness/lcm_test.gleam
+@@ -42,6 +42,7 @@ fn host(capacity: Int) -> #(runtime.Runtime, runtime.Session) {
+         None,
+         None,
+       ),
++      [],
+     )
+   let assert Ok(session) = runtime.open_session(host, "lcm-test", "/tmp")
+   #(host, session)
+@@ -84,7 +85,7 @@ pub fn lcm_fork_inside_summary_reuses_only_complete_child_nodes_test() -> Nil {
+     graph.save_parent(ledger, "lcm-test", [one, two, three], "all three units")
+ 
+   let assert Ok(_) =
+-    history.fork(ledger, "lcm-test", "partial", fourth.source.seq)
++    history.fork(ledger, "lcm-test", "partial", fourth.source.seq, [])
+   let assert Ok([branch_one, branch_two]) = graph.frontier(ledger, "partial")
+   branch_one.summary |> should.equal("first unit")
+   branch_two.summary |> should.equal("second unit")
+@@ -94,7 +95,7 @@ pub fn lcm_fork_inside_summary_reuses_only_complete_child_nodes_test() -> Nil {
+   |> should.equal(Ok(branch_fourth.source.seq))
+ 
+   let assert Ok(_) =
+-    history.fork(ledger, "lcm-test", "mid-leaf", third.source.seq)
++    history.fork(ledger, "lcm-test", "mid-leaf", third.source.seq, [])
+   let assert Ok([only_complete]) = graph.frontier(ledger, "mid-leaf")
+   only_complete.summary |> should.equal("first unit")
+   let assert Ok([_, middle_second, _]) =
+diff --git a/test/harness/retrieval_performance_test.gleam b/test/harness/retrieval_performance_test.gleam
+index ac500df..ce7d39e 100644
+--- a/test/harness/retrieval_performance_test.gleam
++++ b/test/harness/retrieval_performance_test.gleam
+@@ -51,6 +51,7 @@ fn fixture() -> #(runtime.Runtime, store.Store) {
+             None,
+             None,
+           ),
++          [],
+         )
+     })
+   #(host, ledger)
+diff --git a/test/harness/session_fixture.gleam b/test/harness/session_fixture.gleam
+index 59b11a6..b54f032 100644
+--- a/test/harness/session_fixture.gleam
++++ b/test/harness/session_fixture.gleam
+@@ -29,6 +29,7 @@ pub fn create(host: runtime.Runtime, id: String, workspace: String) -> Nil {
+         None,
+         None,
+       ),
++      [],
+     )
+   Nil
+ }
+diff --git a/test/harness/tool_error_test.gleam b/test/harness/tool_error_test.gleam
+index 049c74d..97a0a7b 100644
+--- a/test/harness/tool_error_test.gleam
++++ b/test/harness/tool_error_test.gleam
+@@ -38,6 +38,7 @@ fn host() -> #(runtime.Runtime, runtime.Session) {
+         None,
+         None,
+       ),
++      [],
+     )
+   let assert Ok(session) = runtime.open_session(host, "tool-error-test", "/tmp")
+   #(host, session)

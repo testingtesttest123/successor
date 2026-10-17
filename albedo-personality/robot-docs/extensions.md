@@ -1,0 +1,325 @@
+# extensions
+
+Persisted preferences are owned by the daemon and changed through the [settings API](settings.md). The CLI refreshes them on use and never writes settings files.
+
+
+an extension is a named bundle of plugins. it can contribute any number of context, tool, command, managed, models, provider, login, service, migration, compaction, notes, clean, fold, or [search](web-search.md) plugins. `python`, `run`, `work`, `mail`, `agents`, `schedule`, `paperclips`, `files`, `memory`, `links`, `instructions`, `commands`, `skills`, `models`, `openai`, `codex`, `antigravity`, `alibaba`, `bedrock`, `claude`, `vertex`, `rolling`, `snapcompact-memory`, `lcm-memory`, `notes`, `remote`, `browser`, [`warm`](cache-warming.md), `exa`, and [`web-search`](web-search.md) are enabled by default; `mcp`, `view`, [`proxy`](proxy.md), `webhooks`, `personality`, `personality-lessons`, and the `snapcompact` and `lcm` compaction strategies are installed and disabled until enabled. plugin contributions compose inside them.
+
+## select extensions
+
+open `/extensions` in a session to inspect installed extensions and enable or disable them. selection is saved per session. enabling a compaction strategy disables the previously selected strategy in the same reload. to replace the active strategy, enable the new one; disabling the only active strategy is rejected. required extensions must stay enabled. applying changes requires an idle session.
+
+Saving preferences changes the desired selection. Reload applies that selection to the session without restarting the daemon or rewriting the conversation. A failed apply leaves the desired choices saved for retry. The catalog reports desired and loaded revisions separately.
+
+The runtime keeps the Python kernel when its workspace and modules match, replacing its host routes with the new composition. Otherwise it snapshots the namespace, stages and restores a replacement, then shuts down the old kernel and publishes the new one. Snapshot or restore failure retains the old kernel. Individual values that cannot be serialized are reported as warnings. Failure after shutdown clears the dead kernel handle and loaded revision; the next open reconciles durable kernel records before booting again. Prompt and tool changes still update the session's prompt-cache policy.
+
+## installed and enabled
+
+`extensions.Config(installed, default_enabled)` separates installed extensions from their default selection. multiple compaction strategies may be installed, but at most one can be enabled for a session. built-in sessions start with `rolling`; custom hosts can omit compaction. `runtime.start_with_config(database, config)` uses this selection; `runtime.start_with_extensions(database, installed)` enables every supplied extension.
+
+## boundaries to preserve
+
+Use these rules when adding or changing an extension:
+
+| Owner | Responsibilities |
+| --- | --- |
+| Daemon | HTTP admission, durable settings publication, session coordination, and client invalidation |
+| Runtime | Discovery, composition, kernel reuse or replacement, and managed-resource cleanup |
+| Session actor | Turn admission and execution, prompt-cache policy, and ordered extension events |
+| Extension | Its declared capabilities, bounded preparation, and cleanup of resources it allocates |
+
+- Add capabilities through typed plugins. Use the command state bridge or the supplied `Session` callbacks to reach session behavior; do not mutate session state from an extension.
+- Distinguish installed, desired, and loaded-active extensions. Installation controls schema setup and deletion cleanup. Global selection controls services. The loaded session composition controls its tools, commands, routes, observers, and compaction contributions.
+- Resolve cross-extension capabilities from the applicable active selection. Do not capture the whole registry in a handler at startup. Host routes receive their dependencies through `host.Context`; services receive daemon facts and callbacks through `extension.Daemon`.
+- Keep composition preparation and kernel lifecycle in the runtime. Call `apply_change` or `apply_desired` when the caller owns a live session, and adopt the surviving kernel from both success and failure. Do not add another snapshot-and-replace sequence in daemon handlers.
+- Preserve whole-extension activation and dependency closure. A failed bundle must not leave callable tools or managed resources behind. Initial open may omit broken bundles; explicit reload must report failure.
+- Keep saved intent after an apply failure. Before shutdown, the old live kernel may survive. After shutdown, clear its handle and reconcile durable records; a database transaction cannot roll back process termination.
+- Keep discovery read-only. Reading a catalog must not boot Python, prepare plugins, execute commands, or contact remote providers. HTTP encoding belongs in daemon adapters, outside runtime discovery.
+- Add an actor only for a real ordering, concurrency, or resource-lifetime requirement. An extension or plugin declaration alone does not need its own process.
+
+Before submitting a change, trace which selection its handlers use, who closes each allocated resource, and what state survives a failed reload. Cover externally visible behavior through `test/e2e`; use synthetic registry or deterministic fault tests only for cases the daemon API cannot reach. Update these rules when an intentional boundary change is part of the task.
+
+## contribute plugins
+
+interfaces, installation and quarantine, and the per-installed-list queries live in [`extension.gleam`](../src/albedo/harness/extension.gleam); a session's composed `Composition` and its accessors in [`extension/composition.gleam`](../src/albedo/harness/extension/composition.gleam); the saved selection (`enabled`, `propose`, `record_selected`, `change_defaults`, raised caps, summaries) in [`extension/selection.gleam`](../src/albedo/harness/extension/selection.gleam); the built-in list in [`extensions.gleam`](../src/albedo/harness/extensions.gleam).
+
+```gleam
+extension.Extension(
+  name: "project-context",
+  description: "workspace instructions for the model",
+  requires: [],
+  plugins: [extension.ContextPlugin(load: load_workspace_context)],
+  initialise: fn(_) { Ok(Nil) },
+)
+```
+
+`ContextPlugin.load(workspace)` returns `Result(String, String)`. its request-only content is loaded for the current workspace and included in the system instructions, after core and extension instructions. it is not appended to the durable transcript. model requests keep extension context out of history compaction. Live reloads keep the cached system prefix and add a concise capability-change notice to history, providing replacement named context blocks (including command and skill metadata) and explicit removal notices relative to the previous live context; unchanged blocks are not replayed. The updated system instructions replace that prefix when compaction rewrites history. A changed tool schema necessarily changes the provider tool registry immediately.
+
+`ToolPlugin` supplies model-facing tools, python modules, host routes, and tool instructions. model tools declare a definition, an invocation callback, and a recovery callback. recovery must report a stored result or unknown outcome, not replay a potentially side-effecting operation.
+
+invocation answers `Result(Output, Failure)`. `Refused(reason)` is the normal failure: the model receives `{"error": reason}` as that call's result and the turn continues, so one unusable call costs a call rather than a session's whole reply. `Fatal(reason)` ends the turn and is for a host that can no longer record what the call did — the python tool uses it when a cell's source or outcome will not store, so a side-effecting cell is never offered back for a retry. a tool that raises is refused with the crash and a warning that its effects are unknown; a recovery callback that raises reports the unknown outcome.
+
+`CommandPlugin` supplies [session commands](commands.md): the same catalog drives the CLI menu, user invocation, and the kernel's typed `commands` bindings. duplicate command names are rejected with the other capability collisions.
+
+A command may also be an extension's own **page**: set `page: True` and, run with no arguments, answer a [`page.Document`](../src/albedo/harness/page.gleam) — a title, rows with a badge, a tone, and an optional detail shown for the selected row (beside the list when the terminal is wide, under it when not), the actions available on them, and an optional short glance. The CLI opens a bare `/name` of a page command as that screen and renders it generically: each action runs the same command with `action` = the action's `run` and `details` = the selected row's id followed by any entered text, chosen option, or preset value, and the page is fetched again afterwards. The first glance with rows appears in the chat's right margin when the terminal leaves room beside the 100-column body; every glance the margin leaves out shows as a count in the header. `/work` is the first page; a skills toggle or an MCP server list would declare theirs the same way, with no client changes.
+
+A command that tells the agent about a user's change uses the `Note(origin, display, text)` state operation: the note waits in the session's queue, reaches the model at its next step if a run is active or ahead of the user's next message if not, and never starts a turn by itself.
+
+`ManagedPlugin` prepares session-owned contributions together: context, tool instructions, tools, python modules, host routes, and commands. preparation returns a close callback. a failed preparation releases its resources and leaves the loaded composition active; successful replacement releases the old resources after application. use this for connections or an immutable catalog shared by context and tools.
+
+preparation runs in workers admitted by the runtime actor, so slow preparation does not block unrelated runtime observations. Keep `prepare` bounded and release partially allocated resources before returning an error. anything that has to reach another host answers from what it already knows and connects in the background, then calls `refresh(reason)` if what it contributes turned out different. [`mcp`](mcp.md) does this with saved catalogues; its Python binding is documented there.
+
+a managed contribution also hears its session through `observe(session, event)`, which runs inside the session actor and so must only send and return; it keeps hearing it after the idle sweep releases the kernel, since the composition stays prepared for the next open. events arrive in order: `CallSent` for each successful turn call as it went out (request, prefix identity, usage, cache marks, profile, endpoint, protocol, timing), `TurnEnded(cancelled)`, `Compacted` after a forced compaction, `Stirred` for any new activity, and `Restored(call, pings)` when an idle session that still waits on work comes back after a daemon restart with its last turn call rebuilt (robot-docs/cache-warming.md). the `extension.Session` handle it comes with names the session and offers `call(request, prefix)`: any `types.Request`, sent on the session's upstream as exclusive work that queues submissions behind it, records a provider request row of kind `background` under `prefix`, and never reaches the transcript or the stream. it blocks its caller until the call ends and fails at once while another run holds the session or its kernel is released. `extension.empty()` is the contribution with nothing in it, for record updates; `awaited()` answers whether work that will wake the session is under way: a background job not started with `run(..., service=True)`, or an open child (or one beneath it) in a turn or idle on such a job of its own; a job a kernel cannot list does not count. [`warm`](cache-warming.md) is built on these seams alone. `refresh(reason)` asks the session to prepare its extensions again and records `reason` as a note, with the same capability-changed turn a `/reload` leaves; it answers at once and the session declines while a turn runs, so an extension asks again when `TurnEnded` arrives. [`mcp`](mcp.md) uses it to bring back a server that was offline, or one whose catalogue changed.
+
+## broken extensions
+
+the daemon starts without an extension it cannot run and says so. `extension.install` quarantines one whose name is blank or already taken, whose requirement is not installed (cascading to what needed it), whose initialiser or schema callback fails or raises, or that the default selection cannot run (a requirement it does not enable, duplicate capabilities, a second compaction strategy). only storage the host owns stops the boot. a quarantined extension is in no session's selection, is listed by `/extensions` with its reason in the `quarantined` field, and any attempt to enable it is refused with that reason.
+
+An extension activates as a complete bundle. If its context fails, a managed plugin cannot prepare, or its capabilities collide, none of its contributions remain active. Dependents also become inactive until every requirement works. Unrelated extensions continue running. Registry order decides which complete bundle wins a collision; accepted contributions retain static-before-managed order.
+
+Initial session opening tolerates failed bundles and reports their warnings. Explicit reload requires every selected extension to work. `composition.inactive` reports failed bundles, while `composition.extensions` returns only active ones and `composition.requested` retains the selection used for preparation. Rejected resources close exactly once, in reverse preparation order within each cleanup. Observers and close callbacks are guarded so a crash does not prevent other callbacks from running.
+
+Host routes receive `host.Context(store, session, searches)` and the request string. The runtime captures eligible search providers from the loaded active composition; handlers do not read the registry to bypass session selection. Native discovery and composition revision calculation live in `harness/runtime/catalog`; HTTP encoders stay in the daemon.
+
+`ModelsPlugin` supplies catalogued model facts and provider model lists. `ModelProviderPlugin` declares its models.dev namespace and resolves a tagged saved profile into an `Upstream`: a `stream` function over albedo's request, event, and turn types, plus the endpoint, replay protocol, and an `explain` for failures. A provider with its own wire format encodes an `openai_api.Exchange` and passes it with its own `stream.Reducer` to `openai_api.exchange`, which keeps HTTP, SSE framing, limits, and callbacks shared; `antigravity` does this. `LoginPlugin` supplies a browser sign-in that the daemon runs for every client; see [model authentication](auth.md#sign-in-api).
+
+`ServicePlugin(Service(admission, handle))` serves HTTP while its extension is
+enabled globally. Sessions do not select services. `admission(path, method)`
+declares authentication and the body limit for each operation:
+
+- `DaemonToken` requires the existing daemon bearer token before the daemon reads the body.
+- `LocalAccess` permits anonymous loopback access. The [proxy](proxy.md) selects
+  it only when the operator explicitly enables anonymous access.
+- `SignedBody` leaves signature verification to the service over the buffered
+  bytes. Only the [webhook delivery POST](webhooks.md) uses this policy; its
+  limit is 65,536 bytes. A daemon token cannot bypass signature verification.
+
+The daemon validates host and browser origin before authentication or body
+processing. Core routes require the daemon token. Each route enforces its
+declared body limit; [OpenAPI](../docs/openapi.yaml) defines the public contract.
+
+Requests to `/extensions/<extension>/...` go to
+`handle(daemon, path, request, live)` with the path below the mount. `request`
+is a `Request(BitArray)` whose body the daemon has read once. `live` is the
+connection request for streamed responses. Service handlers use the buffered
+body rather than read the connection again.
+
+Fixed-length and chunked uploads are supported. Invalid lengths or ambiguous
+framing return `400`; bodies above the applicable limit return `413`.
+Refusals before body consumption close the connection.
+
+`extension.Daemon` gives the service `home`, `upstream(profile, model, session)` to resolve a saved profile outside any session, catalog `models`, the daemon's `sessions`, and `searches()` to resolve eligible global search providers. Set `ALBEDO_PORT` in the daemon's environment to pin its port so a service has a stable base url; the default is a free port chosen at start. Built-in dependencies keep these layers explicit: `codex -> openai -> models`. See [models](models.md) and [model authentication](auth.md).
+
+`CompactionPlugin` supplies a history strategy; `FoldPlugin` supplies stored folds any strategy reads through `context.prior`; see [compaction](compaction.md). one enabled compaction strategy owns the request-history view in a built-in session. a strategy receives chronological history and must preserve tool call/result associations; it must not replace the durable transcript.
+
+`SearchPlugin(web_search.Provider)` is a web search the extension answers with its own sign-in. the `web-search` extension offers the model one `web_search` over all of them, in the user's order; see [web search](web-search.md).
+
+## sqlite migrations
+
+extensions own their tables and their SQLite migration implementations. contribute
+`MigrationPlugin(SchemaMigration(apply))` for column/index upgrades and
+`MigrationPlugin(DataMigration(name, run))` for data rewrites; keep the callbacks
+under the owning extension, not `daemon/migrations/`.
+
+`extension.install` calls each installed owner's `initialise(ledger)` to create
+its tables, then applies that owner's schema callbacks on the serialized store
+connection before proceeding to the next owner. an owner whose initialiser or
+schema callback fails or raises is quarantined rather than stopping the daemon;
+see [broken extensions](#broken-extensions). `runtime.migrate(host, backup)`
+collects and applies data callbacks in registry/plugin order after the daemon's
+core data upgrades and before sessions start. `run(ledger, backup)` returns a
+rewritten-row count. installed-but-disabled extensions still upgrade their
+storage; session selection/reload does not apply migrations. failures stop the
+phase, and data callbacks own their idempotency markers, paging, and transactions.
+embedding hosts must prepare core storage and invoke `runtime.migrate` before
+opening sessions. see [migrations](migrations.md) for startup order and backups.
+
+```gleam
+plugins: [
+  extension.MigrationPlugin(extension.SchemaMigration(title.apply)),
+],
+```
+
+## extension settings
+
+optional `$ALBEDO_HOME/extensions.json` (default `~/.albedo/extensions.json`) holds named extension settings separately from provider credentials and session selection. settings are read when preparing a worker; changing a file does not mutate an existing session composition. missing sections use extension defaults. invalid settings fail preparation without replacing the live worker.
+
+## python bindings
+
+an explicitly registered python module exports `setup(api)`, which may be a plain function or an async function (awaited at kernel boot, so a plugin can fetch its catalog through `api.host` before the handshake):
+
+```python
+def setup(api):
+    def double(n):
+        return n * 2
+    return {"double": double}
+```
+
+packaged short names resolve to `albedo_plugins.*`; dotted names select installed packages. this is the python tool-plugin module namespace, not the name of the enclosing extension. imports happen before the workspace enters the import path.
+
+- `setup(api)` runs per kernel; duplicate and reserved bindings are rejected.
+- `api.on_shutdown(close)` registers cleanup.
+- `api.background_handle(Type)` marks a returned background handle.
+- `api.capture(id)` retains bounded output.
+- `await api.host("namespace.method", args)` calls an enabled host route.
+- `api.attach_image(data)` attaches PNG, JPEG, or WebP bytes to the running cell's result.
+
+## images in tool results
+
+a cell returns images with `show_image(bytes_or_path)`, or a plugin with `api.attach_image(data)`: at most 4 images and 5 MiB per cell, each within the session provider's image edge (the daemon sends it with every cell), and only while the cell runs; past any of these the call raises `ValueError`. The kernel reads dimensions with its own port of the daemon's header parser (`image_size` in `albedo_capture.py`, held to `albedo_image.erl` by `test/harness/image_header_parity_test.gleam`). a background task a finished cell left behind has no result to carry one, so it gets an error. the harness reads each image's header again before sending it, as the authority; one it cannot read, or one larger than the session's provider accepts (a plugin's image under a stale edge, say) (see [models](models.md)), is named under `image_errors` in the result text and not sent.
+
+on the wire, responses sends the images inside `function_call_output.output`, after the text. chat completions tool messages take text only, so after a run of tool results one user message carries their images, each group labelled with its call id. history keeps the images on the tool result itself, so compaction never mistakes that message for a user turn. the model must accept image input; nothing checks that yet.
+
+Retained kernel captures release image bytes after delivery, including error and interrupted results. Top-level delivery completes when the control-stream write returns. Nested `cells.run` delivery completes when the host acknowledges `cells.finish`, after images propagate to the parent. Failed delivery keeps the capture's images. Retained text and durable image results keep their existing lifetimes; durable images remain available after daemon restart.
+
+The kernel seals each trace after execution cleanup, including failed and interrupted cells. Sealing permanently stops observation, even for background tasks that inherit the cell context. Finalization returns a detached payload and cannot run again. The kernel sends that payload through the existing `trace` event, then releases snapshots and activities when the synchronous control-stream write returns. Finalization or write failure leaves the trace sealed with its buffers retained; there is no retry. Release preserves truncation metadata.
+
+Top-level traces emit before `done`. Nested `cells.run` traces emit before waiting for the host's `cells.finish` acknowledgement and remain separate from the parent trace. The daemon persists these events when the enclosing top-level execution completes, after which `cells.trace` can read the results independently of kernel buffers. This lifecycle applies to newly started kernels and does not change output retention, image delivery, or background task execution.
+
+interfaces: [`PythonApi`](../priv/python/albedo_api.py), [`work`](../src/albedo/harness/extensions/work/extension.gleam), [`compaction strategy`](../src/albedo/harness/compaction.gleam).
+
+The kernel runs detached, reached over its socket, with a durable session layer under these messages; see [kernel](kernel.md). Kernel control messages are checked by `priv/python/albedo_protocol.py` before delivery to the event loop. Invalid JSON, oversized frames, unknown message types, and invalid fields enter the kernel shutdown path, including plugin cleanup and child-process cleanup. Host replies are checked before their pending futures are removed or completed. Extra fields on known messages are accepted. Missing methods, expired references, and tool exceptions remain call errors.
+
+## run
+
+Jobs start immediately at the existing nice level and macOS utility QoS. There is
+no heavy-job admission or process pausing; deadlines count wall time after spawn.
+
+Output read watchers use weak references to bound job methods. They remain registered across early reads, so a read after completion still retires the notice. Forgetting or evicting an output channel removes its watcher. Job handles and output channels keep their separate retention order and existing limits. A retained output watcher does not keep an evicted job alive, and an explicitly held job keeps its own output after archive eviction.
+
+`run(program, *args, cwd=, env=, stdin=, timeout=, service=)` starts one program, without a shell, as a supervised job that owns its process group: a deadline, a stop or kernel shutdown ends the whole group, and so does the command's own exit, except for members a process that moved out of the group still parents (`albedo_proc.adopted`). that keeps ssh's ControlPersist masters working from jobs: the master daemonizes out of the group but leaves its ProxyCommand in it, and ending the proxy ends the master, so every later ssh (and every hardware-key touch) would start over. a parent started after the job's leader came from the job; orphans, adopted by init or a subreaper that was running before, still go. `run` is synchronous and returns the handle; awaiting the handle waits for the program, so the instructions teach `job = run(...)` then `await job` — `job = await run(...)` would leave nothing bound when a cell deadline interrupts the wait, and the model would recover the running job through `jobs` or start it twice; output stays on the handle (`job.tail()`, `output.read(job.id)`) and finished handles stay addressable in `jobs`. a job that finishes with its result unread wakes the session: the kernel reports the completion through the `jobs` host route, and the session submits a user turn naming the job, its exit, and how to read it, so the model never polls or awaits a handle just to learn it finished. awaiting the job, reading its result, or stopping it retires the wake. an await cut short (the cell's deadline, an interrupt, a `wait_for` timeout) read nothing, so it leaves the wake owed, and one cut short after the job ended queues the wake itself: a model whose cell timed out on `await job` is told the job is still running and rightly waits for its notice. a busy session is retried, not queued in gleam: the kernel retries the notice until the run ends or the result is read. live jobs pin the kernel against the idle sweep — a detached session is not released while background work still runs, local or remote, because releasing it would kill the job and the wake it owes. remote `run` jobs wake the same way — the remote kernel's host calls relay over the ssh connection into this session's route, and the notice names the host — and a mirror read (`rem_job.tail()`) tells the remote job it was read through one `poll` round trip.
+
+`service=True` marks a program meant to keep running (a dev server, a watcher): it is recorded on the job and reported with the kernel's running jobs, and `warm` does not keep the cache warm for it ([cache warming](cache-warming.md)). a job written to disk with its group survives a daemon restart with the flag.
+
+there is no shell, so shell syntax has python spellings: `cd dir &&` is `cwd=`, `NAME=value` is `env=`, `| tail -n N` and `| head -n N` are `job.tail(lines=N)` and `job.head(lines=N)`, stderr always joins stdout, and chains, loops, and globs are python over the job's output. `a | b` is `run(a…).pipe(b…)`, the same as `run(b…, stdin=job)`: the writer's bytes stream into the reader exactly, a full reader pauses the writer, and once every reader has closed its stdin the kernel stops reading the writer, so its next write fails as it would into a closed shell pipe (`run('yes').pipe('head', '-2')` ends). the writer still captures its own output; piping retires its wake, and the reader's notice names the whole pipeline. a job that already wrote feeds what it retained first; one that wrote past the 1 MiB it retains cannot be piped after the fact. `run("bash", "-c", …)` and its spellings are refused, and so is a cell's own `subprocess`, `os.system`, `os.exec*`, `os.posix_spawn`, or `asyncio.create_subprocess_*` — an audit hook in `albedo_shell` checks whether the nearest non-stdlib frame is cell code. each refusal carries the `run()` call the line means when it is simple enough to read (`cd cli && go test ./... | tail -5` → `job = run('go', 'test', './...', cwd='cli')`, `await job`, then `job.tail(lines=5)`), so the error is a copy-paste answer rather than a wall. this is guidance, not a sandbox: plugins and libraries a cell calls still spawn, and `exec` of a compiled string is not cell code.
+
+## view
+
+optional. `await view_code(path, start_line=1, end_line=None, *, columns=79)` renders a range of one file as syntax-highlighted PNG pages, and `await view_diff(path=".", start_line=1, *, staged=False, columns=80)` renders `git diff` the same way, without line numbers since a diff's own lines are not the file's. both return the pages with the cell's result (see [images in tool results](#images-in-tool-results)). the instructions ask the model for a final review pass before it reports code work as done: `view_diff` for every change, `view_code` for context and untracked files, checked against the surrounding style, for repetition an existing helper should carry, and for leftovers; fix, then view again.
+
+the whole file is highlighted, so a range starting inside a comment or string is colored correctly. lines wrap at `columns`, with an arrow in the gutter on each continuation row; tabs expand to 4, wide characters take two cells. up to 4 pages of at most 80 display rows, split evenly at line boundaries, so wrap-heavy code fits fewer source lines per page. the returned text names each page's lines and the call that continues. `view_diff` leaves out files git does not track and asks git for a repository first, so outside one it says so.
+
+rendering is `albedo-render`, a rust binary in `native/render` (arborium's tree-sitter grammars, bundled JetBrains Mono), run as a supervised `run` job. `native/render/install.sh` builds it into `priv/bin`; `PATH` also works. a language without a compiled-in grammar renders unhighlighted. the same binary renders snapcompact frames and fits oversized history images to a provider's edge (`--fit`, see [models](models.md)); every daemon call goes through `albedo_render.erl`.
+
+## work
+
+`work` is a revision-checked ledger shared by humans and agents. The model uses `await work.list/get/create/update/delete`. People use `/work`, its page: `a` adds an item, `e` renames, `d` marks done, `s` sets a status, and `x` removes one (an item with sub-items stays). Typed forms work too: `/work add <title>`, `/work edit <id> <title>`, `/work status <id> <status>`, `/work remove <id>`. Every change a person makes is queued as a note for the agent. Open items appear beside the conversation when the terminal is wide enough.
+
+## files
+
+see [the files extension](files.md): bounded reads, guarded exact edits, and ripgrep search that runs as a supervised `run` job instead of a raw subprocess.
+
+## models
+
+see [the models catalog](models.md): the cached models.dev catalog that supplies context windows, modalities, and provider endpoints to compaction and `/context`.
+
+## commands
+
+see [the commands extension](commands.md) for the full contract. `CommandPlugin` contributes static commands and `Managed.commands` dynamic ones; runs execute outside the session actor and reach state only through the registered state seam.
+
+## mcp
+
+see [the mcp extension](mcp.md) for connecting Model Context Protocol servers: configuration, credential scope, namespaced tools, and connection lifecycle.
+
+## webhooks
+
+Optional. A signed HTTP hook wakes one persistent session, with an opt-in setting for agent self-management. See [webhooks](webhooks.md) for setup, signing, retries, and security boundaries.
+
+## remote
+
+the `remote` extension boots this session's Python kernel on a remote host over one SSH connection, so every harness tool is callable on it, and it is enabled by default. `rem = await remote.connect()` stages albedo's python bundle on the target, starts the kernel there through SSH with `ControlMaster`/`ControlPersist` (one multiplexed TCP connection: no re-authentication per call), and answers the remote kernel's host-route calls against this session's daemon.
+
+the model's instructions are short on purpose: `remote.connect(host)` is ssh for the kernel, to use instead of `run("ssh", host, command)`, with one example of `rem.run` and the points where it differs from local (awaiting remote calls, the sign-in command, degraded mode). sessions kept running ssh as `run` jobs because the longer text described how it worked and never said when to use it.
+
+the ssh options, control path, agent socket discovery, login-shell wrapper and bundle staging live in `priv/python/albedo_ssh.py`, which the daemon's own remote kernels use too (kernel.md, "remote kernels"), so both ride the same control sockets and the same staged bundle under `~/.albedo-remote/<digest>`. a session whose workspace is itself on another host needs no `remote.connect()`: its kernel already runs there.
+
+machine tools run on the remote kernel: `rem.run(program, *args)` starts a supervised job on the host immediately and synchronously, like local run — the handle exists right away, `job.tail()`, `job.id`, `job.exit_code`, `job.duration`, and `job.timed_out` answer synchronously from the mirrored output stream, `await job` waits for completion, and `await job.stop()` stops it. pipes run entirely on the host, chained before the one await: `job = rem.run("journalctl", "-u", "nginx", "--no-pager").pipe("rg", "error")`, `await job`, then `job.tail(lines=40)`. `tail(lines=)` and `exit_code` answer from the mirror; other job methods, like `head(lines=)`, are remote calls to await, and properties such as `job.pipeline` do not cross. session tools run where the daemon runs: `await rem.work.*` and `await rem.skills.*` relay over the connection to the local daemon's ledger and catalog. both kernels load the same content-hashed bundle, so a tool's remote shape matches its local one. every other call returns a reference that settles on its first await: values cross as real objects — dataclasses and list subclasses are rebuilt, so remote output prints exactly like local output — and a result that cannot cross comes back as a live reference whose methods are further remote calls. references passed back into remote calls stay references, not copies, including ones still in flight. one rule remains: a call whose local counterpart is synchronous (`rem.files.read`) still needs `await`, because the value itself crosses the network; handles and their state never do.
+
+a remote job that finishes with its result unread wakes the session like a local one: the remote kernel's notice relays over the connection, and the owner drops it when a reference on this side already awaited or read the job. the mark is made when `await` starts, as for a local job, because the await reaches the remote kernel only after the call's own reply, and a quick job (`systemctl is-active` in a waiting loop) is done by then. an await cut short drops the mark, and its interrupt cancels the remote kernel's await too, so the remote job owes its wake again. the reply to the call that started a job carries its state, so a notice matches its reference before any mirror frame lands. the notice names the reference and `rem.output.read(id)`, since the job is in the remote kernel's `jobs`, not the model's. a call that fails before anything awaits it (`rem.run` with a bad argument) raises its error from the reference's synchronous accessors (`id`, `tail()`, `poll()`) and shows it in its repr, so a job left to wake the session cannot silently never start. a remote job not started with `service=True` keeps an idle session's cache warm while it runs, as a local one does ([cache warming](cache-warming.md)).
+
+images are the exception to "every harness tool runs remotely": a remote call is not a cell, so the remote kernel has no result to carry one. `await rem.show_image(path_or_bytes)` runs locally instead: it reads a remote path over the control connection (at most one byte past the 5 MiB a cell may carry) and attaches the bytes to the local cell through `api.attach_image`, so the image meets the same format, count, size and edge checks as `show_image`. it works in degraded mode too.
+
+The remote reader checks replies and events before dispatch. Every reader exit fails unfinished handshake and call futures, including malformed input, EOF, unexpected exceptions, and cancellation. Cancellation still propagates from the reader task. `trace`, `done`, and `cleanup` events require valid identifying fields; their unused payloads are ignored. Known messages may contain extra fields. A reference target contains exactly one string `handle` or `pending`, and a method name may accompany that target.
+
+the target resolves per call from a `host=` argument, then `remote.configure(host, remote_cwd=None)`, then `$ALBEDO_SSH`, then the `remote` section of extensions.json. a target is scp-style `user@host[:/path]` or a URI `ssh://user@host[:port][/path]`, which carries a port; ssh takes the URI itself, and its path becomes the remote cwd. an `~/.ssh/config` alias works in either form:
+
+```json
+{
+  "remote": { "host": "deploy@box", "remoteCwd": "/srv/app", "python": "python3" }
+}
+```
+
+the kernel bundle supports Python 3.11 and newer; remote boot uses `python3` unless the `python` setting selects another executable. the bundle-wide syntax check uses the minimum version in `pyrightconfig.json`. Ruff, ty, the Nix development shell, and the packaged runtime also target Python 3.11.
+
+`host`, `remoteCwd`, and `python` must be strings when present in settings; invalid values raise `RemoteError` naming the field. Missing settings files contribute no values. The `ssh` section remains the fallback when the `remote` section is absent. Unrelated settings are ignored.
+
+a bare host asks the remote for its `pwd` once. if the host is reachable but its kernel cannot boot (no python, staging failed, bad handshake), `connect()` still returns and prints a warning: the connection is degraded to SSH command mode, where only `rem.run(program, *args, cwd=, env=, stdin=, timeout=300)`, `rem.shell(command, cwd=, env=, stdin=, timeout=300)`, `rem.read(path)`, `rem.write(path, content)`, and `rem.show_image(path_or_bytes)` answer and everything else raises. `rem.read` returns text, or bytes when the file is not UTF-8, so a binary file never comes back with its bytes replaced; `rem.write` takes either. here `stdin` accepts only text or bytes, not a file or another job, and `.pipe()` is unavailable. The connect warning shows the degraded-only escape hatch `rem.shell('git log --oneline | rg fix')`, which invokes `bash -c` on the host for pipes or other shell syntax. `rem.shell()` does not exist in kernel mode. Neither the quoted-argv `rem.run()` fallback nor `rem.shell()` can offer process-group supervision, so stopping or timing out an ssh client does not prove the remote program stopped. an unreachable host fails `connect()`. a host that needs a person to sign in (ssh's words: permission denied, a passphrase, a host key; `albedo_ssh.failure`) fails it with the command that signs in where ssh can ask, `ssh -M -fN -o ControlPath=<path> -o ControlPersist=<s> <target>` (`albedo_ssh.sign_in`), for the model to hand the user: the master it opens is the one the next `connect()` rides. connections are scoped: a lost SSH channel invalidates the connection rather than silently reconnecting, and `await rem.close()` ends it. connections run under `BatchMode=yes`, so key-based auth is required.
+
+## skills
+
+see [the skills extension](skills.md) for discovery paths, metadata-only startup context, and on-demand reading of actual `SKILL.md` files and resources. skills requires python: every cataloged skill is a [session command](commands.md) with a typed `commands.<method>(...)` binding, while users invoke the listed slash command. both resolve the same session catalog and the same activation. the model caller receives instructions as data without submitting another turn; the user caller submits one activation turn. installing or reading a skill does not run its scripts or import its code automatically.
+
+## rolling compaction
+
+`rolling` is the enabled-by-default compaction strategy: summary, recent-user recap, then a verbatim tail, triggered by remaining context. see [compaction](compaction.md) for its contract, settings, and state handling.
+
+## snapcompact
+
+`snapcompact` is an alternative compaction strategy: evicted history as rendered bitmap frames under per-provider image budgets. it requires `snapcompact-memory`, which is enabled by default, keeps the archive readable as text folds after a switch, and provides `transcript_grep` and `transcript_read`. see [compaction](compaction.md).
+
+## lcm compaction
+
+`lcm` is an alternative compaction strategy with source-backed hierarchical summaries. enabling it disables `rolling` in the same reload. `lcm-memory` keeps `lcm_list`, `lcm_grep`, `lcm_describe`, and `lcm_expand` available after a switch back to `rolling`, so stored folds remain accessible even if a rolling summary omits them. see [compaction](compaction.md) for the handoff and retrieval limits.
+
+`notes` is a layer over whichever strategy is active, not a strategy: at every compaction the model rewrites its own notes, and they lead every later request. it is enabled by default and needs no strategy of its own. see [compaction](compaction.md).
+
+a `CleanPlugin` is how an extension that keeps rows per session deletes them with the session. every installed extension's runs inside the delete's transaction, enabled or not, before the session row goes, so an extension owns its tables and the daemon's delete lists only its own. the exception is `cells`, which the daemon deletes itself because it feeds the image reference count released in the same transaction.
+
+## Durable request admission and personality setup
+
+`personality` is installed but disabled by default. Enabling it selects a native LCM
+bundle. Managed preparation reuses the configured default for fresh owner sessions
+before first transcript admission; it never creates a permanent identity. Its human-only setup and
+`/personality` resource page are described in [personality](personality.md).
+
+`RequestContextPlugin(prepare, required_when_selected)` declares a bounded read-only callback over
+`request_context.Input(store, session, loaded, query, budget)`. Composition
+returns callbacks only from complete loaded-active bundles. The generic values
+are independent of compaction and include named instruction/data blocks,
+snapshot identity, diagnostics and an optional typed summary policy. Each new
+preparation captures each loaded callback once, before strategy/no-strategy
+branching, and retains its immutable `request_context.Prepared` on
+`compaction.Prepared`. Queries contain only the latest user/steering excerpt,
+UTF-8-safe and at most 4 KiB. The runtime resolves the active strategy settings once, then translates that
+effective configured/catalog capacity/provenance and static instructions/tool
+size into `Budget`; rendered wrappers count toward
+the dynamic estimate. Mandatory blocks that cannot fit a known window fail
+preparation. A callback must omit whole optional records within its allowance;
+a returned over-budget optional contribution fails explicitly. Unknown windows
+retain byte caps and uncertain estimates. Callbacks receive no provider,
+kernel-execution or refresh handle and must perform no network work or writes.
+
+The loop settles static pinning against conversation history alone, then appends
+dynamic behavioral instructions and prepends separate request-only data to the
+final provider request. Dynamic blocks never enter `PinnedPrompt`, capability
+diffs, durable transcript or raw strategy/LCM inputs. Transport retries reuse the
+assembled request. Read-only rebuilds capture once without compacting or calling
+a summarizer; forced compaction uses that same capture path. Conflicting summary
+policy contributors fail composition. The policy/lineage types are carried for
+later LCM policy integration; this identity-only slice does not change summary
+bodies or retrieve curated records.
+
+Mandatory contributors declare `required_when_selected=true`; ordinary callbacks
+use false. Native admission reads raw saved selection and original declarations,
+including quarantined metadata, then compares requested and loaded bundles.
+Selected mandatory context cannot silently disappear in quarantine. Unselected
+sessions do not query extension-owned identity storage or a global guard table.
+Managed replay validates the selected loaded callbacks while preserving the
+already assembled payload and its captured revision.
+
+`command.ApplyIdle` serializes a trusted adapter's bounded local transaction
+callback through the session actor. It refuses running and booting sessions.
+`extension.Daemon.state` opens only that actor for a service and accepts this
+operation through the service bridge. Callbacks must not call a state bridge
+recursively, scan sources or perform network/provider work. Callback code is
+supplied by installed trusted adapters, never decoded from HTTP/model payloads.

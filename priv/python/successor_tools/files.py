@@ -144,15 +144,23 @@ async def _run(argv: list[str]) -> tuple[int, str, bool]:
     try:
         job = _runtime.run(argv[0], *argv[1:], timeout=SEARCH_TIMEOUT)
     except FileNotFoundError as error:
-        raise RuntimeError("ripgrep (rg) is required for file search but is not installed") from error
+        raise RuntimeError(
+            "ripgrep (rg) is required for file search but is not installed"
+        ) from error
     try:
         await job
         if job.timed_out:
             raise RuntimeError("file search timed out before a complete result")
         if job.exit_code is None:
-            raise RuntimeError("file search ended without a known exit status; result is incomplete")
+            raise RuntimeError(
+                "file search ended without a known exit status; result is incomplete"
+            )
         data = bytes(job.capture.data)
-        return job.exit_code, data.decode("utf-8", errors="replace"), job.capture.seen > len(data)
+        return (
+            job.exit_code,
+            data.decode("utf-8", errors="replace"),
+            job.capture.seen > len(data),
+        )
     except asyncio.CancelledError:
         await job.stop()
         raise
@@ -453,7 +461,9 @@ class Files:
             search("--json", *visible, *(["-C", str(context)] if context else []))
         )
         if status == 127:
-            raise RuntimeError("ripgrep (rg) is required for files.find but is not installed")
+            raise RuntimeError(
+                "ripgrep (rg) is required for files.find but is not installed"
+            )
         if status not in (0, 1):
             raise RuntimeError(f"search failed (exit {status}): {output.strip()[:400]}")
         results, matched, searched = [], 0, 0
@@ -470,7 +480,11 @@ class Files:
                 if kind not in ("match", "context"):
                     continue
                 if kind == "match" and matched >= max_results:
-                    return Rows(results, truncated=True, note="additional search results were omitted")
+                    return Rows(
+                        results,
+                        truncated=True,
+                        note="additional search results were omitted",
+                    )
                 data = event["data"]
                 results.append(
                     Match(
@@ -485,26 +499,41 @@ class Files:
                 malformed = True
         incomplete = output_truncated or malformed or not summary_seen
         if results:
-            note = "search output was incomplete; returned rows are only a bounded prefix" if incomplete else ""
+            note = (
+                "search output was incomplete; returned rows are only a bounded prefix"
+                if incomplete
+                else ""
+            )
             return Rows(results, truncated=incomplete, note=note)
         if incomplete:
-            reasons = ", ".join([
-                *(["retained output ended early"] if output_truncated else []),
-                *(["malformed ripgrep JSON"] if malformed else []),
-                *(["no complete ripgrep summary"] if not summary_seen else []),
-            ])
-            return Rows(truncated=True, note=f"search incomplete ({reasons}); no no-match conclusion is available")
+            reasons = ", ".join(
+                [
+                    *(["retained output ended early"] if output_truncated else []),
+                    *(["malformed ripgrep JSON"] if malformed else []),
+                    *(["no complete ripgrep summary"] if not summary_seen else []),
+                ]
+            )
+            return Rows(
+                truncated=True,
+                note=f"search incomplete ({reasons}); no no-match conclusion is available",
+            )
         skipped = [
             *([] if hidden else ["hidden files"]),
             *([] if ignored else [".gitignore/.ignore rules"]),
         ]
         withheld: list[str] = []
         if skipped:
-            withheld_status, listing, _ = await _run(search("-l", "--hidden", "--no-ignore"))
+            withheld_status, listing, _ = await _run(
+                search("-l", "--hidden", "--no-ignore")
+            )
             if withheld_status == 127:
-                raise RuntimeError("ripgrep (rg) is required for files.find but is not installed")
+                raise RuntimeError(
+                    "ripgrep (rg) is required for files.find but is not installed"
+                )
             if withheld_status not in (0, 1):
-                raise RuntimeError(f"skipped-file diagnostic search failed (exit {withheld_status}): {listing.strip()[:400]}")
+                raise RuntimeError(
+                    f"skipped-file diagnostic search failed (exit {withheld_status}): {listing.strip()[:400]}"
+                )
             withheld = listing.splitlines()[:WITHHELD]
         return Rows(
             note=_empty_note(pattern, targets, searched, skipped, glob, withheld)
@@ -545,16 +574,24 @@ class Files:
             flags.append("--hidden")
         for value in globs:
             flags += ["-g", value]
-        status, output, output_truncated = await _run(["rg", *flags, "--", *map(str, targets)])
+        status, output, output_truncated = await _run(
+            ["rg", *flags, "--", *map(str, targets)]
+        )
         if status == 127:
-            raise RuntimeError("ripgrep (rg) is required for files.paths but is not installed")
+            raise RuntimeError(
+                "ripgrep (rg) is required for files.paths but is not installed"
+            )
         if status not in (0, 1):
-            raise RuntimeError(f"path search failed (exit {status}): {output.strip()[:400]}")
+            raise RuntimeError(
+                f"path search failed (exit {status}): {output.strip()[:400]}"
+            )
         matches = _name_matcher(pattern)
         # rg lists "./x" under ".", where a path from the root is just "x"
         listed = (line.removeprefix("./") for line in output.splitlines() if line)
         found = [line for line in listed if matches(line)]
-        return Rows(found[:max_results], truncated=output_truncated or len(found) > max_results)
+        return Rows(
+            found[:max_results], truncated=output_truncated or len(found) > max_results
+        )
 
     def edit(
         self, path: str, old_str: str, new_str: str, line_hint: int | None = None
@@ -563,10 +600,14 @@ class Files:
         if not old_str:
             raise ValueError("old_str must be non-empty")
         if len(new_str) > WRITE_LIMIT:
-            raise ValueError(f"new_str has {len(new_str)} characters; edited file maximum is {WRITE_LIMIT} bytes")
+            raise ValueError(
+                f"new_str has {len(new_str)} characters; edited file maximum is {WRITE_LIMIT} bytes"
+            )
         new_size = _utf8_size_through(new_str, WRITE_LIMIT)
         if new_size > WRITE_LIMIT:
-            raise ValueError(f"new_str exceeds the {WRITE_LIMIT}-byte edited file maximum")
+            raise ValueError(
+                f"new_str exceeds the {WRITE_LIMIT}-byte edited file maximum"
+            )
         if line_hint is not None and (
             isinstance(line_hint, bool) or not isinstance(line_hint, int)
         ):
@@ -601,17 +642,23 @@ class Files:
             content[: chosen.index] + new_str + content[chosen.index + len(old_str) :]
         ).encode("utf-8")
         if len(replacement) > WRITE_LIMIT:
-            raise ValueError(f"edited file would be {len(replacement)} bytes; maximum is {WRITE_LIMIT}")
+            raise ValueError(
+                f"edited file would be {len(replacement)} bytes; maximum is {WRITE_LIMIT}"
+            )
         _replace(target, snapshot, replacement)
         return Text(f"Edited {target}")
 
     def write(self, path: str, content: str) -> Text:
         """Create or replace a whole file. Use `edit` to change part of one."""
         if len(content) > WRITE_LIMIT:
-            raise ValueError(f"content has {len(content)} characters; maximum encoded size is {WRITE_LIMIT} bytes")
+            raise ValueError(
+                f"content has {len(content)} characters; maximum encoded size is {WRITE_LIMIT} bytes"
+            )
         encoded = content.encode("utf-8")
         if len(encoded) > WRITE_LIMIT:
-            raise ValueError(f"content is {len(encoded)} bytes; maximum is {WRITE_LIMIT}")
+            raise ValueError(
+                f"content is {len(encoded)} bytes; maximum is {WRITE_LIMIT}"
+            )
         target = Path(path).expanduser()
         # Match ordinary open-for-write semantics: preserve a symlink and atomically
         # replace its referent rather than destroying the link itself.
@@ -620,7 +667,6 @@ class Files:
         target.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write(target, encoded)
         return Text(f"Wrote {target.resolve()} ({len(encoded)} bytes)")
-
 
 
 def _require_roots(targets: list[Path]) -> None:
@@ -652,7 +698,6 @@ def _empty_note(
     return note
 
 
-
 def _targets(path: str | Sequence[str]) -> list[Path]:
     return [
         Path(item).expanduser() for item in ([path] if isinstance(path, str) else path)
@@ -661,7 +706,6 @@ def _targets(path: str | Sequence[str]) -> list[Path]:
 
 def _globs(glob: str | Sequence[str] | None) -> list[str]:
     return [glob] if isinstance(glob, str) else list(glob or [])
-
 
 
 def _name_matcher(pattern: str | None) -> Callable[[str], bool]:
@@ -678,7 +722,6 @@ def _name_matcher(pattern: str | None) -> Callable[[str], bool]:
     return lambda path: folded in path.lower()
 
 
-
 def _snapshot(target: Path) -> tuple[bytes, tuple[int, int, int, int, int]]:
     """Bytes plus identity: an edit refuses to publish over a concurrent change."""
     for _ in range(3):
@@ -688,7 +731,9 @@ def _snapshot(target: Path) -> tuple[bytes, tuple[int, int, int, int, int]]:
         with target.open("rb") as source:
             data = source.read(WRITE_LIMIT + 1)
         if len(data) > WRITE_LIMIT:
-            raise ValueError(f"file grew over the {WRITE_LIMIT}-byte edit maximum while reading")
+            raise ValueError(
+                f"file grew over the {WRITE_LIMIT}-byte edit maximum while reading"
+            )
         after = target.stat()
         identity = (
             after.st_dev,
@@ -774,7 +819,10 @@ def _occurrences(content: str, needle: str, line_hint: int | None) -> _Occurrenc
         total += 1
         if len(shown) < LISTED:
             shown.append(occurrence)
-        if line_hint is not None and occurrence.start_line <= line_hint <= occurrence.end_line:
+        if (
+            line_hint is not None
+            and occurrence.start_line <= line_hint <= occurrence.end_line
+        ):
             if len(hinted) < 2:
                 hinted.append(occurrence)
         scanned_at = index
@@ -824,10 +872,14 @@ def _selected_lines(content: str, requested: set[int]) -> tuple[dict[int, str], 
         boundary = content.find("\n", start)
         if boundary < 0:
             if start < len(content) and number in requested:
-                selected[number] = content[start : min(len(content), start + LINE_WIDTH)].rstrip("\r")
+                selected[number] = content[
+                    start : min(len(content), start + LINE_WIDTH)
+                ].rstrip("\r")
             return selected, number if start < len(content) else number - 1
         if number in requested:
-            selected[number] = content[start : min(boundary, start + LINE_WIDTH)].rstrip("\r")
+            selected[number] = content[
+                start : min(boundary, start + LINE_WIDTH)
+            ].rstrip("\r")
         number += 1
         start = boundary + 1
 
@@ -852,15 +904,27 @@ def _candidates(content: str, found: list[_Occurrence], total: int) -> str:
     blocks = []
     for position, (occurrence, matched, preview, first) in enumerate(plans, 1):
         last = min(line_total, occurrence.end_line + CONTEXT)
-        body = [_candidate_row(number, selected) for number in range(first, occurrence.start_line)]
+        body = [
+            _candidate_row(number, selected)
+            for number in range(first, occurrence.start_line)
+        ]
         body += [
             _candidate_row(number, selected)
-            for number in range(occurrence.start_line, min(line_total, occurrence.start_line + preview - 1) + 1)
+            for number in range(
+                occurrence.start_line,
+                min(line_total, occurrence.start_line + preview - 1) + 1,
+            )
         ]
         if matched > preview:
             body.append(f"{'...':>6} | ({matched - preview} further matching lines)")
-        body += [_candidate_row(number, selected) for number in range(occurrence.end_line + 1, last + 1)]
-        blocks.append(f"candidate {position} of {total}: lines {occurrence.label}\n" + "\n".join(body))
+        body += [
+            _candidate_row(number, selected)
+            for number in range(occurrence.end_line + 1, last + 1)
+        ]
+        blocks.append(
+            f"candidate {position} of {total}: lines {occurrence.label}\n"
+            + "\n".join(body)
+        )
     if total > CANDIDATES:
         blocks.append(f"... {total - CANDIDATES} further occurrences not shown")
     return "\n\n".join(blocks)
@@ -896,13 +960,17 @@ def _closest(content: str, needle: str) -> str:
     for _, start in ranked:
         end = min(len(lines), start + width)
         current = "\n".join(lines[start:end]).strip()[:16_384]
-        scored.append((difflib.SequenceMatcher(None, bounded_needle, current).ratio(), start, end))
+        scored.append(
+            (difflib.SequenceMatcher(None, bounded_needle, current).ratio(), start, end)
+        )
     blocks = []
     for score, start, end in sorted(scored, reverse=True):
         if score < 0.25:
             continue
         body = "\n".join(_numbered(number + 1, lines) for number in range(start, end))
-        blocks.append(f"closest candidate lines {start + 1}-{end} (similarity {score:.0%}):\n{body}")
+        blocks.append(
+            f"closest candidate lines {start + 1}-{end} (similarity {score:.0%}):\n{body}"
+        )
         if len(blocks) == 3:
             break
     return "\n\n".join(blocks)
@@ -923,28 +991,51 @@ def _missing(target: Path, original: str) -> str:
     )
 
 
-
 def _atomic_write(target: Path, data: bytes) -> None:
     mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else None
-    descriptor, name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    descriptor, name = tempfile.mkstemp(
+        dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
+    )
     temporary = Path(name)
     try:
         with os.fdopen(descriptor, "wb") as stream:
-            if mode is not None: os.fchmod(stream.fileno(), mode)
-            stream.write(data); stream.flush(); os.fsync(stream.fileno())
+            if mode is not None:
+                os.fchmod(stream.fileno(), mode)
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temporary, target)
     finally:
         temporary.unlink(missing_ok=True)
 
+
 _FILES = Files()
+
 
 def initialize(runtime) -> None:
     global _runtime
     _runtime = runtime
 
-def read(*args, **kwargs): return _FILES.read(*args, **kwargs)
-def write(*args, **kwargs): return _FILES.write(*args, **kwargs)
-def edit(*args, **kwargs): return _FILES.edit(*args, **kwargs)
-def ls(*args, **kwargs): return _FILES.ls(*args, **kwargs)
-def find(*args, **kwargs): return _FILES.find(*args, **kwargs)
-def paths(*args, **kwargs): return _FILES.paths(*args, **kwargs)
+
+def read(*args, **kwargs):
+    return _FILES.read(*args, **kwargs)
+
+
+def write(*args, **kwargs):
+    return _FILES.write(*args, **kwargs)
+
+
+def edit(*args, **kwargs):
+    return _FILES.edit(*args, **kwargs)
+
+
+def ls(*args, **kwargs):
+    return _FILES.ls(*args, **kwargs)
+
+
+def find(*args, **kwargs):
+    return _FILES.find(*args, **kwargs)
+
+
+def paths(*args, **kwargs):
+    return _FILES.paths(*args, **kwargs)

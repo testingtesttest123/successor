@@ -7,6 +7,7 @@ from Albedo ``priv/python/albedo_proc.py`` at commit
 it adds the successor lifetime pipe, shared lease, gate-before-exec protocol,
 independent deadline, and atomic bounded status record.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -26,7 +27,7 @@ import time
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
-import proc
+import proc  # noqa: E402 -- standalone fixture import path is installed above
 
 MAX_STATUS = 8192
 POLL_SECONDS = 0.02
@@ -49,12 +50,26 @@ def refuse_if_lifetime_or_deadline(args: argparse.Namespace) -> None:
         raise GateRefused("cancelled" if marker == b"S" else "owner_lost")
 
 
-def status_record(*, state: str, pid: int, leader: str | None,
-                  returncode: int | None, timed_out: bool, reason: str,
-                  termination: proc.Termination | None) -> dict[str, object]:
-    return {"v": 1, "state": state, "pid": pid, "leader": leader,
-            "returncode": returncode, "timed_out": timed_out, "reason": reason,
-            "termination": None if termination is None else termination.as_json()}
+def status_record(
+    *,
+    state: str,
+    pid: int,
+    leader: str | None,
+    returncode: int | None,
+    timed_out: bool,
+    reason: str,
+    termination: proc.Termination | None,
+) -> dict[str, object]:
+    return {
+        "v": 1,
+        "state": state,
+        "pid": pid,
+        "leader": leader,
+        "returncode": returncode,
+        "timed_out": timed_out,
+        "reason": reason,
+        "termination": None if termination is None else termination.as_json(),
+    }
 
 
 def write_status(path: Path, value: dict[str, object]) -> None:
@@ -95,17 +110,32 @@ def cleanup_despite_errors(group: proc.Group) -> proc.Termination:
             time.sleep(0.25)
 
 
-def retain_until_gone(group: proc.Group, status: Path, pid: int, leader: str | None,
-                      returncode: int | None, timed_out: bool, reason: str,
-                      first: proc.Termination) -> proc.Termination:
+def retain_until_gone(
+    group: proc.Group,
+    status: Path,
+    pid: int,
+    leader: str | None,
+    returncode: int | None,
+    timed_out: bool,
+    reason: str,
+    first: proc.Termination,
+) -> proc.Termination:
     """Fail closed: keep the guardian and lease while absence is unproved."""
     ending = first
     while not ending.gone:
         try:
-            write_status(status, status_record(
-                state="cleanup_uncertain", pid=pid, leader=leader,
-                returncode=returncode, timed_out=timed_out, reason=reason,
-                termination=ending))
+            write_status(
+                status,
+                status_record(
+                    state="cleanup_uncertain",
+                    pid=pid,
+                    leader=leader,
+                    returncode=returncode,
+                    timed_out=timed_out,
+                    reason=reason,
+                    termination=ending,
+                ),
+            )
         except Exception:
             # Status is observational; inability to update it cannot release
             # ownership while cleanup is uncertain.
@@ -113,7 +143,6 @@ def retain_until_gone(group: proc.Group, status: Path, pid: int, leader: str | N
         time.sleep(0.25)
         ending = cleanup_despite_errors(group)
     return ending
-
 
 
 def clear_active_record(path: Path | None, ending: proc.Termination) -> bool:
@@ -161,6 +190,7 @@ def clear_active_record(path: Path | None, ending: proc.Termination) -> bool:
                 os.close(fd)
             return False
 
+
 def run(args: argparse.Namespace) -> int:
     # Merely retaining this inherited descriptor retains the caller's shared OFD
     # lock. Never unlock it: close/exit is the only release.
@@ -174,9 +204,22 @@ def run(args: argparse.Namespace) -> int:
     try:
         command_path = Path(__file__).with_name("command.py")
         target = subprocess.Popen(
-            [sys.executable, "-I", "-u", str(command_path), "--gate-fd", str(gate_read), "--", *args.command],
-            stdin=sys.stdin.buffer, stdout=sys.stdout.buffer, stderr=sys.stderr.buffer,
-            close_fds=True, pass_fds=(gate_read,), start_new_session=True,
+            [
+                sys.executable,
+                "-I",
+                "-u",
+                str(command_path),
+                "--gate-fd",
+                str(gate_read),
+                "--",
+                *args.command,
+            ],
+            stdin=sys.stdin.buffer,
+            stdout=sys.stdout.buffer,
+            stderr=sys.stderr.buffer,
+            close_fds=True,
+            pass_fds=(gate_read,),
+            start_new_session=True,
         )
         os.close(gate_read)
         gate_read = -1
@@ -196,9 +239,18 @@ def run(args: argparse.Namespace) -> int:
         refuse_if_lifetime_or_deadline(args)
         # This is only the process gate status, not the canonical SQL receipt.
         # If its atomic write fails, closing the gate refuses user argv.
-        write_status(args.status, status_record(
-            state="running", pid=target.pid, leader=leader, returncode=None,
-            timed_out=False, reason="running", termination=None))
+        write_status(
+            args.status,
+            status_record(
+                state="running",
+                pid=target.pid,
+                leader=leader,
+                returncode=None,
+                timed_out=False,
+                reason="running",
+                termination=None,
+            ),
+        )
         refuse_if_lifetime_or_deadline(args)
         os.write(gate_write, b"G")
         os.close(gate_write)
@@ -216,7 +268,9 @@ def run(args: argparse.Namespace) -> int:
                 reason, timed_out = "deadline", True
                 returncode = None
                 break
-            readable, _, _ = select.select([args.lifetime_fd], [], [], min(POLL_SECONDS, remaining))
+            readable, _, _ = select.select(
+                [args.lifetime_fd], [], [], min(POLL_SECONDS, remaining)
+            )
             if readable:
                 marker = os.read(args.lifetime_fd, 1)
                 reason = "cancelled" if marker == b"S" else "owner_lost"
@@ -227,14 +281,30 @@ def run(args: argparse.Namespace) -> int:
         target.poll()
         final_code = target.returncode if target.returncode is not None else returncode
         if not ending.gone:
-            ending = retain_until_gone(group, args.status, target.pid, leader,
-                                       final_code, timed_out, reason, ending)
+            ending = retain_until_gone(
+                group,
+                args.status,
+                target.pid,
+                leader,
+                final_code,
+                timed_out,
+                reason,
+                ending,
+            )
         target.poll()
         final_code = target.returncode if target.returncode is not None else final_code
-        write_status(args.status, status_record(
-            state="terminated", pid=target.pid, leader=leader,
-            returncode=final_code, timed_out=timed_out, reason=reason,
-            termination=ending))
+        write_status(
+            args.status,
+            status_record(
+                state="terminated",
+                pid=target.pid,
+                leader=leader,
+                returncode=final_code,
+                timed_out=timed_out,
+                reason=reason,
+                termination=ending,
+            ),
+        )
         clear_active_record(args.active_record, ending)
         return 0
     except BaseException as error:
@@ -259,23 +329,39 @@ def run(args: argparse.Namespace) -> int:
         ending = cleanup_despite_errors(group)
         target.poll()
         error_reason = (
-            error.reason if isinstance(error, GateRefused)
+            error.reason
+            if isinstance(error, GateRefused)
             else f"guardian_error:{type(error).__name__}"
         )
         error_timed_out = isinstance(error, GateRefused) and error.timed_out
         if not ending.gone:
             ending = retain_until_gone(
-                group, args.status, target.pid, leader, target.returncode,
-                error_timed_out, error_reason, ending)
+                group,
+                args.status,
+                target.pid,
+                leader,
+                target.returncode,
+                error_timed_out,
+                error_reason,
+                ending,
+            )
         target.poll()
         # A checked pre-G refusal is a real terminal process fact too. Publishing
         # it lets immediate cancellation remain known; status-write failures may
         # still leave no record and are therefore unknown to the caller.
         try:
-            write_status(args.status, status_record(
-                state="terminated", pid=target.pid, leader=leader,
-                returncode=target.returncode, timed_out=error_timed_out,
-                reason=error_reason, termination=ending))
+            write_status(
+                args.status,
+                status_record(
+                    state="terminated",
+                    pid=target.pid,
+                    leader=leader,
+                    returncode=target.returncode,
+                    timed_out=error_timed_out,
+                    reason=error_reason,
+                    termination=ending,
+                ),
+            )
         except Exception:
             pass
         clear_active_record(args.active_record, ending)
