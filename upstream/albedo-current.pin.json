@@ -1,0 +1,12 @@
+{
+  "repo": "https://tangled.org/okami.mom/albedo",
+  "commit": "e086179bbaa8beda2b2a20e688dfa86bfe39b190",
+  "base_tree": "55fa4c80a825015abe0e112fab70a36d18055c66",
+  "patched_tree": "d822da32274582e6f354bfcb02b57deae3f40623",
+  "patches": [
+    {
+      "path": "patches/albedo-current/0001-durable-main-identity.patch",
+      "sha256": "5671b91d7ec26f030ee3519f1b201773a022df94d3479d3461b1d57e211dbf37"
+    }
+  ]
+}

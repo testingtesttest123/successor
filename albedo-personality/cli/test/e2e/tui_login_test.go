@@ -1,0 +1,276 @@
+//go:build unix
+
+// The manual openai-compatible provider wizard crosses the composer, the
+// daemon's sign-in and model-catalog answers, config.json on disk, and the
+// daemon's creds.json. A stubbed daemon cannot prove the real answers lead the
+// wizard to that save, or that the key it hands over is the one requests use.
+package e2e
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+
+	"albedo/cli/internal/config"
+	"albedo/cli/internal/daemon"
+	"albedo/cli/internal/tui"
+
+	tea "charm.land/bubbletea/v2"
+)
+
+func TestTUILoginAddsAManualProviderThroughTheDaemon(t *testing.T) {
+	name, key, model := "wanderer", "sk-wanderer-fixture", "hermit-mini"
+	providerRoute(t, echoReply)
+	// The wizard uses the suite daemon for profile persistence.
+	t.Setenv("ALBEDO_HOME", suite.home)
+	preserveLoginState(t, name)
+	before, err := daemon.ProviderProfiles(context.Background(), conn(t))
+	if err != nil {
+		t.Fatalf("suite config: %v", err)
+	}
+	baseURL := before.Providers[t.Name()].BaseURL
+	d := newTUIDriver(t)
+	// expect fails unless the wizard is asking this question next.
+	expect := func(want tui.LoginStep) {
+		t.Helper()
+		if d.App.Login.Step != want {
+			t.Fatalf("the wizard is on step %v, want %v", d.App.Login.Step, want)
+		}
+	}
+
+	d.App.Chat.TextArea.SetValue("/login " + name)
+	opened, ok := d.Key(tea.KeyEnter).(tui.ChatOpenLoginMsg)
+	if !ok || opened.Name != name {
+		t.Fatalf("enter did not open /login: %#v", opened)
+	}
+	// Login.Init asks the daemon what can be signed in to; only its answer
+	// applies the hint, which lands on the wizard's base-url question.
+	d.Dispatch(opened)
+	if d.App.State != tui.AppStateLogin {
+		t.Fatalf("the daemon's sign-in answer did not route the hint: state=%v\n%s", d.App.State, d.View())
+	}
+	expect(tui.StepBaseURL)
+
+	d.App.Login.TextInput.SetValue(baseURL)
+	d.Key(tea.KeyEnter)
+	expect(tui.StepAPIKey)
+	d.App.Login.TextInput.SetValue(key)
+	d.Key(tea.KeyEnter)
+	expect(tui.StepProtocol)
+
+	// The keyboard alone moves the protocol picker off the default responses.
+	d.Key(tea.KeyDown)
+	picked, ok := d.Key(tea.KeyEnter).(tui.PickerSelectMsg)
+	if !ok || picked.ID != "chat_completions" {
+		t.Fatalf("enter did not pick the protocol: %#v", picked)
+	}
+	// The daemon may advertise endpoint defaults even without models.dev.
+	// Manual entry remains available alongside every advertised model.
+	d.Dispatch(picked)
+	expect(tui.StepModels)
+	for {
+		selected, ok := d.App.Login.ModelPicker.Highlighted()
+		if !ok {
+			t.Fatal("model picker has no manual-entry row")
+		}
+		if selected.ID == "manual" {
+			break
+		}
+		d.Key(tea.KeyDown)
+	}
+	manual, ok := d.Key(tea.KeyEnter).(tui.PickerSelectMsg)
+	if !ok || manual.ID != "manual" {
+		t.Fatalf("manual entry was not selectable: %#v", manual)
+	}
+	d.Dispatch(manual)
+	expect(tui.StepModel)
+
+	d.App.Login.TextInput.SetValue(model)
+	// The save lands in config.json; the app reloads it and returns to chat.
+	d.Dispatch(d.Key(tea.KeyEnter))
+	if d.App.State != tui.AppStateChat || !strings.Contains(d.View(), "› ") || d.App.Profiles.Active != name {
+		t.Fatalf("the app did not return to chat with %q active: state=%v active=%q\n%s", name, d.App.State, d.App.Profiles.Active, d.View())
+	}
+
+	profiles, err := daemon.ProviderProfiles(context.Background(), conn(t))
+	if err != nil {
+		t.Fatalf("saved config: %v", err)
+	}
+	got := profiles.Providers[name]
+	want := config.Settings{ProfileName: name, Extension: "openai", BaseURL: baseURL, Model: model, Protocol: "chat_completions", HasKey: true}
+	if got != want {
+		t.Fatalf("config.json kept %+v, want %+v", got, want)
+	}
+	if profiles.Active != name {
+		t.Fatalf("config.json kept %q active, not %q", profiles.Active, name)
+	}
+	// The key went to the daemon, which sends it with the profile's requests.
+	id := cliSession(t, t.TempDir())
+	cli(t, "send", id, "which key")
+	waitIdle(t, id, t.Name(), 1)
+	if requests := suite.provider.requests(t.Name()); requests[len(requests)-1]["authorization"] != "Bearer "+key {
+		t.Fatalf("the provider saw authorization %v, not the saved key", requests[len(requests)-1]["authorization"])
+	}
+}
+
+// Vertex and Bedrock authenticate from the daemon host's own credentials, so
+// the wizard asks for a project and location (Vertex) or lets the endpoint and
+// key stay blank (Bedrock) and saves a profile with no key.
+func TestTUILoginSavesCloudProviderProfiles(t *testing.T) {
+	providerRoute(t, echoReply)
+	t.Setenv("ALBEDO_HOME", suite.home)
+	preserveLoginState(t, "vertex")
+	preserveLoginState(t, "bedrock")
+	d := newTUIDriver(t)
+	expect := func(want tui.LoginStep) {
+		t.Helper()
+		if d.App.Login.Step != want {
+			t.Fatalf("the wizard is on step %v, want %v\n%s", d.App.Login.Step, want, d.View())
+		}
+	}
+	start := func(id, name string) {
+		t.Helper()
+		d.App.Chat.TextArea.SetValue("/login")
+		d.Dispatch(d.Key(tea.KeyEnter))
+		expect(tui.StepChoose)
+		d.Dispatch(tui.PickerSelectMsg{ID: id})
+		expect(tui.StepName)
+		d.App.Login.TextInput.SetValue(name)
+		d.Key(tea.KeyEnter)
+	}
+	finish := func(model string) config.Settings {
+		t.Helper()
+		expect(tui.StepModels)
+		d.Dispatch(tui.PickerSelectMsg{ID: "manual"})
+		expect(tui.StepModel)
+		d.App.Login.TextInput.SetValue(model)
+		d.Dispatch(d.Key(tea.KeyEnter))
+		if d.App.State != tui.AppStateChat {
+			t.Fatalf("the app did not return to chat: state=%v\n%s", d.App.State, d.View())
+		}
+		profiles, err := daemon.ProviderProfiles(context.Background(), conn(t))
+		if err != nil {
+			t.Fatalf("saved config: %v", err)
+		}
+		return profiles.Providers[d.App.Profiles.Active]
+	}
+
+	start("add-vertex", "vertex")
+	expect(tui.StepProject)
+	d.App.Login.TextInput.SetValue("fixture-project")
+	d.Key(tea.KeyEnter)
+	expect(tui.StepLocation)
+	d.App.Login.TextInput.SetValue("europe-west4")
+	d.Dispatch(d.Key(tea.KeyEnter))
+	got := finish("gemini-fixture")
+	if got.Extension != "vertex" || got.Model != "gemini-fixture" || got.HasKey ||
+		deref(got.Project) != "fixture-project" || deref(got.Location) != "europe-west4" {
+		t.Fatalf("config.json kept %+v", got)
+	}
+
+	// Blank answers fall back to the daemon host's AWS environment.
+	start("add-bedrock", "bedrock")
+	expect(tui.StepBaseURL)
+	d.Key(tea.KeyEnter)
+	expect(tui.StepAPIKey)
+	d.Dispatch(d.Key(tea.KeyEnter))
+	got = finish("anthropic.claude-fixture")
+	if got.Extension != "bedrock" || got.BaseURL != "" || got.HasKey || got.Project != nil {
+		t.Fatalf("config.json kept %+v", got)
+	}
+}
+
+func deref(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+// preserveLoginState registers cleanup that deletes the temporary provider and
+// its API key before restoring the saved config.
+func preserveLoginState(t *testing.T, profile string) {
+	t.Helper()
+	configPath := filepath.Join(suite.home, "config.json")
+	saved, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection := conn(t)
+	t.Cleanup(func() {
+		profiles, readErr := daemon.ProviderProfiles(context.Background(), connection)
+		if readErr != nil {
+			t.Error(readErr)
+			return
+		}
+		if err := daemon.DeleteProvider(context.Background(), connection, profile, profiles); err != nil {
+			t.Errorf("delete temporary provider %q: %v", profile, err)
+		}
+		if err := os.WriteFile(configPath, saved, 0o600); err != nil {
+			t.Errorf("restore login config: %v", err)
+		}
+	})
+}
+
+// An Anthropic API key rides the claude extension that otherwise signs in,
+// so the wizard must ask for the key instead of starting a sign-in, and a
+// saved key profile must stay usable with no Claude account signed in.
+func TestTUILoginSavesAnAnthropicAPIKeyProfile(t *testing.T) {
+	// Naming the profile after the sign-in provider is the hardest case.
+	name, key, model := "claude", "sk-ant-fixture", "claude-fixture"
+	providerRoute(t, echoReply)
+	t.Setenv("ALBEDO_HOME", suite.home)
+	preserveLoginState(t, name)
+	d := newTUIDriver(t)
+	expect := func(want tui.LoginStep) {
+		t.Helper()
+		if d.App.Login.Step != want {
+			t.Fatalf("the wizard is on step %v, want %v\n%s", d.App.Login.Step, want, d.View())
+		}
+	}
+
+	d.App.Chat.TextArea.SetValue("/login")
+	d.Dispatch(d.Key(tea.KeyEnter))
+	expect(tui.StepChoose)
+	if !slices.ContainsFunc(d.App.Login.SignIns, func(s daemon.SignIn) bool { return s.Provider == "claude" }) {
+		t.Fatalf("the daemon offers no claude sign-in to route around: %+v", d.App.Login.SignIns)
+	}
+	d.Dispatch(tui.PickerSelectMsg{ID: "add-anthropic"})
+	expect(tui.StepName)
+	d.App.Login.TextInput.SetValue(name)
+	d.Key(tea.KeyEnter)
+	// The extension owns its endpoint, so no base url is asked.
+	expect(tui.StepAPIKey)
+	d.App.Login.TextInput.SetValue(key)
+	d.Dispatch(d.Key(tea.KeyEnter))
+	expect(tui.StepModels)
+	d.Dispatch(tui.PickerSelectMsg{ID: "manual"})
+	expect(tui.StepModel)
+	d.App.Login.TextInput.SetValue(model)
+	d.Dispatch(d.Key(tea.KeyEnter))
+	if d.App.State != tui.AppStateChat || d.App.Profiles.Active != name {
+		t.Fatalf("the app did not return to chat with %q active: state=%v active=%q\n%s", name, d.App.State, d.App.Profiles.Active, d.View())
+	}
+	profiles, err := daemon.ProviderProfiles(context.Background(), conn(t))
+	if err != nil {
+		t.Fatalf("saved config: %v", err)
+	}
+	want := config.Settings{ProfileName: name, Extension: "claude", Model: model, Protocol: "chat_completions", HasKey: true}
+	if got := profiles.Providers[name]; got != want {
+		t.Fatalf("config.json kept %+v, want %+v", got, want)
+	}
+	held, err := daemon.GetSettings(context.Background(), conn(t))
+	if err != nil || !slices.Contains(held.Credentials.Providers, name) {
+		t.Fatalf("the daemon holds no key for %q: %+v %v", name, held, err)
+	}
+
+	// Re-selecting the key profile saves at once rather than signing in.
+	d.App.Chat.TextArea.SetValue("/login " + name)
+	d.Dispatch(d.Key(tea.KeyEnter))
+	if d.App.State != tui.AppStateChat || d.App.Profiles.Active != name {
+		t.Fatalf("re-selecting %q left state=%v step=%v\n%s", name, d.App.State, d.App.Login.Step, d.View())
+	}
+}

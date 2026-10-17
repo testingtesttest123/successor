@@ -1,0 +1,109 @@
+{
+  "host_repo": "https://tangled.org/okami.mom/albedo",
+  "base_commit": "e9df547f67f6819ebcd217649be326e53111027c",
+  "base_tree": "542057beeeb5eb67edbc3dca260060c12c493679",
+  "patches": [
+    {
+      "path": "0001-configurable-server-start.patch",
+      "sha256": "533bf4684141c6a1e3457780b0150e22728b3d97878649da67fce71e9a18e6ed",
+      "production_paths": [
+        "src/albedo/daemon/server.gleam"
+      ],
+      "documentation_paths": [
+        "robot-docs/extensions.md"
+      ],
+      "production_diff": {
+        "added": 25,
+        "removed": 2
+      }
+    },
+    {
+      "path": "0002-session-lifecycle.patch",
+      "sha256": "c554abf4cbd1d0ee6a809c04352de8cca575bff42af414bff010d00752485036",
+      "production_paths": [
+        "src/albedo/daemon/conversation.gleam",
+        "src/albedo/daemon/history.gleam",
+        "src/albedo/daemon/mail.gleam",
+        "src/albedo/daemon/registry.gleam",
+        "src/albedo/harness/extension.gleam",
+        "src/albedo/harness/extension/selection.gleam",
+        "src/albedo/harness/runtime.gleam",
+        "src/albedo/harness/runtime/state.gleam",
+        "src/albedo/harness/session_lifecycle.gleam"
+      ],
+      "test_paths": [
+        "test/daemon/conversation_test.gleam",
+        "test/daemon/image_store_test.gleam",
+        "test/daemon/mail_commit_test.gleam",
+        "test/daemon/transcript_sources_test.gleam",
+        "test/harness/cache_fade_test.gleam",
+        "test/harness/extension_failure_test.gleam",
+        "test/harness/lcm_preparation_test.gleam",
+        "test/harness/lcm_test.gleam",
+        "test/harness/retrieval_performance_test.gleam",
+        "test/harness/session_fixture.gleam",
+        "test/harness/tool_error_test.gleam"
+      ],
+      "scope": "P3a lifecycle only; direct stock LCM call and modules retained"
+    },
+    {
+      "path": "0003-canonical-lifecycle-diagnostic.patch",
+      "sha256": "0f2ad2b02ce19f1c4d90248f7cf60735b2c9e6d8b77db85fd9cbfe9d43b31dec",
+      "production_paths": [
+        "src/albedo/harness/extension.gleam"
+      ],
+      "scope": "canonical failed lifecycle owner reports its own installation failure; quarantine behavior unchanged"
+    },
+    {
+      "path": "0004-test-process-ownership.patch",
+      "sha256": "c092c7e4a62c0d96f37a1d3e29df56fd84880f9917b20f905a216b918594d2a4",
+      "production_paths": [],
+      "test_paths": [
+        "test.sh",
+        "test/python_test_runner.py",
+        "test/process_owner.py",
+        "test/harness/process_owner_test.py",
+        "test/process-owner.md"
+      ],
+      "scope": "test-only Linux orphan ownership; no production supervision, physical-absence assertion or test timeout changes"
+    },
+    {
+      "path": "0005-test-owner-cancellation-procfs.patch",
+      "sha256": "5c7ac22fd2b6938cb29a6f46aea7fc5116a258f9081f4e55f9c4df4b9a87d248",
+      "production_paths": [],
+      "test_paths": [
+        "test/process_owner.py",
+        "test/harness/process_owner_test.py",
+        "test/process-owner.md"
+      ],
+      "scope": "test-only cancellation deadline retention and procfs process-disappearance races; existing assertions and timeouts unchanged"
+    },
+    {
+      "path": "0006-captured-request-context.patch",
+      "sha256": "066e709b8eebd5c031cf472f6826491dca272614da8f560ce224eb67fe204f7a",
+      "production_paths": [
+        "src/albedo/daemon/context_snapshot.gleam",
+        "src/albedo/daemon/http_wire.gleam",
+        "src/albedo/daemon/session_run.gleam",
+        "src/albedo/harness/compaction.gleam",
+        "src/albedo/harness/extension.gleam",
+        "src/albedo/harness/extension/composition.gleam",
+        "src/albedo/harness/extension/selection.gleam",
+        "src/albedo/harness/extensions/lcm/extension.gleam",
+        "src/albedo/harness/extensions/rolling/extension.gleam",
+        "src/albedo/harness/extensions/snapcompact/extension.gleam",
+        "src/albedo/harness/loop.gleam",
+        "src/albedo/harness/request_context.gleam",
+        "src/albedo/harness/runtime.gleam"
+      ],
+      "documentation_paths": [
+        "robot-docs/cache-warming.md",
+        "robot-docs/compaction.md",
+        "robot-docs/context.md",
+        "robot-docs/extensions.md"
+      ],
+      "scope": "P1/S1 generic captured request context, resolved strategy settings, actual final accounting and saved inspection; external policy remains external"
+    }
+  ],
+  "scope": "P0, P3a lifecycle and P1/S1 request context; bounded evidence is not a full aggregate gate"
+}

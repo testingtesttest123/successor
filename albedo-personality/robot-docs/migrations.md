@@ -1,0 +1,303 @@
+# existing storage migrations
+
+## migration test inventory
+
+Keep these tests while the corresponding old format remains supported. A
+fresh-install scenario cannot exercise an upgrade from that format. Retire a
+test only together with its migration or compatibility reader and an explicit
+decision to stop supporting that upgrade path.
+
+| Supported data | Implementation owner | Coverage |
+| --- | --- | --- |
+| Older core and extension schemas, inline images, and session preferences | Core migrations, extension-contributed migrations, and preference import | [startup scenarios](../test/e2e/migrations_test.py), [migration ordering](../test/harness/migration_test.gleam) |
+| Older transcript metadata, titles, and timestamps | Conversation columns and transcript classification | [conversation tests](../test/daemon/conversation_test.gleam), [metadata backfill](../test/daemon/transcript_sources_test.gleam) |
+| Inline image records and TEXT image payloads | Image-store and cell-image migrations | [image-store tests](../test/daemon/image_store_test.gleam), [cell image readers](../test/harness/tool_image_test.gleam) |
+| Legacy item-count compaction state | Rolling's lazy compatibility reader | [rolling tests](../test/harness/rolling_test.gleam) |
+| Older Python namespace snapshots | Kernel snapshot reader | [kernel state scenarios](../test/e2e/kernel_state_test.py) |
+| Flat provider configuration and relocated credentials | Provider configuration and credential migration | [settings scenarios](../test/e2e/settings_test.py), [startup integration](../test/e2e/integration_test.py), [credential migration](../test/e2e/credentials_test.py) |
+| Older layouts inspected offline | Daemon storage helper compatibility reader | [storage compatibility scenarios](../test/e2e/storage_test.py) |
+
+These are groups within feature suites, not a separate test lane. The normal
+gate runs them. Compatibility with another running daemon build and provider
+response shapes has its own contracts; those tests are not retired merely
+because a storage migration is removed.
+
+core implementations live under `src/albedo/daemon/migrations/`;
+extension implementations live under their own `migrations/` directories and
+contribute `MigrationPlugin` values. the host applies them, without importing
+extension-specific migration modules.
+
+## startup order
+
+`server.main` first claims `ALBEDO_HOME/daemon.lock` with `BEGIN EXCLUSIVE`.
+Offline cleanup in `cli/internal/storage` takes the same lock after confirmation,
+before it revalidates candidates. Its Gleam helper holds ownership through file
+deletion and vacuum. Daemon startup refuses while maintenance owns the home,
+before it touches application storage. Neither owner commits the lock transaction,
+changes its journal mode, or replaces the lock file. Cleanup checks health for
+diagnostics; only exclusive ownership permits offline mutation. CLI cancellation
+or death stops the helper and releases ownership. Completed deletions remain
+deleted if later deletion or vacuum fails.
+
+The client invokes `albedo-daemon storage inspect <database> <scratch-directory>`
+and `albedo-daemon storage maintain <home>` through the same local executable
+selection as daemon startup. `daemon/storage_cli` owns both helper modes and
+dispatches before server startup. Inspection copies the database and WAL into
+the client's private scratch directory, compares native file identities before
+and after copying, then reads the snapshot without schema initialization or
+migrations. It supports older layouts independently of the live projection.
+The client removes scratch files and retains its filesystem accounting and
+cleanup revalidation. Helper metadata uses the native timestamp resolution.
+
+Maintenance exchanges newline-delimited JSON with the client. It captures
+candidate identities under the home lock, reports readiness, and waits for the
+client's authorization after revalidation. An EOF watcher terminates the helper
+VM during authorized work, including vacuum. Go keeps the pipe open until the
+helper exits and accepts a result only with a successful exit. These helper
+modes do not require Python or create a daemon discovery record.
+
+`runtime.start` installs the extension registry before `server.prepare_storage`.
+for each installed extension, `extension.install` first calls its table
+initialiser, then applies its contributed `SchemaMigration` callbacks on the
+store-owned SQLite connection, in plugin order. work contributes `cwd.apply`;
+paperclips contributes `title.apply`, `scope.apply`, and `reply.apply`; the links extension's initialiser creates `workspace_links` (see [workspaces](workspaces.md#linked-workspaces)), which `links.link` also ensures; the mcp extension's initialiser creates `mcp_catalogues` (see [mcp](mcp.md#saved-catalogues)); python contributes `kernel_links.apply`, the detached kernel's link tables (see [kernel](kernel.md)), which `link.create` also ensures for embedded runtimes that boot kernels without the extension. their ledgers create tables but do not run
+upgrades themselves. all installed owners upgrade, even when disabled for
+sessions; session selection and live reload never rerun migrations.
+
+`server.prepare_storage` then runs before sessions start:
+
+1. `conversation.initialise` creates the core tables, then calls
+   `conversation_columns.apply`: the existing session columns first, transcript
+   columns second. The same core initialization creates `operations`,
+   `pending_inputs`, `submission_events`, and `continuation_markers` through
+   `operations.schema`.
+   `operations.initialise` upgrades historical display and continuation metadata
+   to unique `(session,operation_id)` keys in one transaction, preserving their
+   rowids. Admission receipts and pending inputs still require globally unique
+   input identities. It then runs its existing domain-local session recovery
+   (missing activity/title from transcript), then creates `sessions_activity`.
+2. quota, mail, and family initialise their tables, unchanged.
+3. `migrations.run(ledger, backup)` runs the core `image_store.run`, which first
+   externalizes legacy transcript images, then converts image-table TEXT data
+   to decoded BLOB. It then runs `transcript_classes.run` to classify old
+   transcript rows. `runtime.migrate(host, backup)` then collects installed
+   extensions' `DataMigration` callbacks in registry/plugin order and applies
+   them with the same backup path. python contributes `cell_images.run`, which
+   requires the core image and marker tables. callbacks report named row counts;
+   the server logs nonzero extension results as `migration <name>: <n> rows`.
+   a failed callback stops startup and prevents later migrations from running.
+4. the existing best-effort filesystem credential migration runs; then provider
+   assignment from legacy configuration runs, unchanged.
+
+schema creation is still owned by each subsystem. `work/migrations/cwd.apply`
+checks `PRAGMA table_info(work)`, adds the existing reserved `__albedo_legacy__`
+cwd default when absent, then creates `work_cwd_id`;
+`paperclips/migrations/title.apply` adds the existing non-null empty-default title
+column, `paperclips/migrations/scope.apply` drops the now-unused workspace
+index left from the cwd-scoped vent era, and
+`paperclips/migrations/reply.apply` adds the non-null empty-default reply
+column that makes a /paperclips answer durable. `rolling/migrations/observation.apply`
+drops the observation table rolling used to write and read straight back. these upgrades run immediately
+after their owner's table creation, so later extension initialisers can use
+the upgraded schema. embedding hosts call
+`runtime.migrate` after preparing core storage and before opening sessions.
+
+## compatibility and interruption
+
+- `conversation_columns.apply` adds nullable `transcript.row_class`, checked
+  against `user`, `image_fit`, and `other`. Live writes set it in the same
+  transaction as the payload; forks copy it with the retained prefix.
+  `transcript_classes.run` classifies only NULL rows in 128-row transactions;
+  completed batches survive interruption. An unreadable payload, here or in
+  `conversation`'s startup indexing, is healed by `conversation.heal_in`: its
+  bytes move to `transcript_quarantine` (one row per sequence ID, deleted with
+  its session), and the row becomes a user-role system note saying it was set
+  aside, classed `user`. Startup continues. The backfill adds no migration
+  marker. It runs after the image migration.
+- a tool result saved after rows that are neither calls nor results (a
+  capability note written while the call ran, then the result recovered after a
+  restart) moves back beside its call: providers reject a call whose result does
+  not follow it. `tool_results.settle` is the one rule. `conversation` applies it
+  when it commits results, `session_history` applies it to the live history and to
+  a transcript when it loads, and saves the moves from that load. A move keeps
+  every seq and moves row contents between them, and remaps `transcript_calls`,
+  `submission_events`, `continuation_markers`, `provider_requests`,
+  `operations.committed_seq`, and `transcript_quarantine` with them. LCM source
+  ranges are not remapped. Selected autobiographical actors settle retained
+  history before starting background formation. Both active LCM leaf planners
+  stop at the first source unit lacking chronological native answers for its
+  identified calls, so later recovery cannot remap an already covered open
+  exchange. A source append during provider work also invalidates the atomic
+  graph snapshot. This adds no migration or persistent job table.
+- `transcript_pending_class` indexes unclassified sequence IDs.
+  `transcript_users` indexes `(session,seq)` for user and image-fit rows;
+  `transcript_fits` indexes `(session,seq)` for image-fit rows alone. Completed
+  databases have no pending entries, so subsequent startups do not decode
+  transcript payloads for classification.
+- the existing `migrations(name,applied_at)` table remains unchanged. the exact
+  markers are `image_store` and `cell_images`, recorded with `unixepoch()`.
+  transcript migration skips when its marker exists; cell migration skips when
+  its marker exists, and does nothing without a cells table.
+- TEXT-to-BLOB migration deliberately has no marker. it checks
+  `typeof(data)='text'` on every run and converts pending rows, even when the
+  `image_store` marker already exists. invalid legacy base64 fails without
+  replacing that row.
+- transcript and cell scans retain their original cursor order and 16-row pages;
+  BLOB conversion retains its 16-row limit. each page uses the existing
+  transaction helper. there is no new all-migrations transaction or transaction
+  policy change. markers are written at the original completion points, and
+  interrupted runs recheck remaining rows.
+- core `backup.gleam` and python's cell migration preserve the two existing
+  backup call patterns: transcript and BLOB migration check for an existing file before directory creation and
+  `VACUUM INTO`, retaining the `image store backup failed: ` error prefix; cell
+  migration ensures the directory first and copies on the first page containing
+  inline images, outside its transaction. the server still supplies one shared
+  `home/backups/albedo-before-image-store-<timestamp>.sqlite` path. no backup is
+  overwritten and backup triggering is unchanged (the transcript candidate
+  check can include tool outputs without inline images).
+- live writes and transcript migration share `image_payloads.insert`, the
+  unchanged decoded-BLOB insertion helper. image hashes, serialized formats,
+  image validation, and legacy inline fallback reads are unchanged. the existing
+  Erlang conversion and cell packing functions remain the FFI implementation.
+
+## migration inventory
+
+| previous implementation | current implementation |
+| --- | --- |
+| `conversation.initialise`: session/transcript `add_columns` | `migrations/conversation_columns.apply` |
+| transcript row classification | `migrations/transcript_classes.run`, after core image upgrades |
+| `images.migrate` / `migrate_legacy` / transcript pages | `migrations/image_store.run` / `migrate_legacy` / transcript pages |
+| `images.migrate_blobs` / BLOB pages | `migrations/image_store.migrate_blobs` / BLOB pages |
+| `images.backup_before_migration` | `migrations/backup.image_store` |
+| `python/cells.migrate_images` / cell pages | `python/migrations/cell_images.run` / cell pages |
+| `python/cells.backup_before_migration` | `python/migrations/cell_images.backup_before_migration` |
+| `work/ledger.initialise`: cwd alteration and index | `work/migrations/cwd.apply`, contributed by work |
+| `paperclips/ledger.initialise`: title addition | `paperclips/migrations/title.apply`, contributed by paperclips |
+| `paperclips/ledger.initialise`: `paperclips_cwd` index creation | dropped from the schema; `paperclips/migrations/scope.apply` removes it from existing stores |
+| `paperclips/ledger.initialise`: reply column | `paperclips/migrations/reply.apply`, added with the global ledger |
+| `rolling.initialise`: `rolling_compaction_observation` creation | dropped from the schema; `rolling/migrations/observation.apply` removes it from existing stores |
+
+`images.migrate` and `cells.migrate_images` are removed rather than wrapped:
+the migration implementations are separate from the live domain readers and
+writers. startup discovers extension upgrades through plugins, not direct calls
+to their implementation modules.
+
+## intentionally not extracted
+
+- session recovery stays in `conversation`: it uses the domain's transcript
+  decoding/title helpers and still runs at exactly the same point. core schema
+  bootstrap and index creation remain with their owners.
+- rolling compaction's legacy item-count-to-user-cut conversion remains lazy in
+  `rolling/extension.resume`. it needs the current prepared history and source,
+  validates the old fingerprint (including legacy image payload fingerprints),
+  and only writes a cut when the history matches and its tail begins with a user
+  message. treating this as an unconditional startup migration would change its
+  timing and semantics; its projections are untouched.
+- credentials migration is filesystem/auth, not SQLite. legacy configuration's
+  provider assignment likewise remains in the existing server startup path.
+- no zstd, compression, schema-version, offline storage upgrade,
+  new dependency, or unrelated transaction fix is part of this refactor.
+
+## durable operation admissions
+
+`operations` owns receipt retention and pending delivery state on the shared
+store connection. Session creation commits its session row and accepted receipt
+in one immediate transaction. Submission admission commits its receipt and
+pending input together. Transcript consumption moves pending metadata into
+`submission_events`, records its committed position, and removes pending input
+in the same transaction as the transcript rows. Failed statements roll back the
+whole transaction, including a failed commit.
+
+Receipts retain the original admission result. They do not reference the session
+row, so deletion cancels pending inputs and leaves receipts available. Terminal
+receipts expire seven days after acceptance for creation or rejection, or after
+commit or cancellation for submissions. Pending receipts do not expire. Cleanup
+removes at most 128 expired receipts per call. Durable display metadata in
+`submission_events` remains until session deletion, including operation IDs,
+display text, and echo identity. Continuations commit a `continuation_markers`
+row in the same transaction without adding a user-text transcript row. These
+markers also remain until session deletion and survive receipt cleanup.
+`mail.initialise` adds nullable `mail.reporter`, captured only at native enqueue
+from the host's sender/kind. Old rows remain NULL without prose-based backfill;
+native Letter decoding and access foreign keys do not change. Sender deletion
+may still null the access field but cannot change retained original provenance.
+
+`operations.initialise` adds nullable `submission_events.reporter` without
+rewriting display payloads. The existing old globally unique display-table
+upgrade also preserves this field. New native Mail/Webhook commits capture only
+the retained original sender/kind label from matching delivered mail in the
+same transaction as transcript, display and delivery. Anonymous Chat/Note rows
+remain unchanged. This internal historical fact is not a new display wire field
+or a user/tool parameter. The reader bounds it to 512 UTF-8 bytes and never treats
+it as current access or identity authority.
+
+Legacy snapshots stay NULL; attribution falls back only to the exact surviving
+mail ID. A surviving legacy sender can still prove agent origin; a NULL legacy
+sender does not prove external origin from its display name. Such mail still
+delivers normally, with unavailable attribution. Malformed or oversized retained
+enqueue provenance refuses delivery atomically rather than falling back to text.
+Missing legacy reporter evidence is explicitly unavailable, without a
+prose-based backfill. Native fork copies retain snapshots independently of the
+original inbox or sender's lifetime. Session cleanup removes its own display
+metadata; no second provenance store or fabricated mail delivery is introduced.
+
+Forks copy this historical metadata with its original input IDs, timestamps,
+and turn IDs at the branch's remapped transcript positions. A continuation
+follows its anchor row, so only markers anchored strictly before the selected
+checkpoint belong to the fork. Forks copy no admission receipts or live runs.
+
+Acceptance guarantees stored input or its committed or cancelled outcome.
+Commit means the input reached the transcript. Neither guarantee promises that
+assistant generation, tools, or external effects occur exactly once.
+
+## Experimental personality storage
+
+The personality extension owns its fresh free-form identity schema, document and
+binding revisions, defaults and atomic receipts. Installation creates no persona
+or binding. Compatible schema validation is read-only; legacy or damaged schema
+is detected before any DDL and quarantined with retained data. No destructive
+experimental-ledger migration is supported. Optional lessons own separate tables
+and validate the core marker before touching their schema. Partial optional
+storage is refused rather than recreated as empty receipt/history state.
+
+The personality-era global session-admission table and startup/runtime calls are
+removed. Existing unused tables/markers are left untouched; ordinary session
+startup and unselected requests do not depend on them. Selected mandatory
+contributors are checked through native persisted selection, original/quarantined
+extension declarations and loaded composition. Core OAuth, image, transcript,
+credential and operation migrations remain unchanged.
+
+[Startup scenarios](../test/e2e/migrations_test.py) verify fresh storage and legacy
+quarantine while preserving seeded transcript/LCM bytes. Compiled native tests
+also exercise missing-table failure across runtime reconstruction, atomic receipt
+rollback, default reuse and exact historical attachment boundaries.
+
+Conversation-owned context metadata indexes whole native source units as rows are
+inserted or restored. A batch append stages scalar facts and refreshes each
+affected unit once inside the same transaction. Transferring a source row removes
+its old metadata and makes both sessions refuse stale units until recovery.
+Startup backfills128 pending transcript entries per store
+turn. Persisted scalar projection facts, original image dimensions and the
+ordered image-fit map permit pricing both protocols and restoring a removed fit
+without decoding archived source payloads. Deleted-fit recovery yields after128
+image entries. Payload/provider changes and continuation mutations advance the
+source revision; per-position change records also detect rewrites below an old
+receipt's watermark. Harmless appends preserve closed-unit content and cost keys.
+Estimator, renderer or static-salience version changes mark derived rows pending
+for bounded startup recovery. The pinned salience fixture oracle is in
+`test/tools/lcm_kv_fixture_oracle.mjs`.
+
+LCM's graph initializer maintains node render-cost/salience metadata and node/edge
+generations, backfilling128 nodes per store turn while preserving existing
+summaries, frames and formation ordinals. Its inventory reads metadata and actual
+edges in the same store turn as source/configuration and receipt stamps, without
+fetching summary bodies. The separate `lcm_projection_state` receipt uses atomic
+source/graph/profile/identity/receipt generation checks plus the caller's owner
+validator. Restart discards stale or unsupported receipts while retaining their
+generation. Fork copying remaps complete surviving references onto branch-local
+source/node keys; a crossing or incomplete selection leaves no usable prior.
+Fork receipt inheritance is a no-op when optional LCM projection storage is
+absent and never installs it. Existing projection storage is read and validated
+even when the LCM extension is disabled; storage errors still roll back the fork.
+These primitives do not change the active compaction selector or provider request
+admission.

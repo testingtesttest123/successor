@@ -1,0 +1,16 @@
+[tool.ruff]
+target-version = "py311"
+include = ["priv/python/**/*.py", "test/**/*.py", "conformance/**/*.py", "scripts/**/*.py", "compat/**/*.py", "packages/**/*.py", "apps/**/*.py", "pyproject.toml"]
+extend-exclude = ["albedo-personality", ".cache", "**/build/**", "**/.venv/**"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ty.environment]
+python-version = "3.11"
+python-platform = "linux"
+extra-paths = ["priv/python", "priv/python/successor_tools", "compat/live_identity/e2e", "../albedo/test", "../albedo/test/e2e", "../albedo/priv/python"]
+
+[tool.ty.src]
+include = ["priv/python", "test", "conformance", "scripts", "compat", "packages", "apps"]
+exclude = ["**/build/**", "**/.venv/**"]

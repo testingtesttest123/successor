@@ -1,0 +1,18 @@
+diff --git a/src/albedo/harness/extension.gleam b/src/albedo/harness/extension.gleam
+index f6cceaf..b8aa2c0 100644
+--- a/src/albedo/harness/extension.gleam
++++ b/src/albedo/harness/extension.gleam
+@@ -488,10 +488,10 @@ pub fn lifecycle_owners(
+         let availability = case ready {
+           True -> session_lifecycle.Ready
+           False -> {
++            // Canonical installation failures follow duplicate-name rejections.
+             let reason =
+-              list.find(failures, fn(failure) {
+-                failure.name == declaration.name
+-              })
++              list.reverse(failures)
++              |> list.find(fn(failure) { failure.name == declaration.name })
+               |> result.map(fn(failure) { failure.reason })
+               |> result.unwrap("owner was not installed")
+             session_lifecycle.Quarantined(reason)

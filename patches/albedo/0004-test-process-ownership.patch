@@ -1,0 +1,498 @@
+diff --git a/test.sh b/test.sh
+index 90dab2e..239bee9 100755
+--- a/test.sh
++++ b/test.sh
+@@ -43,7 +43,7 @@ log() {
+ suite() {
+   local name="$1"
+   shift
+-  "$@" >"$(log "$name")" 2>&1 &
++  python3 test/process_owner.py "$@" >"$(log "$name")" 2>&1 &
+   names+=("$name")
+   pids+=("$!")
+ }
+diff --git a/test/harness/process_owner_test.py b/test/harness/process_owner_test.py
+new file mode 100644
+index 0000000..dde76f2
+--- /dev/null
++++ b/test/harness/process_owner_test.py
+@@ -0,0 +1,265 @@
++"""The test launch owns orphan reaping; assertions still require actual absence."""
++
++import ctypes
++import os
++from pathlib import Path
++import subprocess
++import signal
++import sys
++import tempfile
++import textwrap
++import time
++import unittest
++
++TEST = Path(__file__).resolve().parents[1]
++OWNER = [sys.executable, str(TEST / "process_owner.py")]
++
++
++@unittest.skipUnless(sys.platform == "linux", "Linux child-subreaper ownership")
++class TestProcessOwner(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        libc = ctypes.CDLL(None, use_errno=True)
++        if libc.prctl(36, 1, 0, 0, 0):
++            error = ctypes.get_errno()
++            raise OSError(error, os.strerror(error))
++
++    def run_command(self, code):
++        process = subprocess.Popen(
++            [*OWNER, sys.executable, "-c", code],
++            stdout=subprocess.PIPE,
++            stderr=subprocess.PIPE,
++            text=True,
++        )
++        try:
++            stdout, stderr = process.communicate(timeout=10)
++        finally:
++            if process.poll() is None:
++                process.terminate()
++                process.wait(timeout=6)
++        with self.assertRaises(ChildProcessError):
++            os.waitpid(process.pid, os.WNOHANG)
++        return process.returncode, stdout, stderr
++
++    def reap_fixture(self, report):
++        if not report.exists():
++            return
++        pid = int(report.read_text())
++        try:
++            child, _ = os.waitpid(pid, os.WNOHANG)
++            if child == 0:
++                os.kill(pid, 9)
++                os.waitpid(pid, 0)
++        except ChildProcessError:
++            pass
++
++    def test_preserves_command_exit_status_and_output(self):
++        status, stdout, _ = self.run_command(
++            "print('command output'); raise SystemExit(23)"
++        )
++        self.assertEqual(status, 23)
++        self.assertEqual(stdout, "command output\n")
++
++    def test_keeps_the_commands_direct_child_status(self):
++        status, _, stderr = self.run_command(
++            "import subprocess, sys; child=subprocess.Popen([sys.executable, '-c', 'raise SystemExit(19)']); "
++            "raise SystemExit(0 if child.wait()==19 else 31)"
++        )
++        self.assertEqual(status, 0, stderr)
++
++    def test_reaps_after_the_main_command_is_killed(self):
++        with tempfile.TemporaryDirectory() as folder:
++            report = Path(folder) / "pid"
++            try:
++                status, _, _ = self.run_command(
++                    "import os, signal, subprocess; from pathlib import Path; "
++                    "child=subprocess.Popen(['sleep', '30'], start_new_session=True); "
++                    f"Path({str(report)!r}).write_text(str(child.pid)); "
++                    "os.kill(os.getpid(), signal.SIGKILL)"
++                )
++                self.assertEqual(status, 137)
++                with self.assertRaises(ProcessLookupError):
++                    os.kill(int(report.read_text()), 0)
++            finally:
++                self.reap_fixture(report)
++
++    def test_live_descendant_leak_fails_without_killing_an_unrelated_process(self):
++        outsider = subprocess.Popen(["sleep", "30"])
++        with tempfile.TemporaryDirectory() as folder:
++            report = Path(folder) / "pid"
++            try:
++                status, _, stderr = self.run_command(
++                    "import subprocess; from pathlib import Path; "
++                    "child=subprocess.Popen(['sleep', '30'], start_new_session=True); "
++                    f"Path({str(report)!r}).write_text(str(child.pid))"
++                )
++                self.assertEqual(status, 1, stderr)
++                self.assertIn("live descendants after command exit", stderr)
++                with self.assertRaises(ProcessLookupError):
++                    os.kill(int(report.read_text()), 0)
++                self.assertIsNone(outsider.poll())
++            finally:
++                self.reap_fixture(report)
++                outsider.terminate()
++                outsider.wait(timeout=5)
++
++    def test_live_orphan_is_not_signalled_while_the_command_runs(self):
++        with tempfile.TemporaryDirectory() as folder:
++            report = Path(folder) / "pid"
++            code = textwrap.dedent(f"""
++                import os, signal, time
++                from pathlib import Path
++                parent = os.fork()
++                if parent == 0:
++                    child = os.fork()
++                    if child == 0:
++                        os.execlp('sleep', 'sleep', '30')
++                    Path({str(report)!r}).write_text(str(child))
++                    os._exit(0)
++                os.waitpid(parent, 0)
++                child = int(Path({str(report)!r}).read_text())
++                time.sleep(0.2)
++                os.kill(child, 0)
++                os.kill(child, signal.SIGTERM)
++                for _ in range(50):
++                    try:
++                        os.kill(child, 0)
++                    except ProcessLookupError:
++                        raise SystemExit(0)
++                    time.sleep(0.02)
++                raise SystemExit(32)
++            """)
++            try:
++                status, _, stderr = self.run_command(code)
++                self.assertEqual(status, 0, stderr)
++            finally:
++                self.reap_fixture(report)
++
++    def test_sigterm_is_forwarded_and_the_owner_is_waited(self):
++        with tempfile.TemporaryDirectory() as folder:
++            report = Path(folder) / "pid"
++            code = f"import os,time; from pathlib import Path; Path({str(report)!r}).write_text(str(os.getpid())); time.sleep(30)"
++            process = subprocess.Popen([*OWNER, sys.executable, "-c", code])
++            try:
++                deadline = time.monotonic() + 3
++                while not report.exists():
++                    self.assertLess(time.monotonic(), deadline)
++                    time.sleep(0.01)
++                process.terminate()
++                self.assertEqual(process.wait(timeout=6), 143)
++                with self.assertRaises(ProcessLookupError):
++                    os.kill(int(report.read_text()), 0)
++                with self.assertRaises(ChildProcessError):
++                    os.waitpid(process.pid, os.WNOHANG)
++            finally:
++                if process.poll() is None:
++                    process.terminate()
++                    process.wait(timeout=6)
++                self.reap_fixture(report)
++
++    def test_stopped_child_is_not_mistaken_for_an_exited_child(self):
++        with tempfile.TemporaryDirectory() as folder:
++            report = Path(folder) / "pid"
++            code = f"import os,signal; from pathlib import Path; Path({str(report)!r}).write_text(str(os.getpid())); os.kill(os.getpid(),signal.SIGSTOP); raise SystemExit(19)"
++            process = subprocess.Popen([*OWNER, sys.executable, "-c", code])
++            try:
++                deadline = time.monotonic() + 3
++                while not report.exists():
++                    self.assertLess(time.monotonic(), deadline)
++                    time.sleep(0.01)
++                pid = int(report.read_text())
++                while (
++                    Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
++                    != "T"
++                ):
++                    self.assertLess(time.monotonic(), deadline)
++                    time.sleep(0.01)
++                self.assertIsNone(process.poll())
++                os.kill(pid, signal.SIGCONT)
++                self.assertEqual(process.wait(timeout=6), 19)
++            finally:
++                if process.poll() is None:
++                    process.terminate()
++                    process.wait(timeout=6)
++                self.reap_fixture(report)
++
++    def nested_leak(self, main_status):
++        with tempfile.TemporaryDirectory() as folder:
++            report = Path(folder) / "grandchild.pid"
++            middle = (
++                "import signal,subprocess,time; from pathlib import Path; "
++                "signal.signal(signal.SIGTERM,signal.SIG_IGN); "
++                "child=subprocess.Popen(['sleep','30'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
++                f"Path({str(report)!r}).write_text(str(child.pid)); time.sleep(30)"
++            )
++            main = textwrap.dedent(f"""
++                import subprocess,sys,time
++                from pathlib import Path
++                subprocess.Popen([sys.executable,'-c',{middle!r}],start_new_session=True)
++                while not Path({str(report)!r}).exists():
++                    time.sleep(0.01)
++                raise SystemExit({main_status})
++            """)
++            try:
++                status, _, stderr = self.run_command(main)
++                self.assertEqual(status, main_status or 1, stderr)
++                with self.assertRaises(ProcessLookupError):
++                    os.kill(int(report.read_text()), 0)
++            finally:
++                self.reap_fixture(report)
++
++    def test_cleanup_reaps_newly_adopted_term_resistant_descendants(self):
++        self.nested_leak(0)
++
++    def test_nested_cleanup_preserves_an_already_failed_command_status(self):
++        self.nested_leak(23)
++
++    def test_python_runner_reaps_orphans_before_the_test_finishes(self):
++        with tempfile.TemporaryDirectory() as folder:
++            report = Path(folder) / "orphan.pid"
++            fixture = Path(folder) / "fixture_test.py"
++            fixture.write_text(
++                textwrap.dedent(f"""
++                import os, time, unittest
++                from pathlib import Path
++                class Orphan(unittest.TestCase):
++                    def test_physical_absence(self):
++                        parent = os.fork()
++                        if parent == 0:
++                            child = os.fork()
++                            if child == 0:
++                                os._exit(0)
++                            Path({str(report)!r}).write_text(str(child))
++                            os.waitid(os.P_PID, child, os.WEXITED | os.WNOWAIT)
++                            os._exit(0)
++                        os.waitpid(parent, 0)
++                        child = int(Path({str(report)!r}).read_text())
++                        for _ in range(50):
++                            try:
++                                os.kill(child, 0)
++                            except ProcessLookupError:
++                                return
++                            time.sleep(0.02)
++                        self.fail('exited orphan remained in the process table')
++            """)
++            )
++            try:
++                result = subprocess.run(
++                    [sys.executable, str(TEST / "python_test_runner.py"), str(fixture)],
++                    capture_output=True,
++                    text=True,
++                    timeout=10,
++                )
++                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
++            finally:
++                # In RED this test owns the retained orphan. Reap it only after
++                # the inner physical-absence assertion has produced its result.
++                if report.exists():
++                    try:
++                        os.waitpid(int(report.read_text()), 0)
++                    except ChildProcessError:
++                        pass
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/test/process-owner.md b/test/process-owner.md
+new file mode 100644
+index 0000000..68c5e2c
+--- /dev/null
++++ b/test/process-owner.md
+@@ -0,0 +1,33 @@
++# Test process ownership
++
++Linux test commands run under `test/process_owner.py`, an ancestor child
++subreaper. It supplies ordinary orphan reaping even when a container's PID 1
++does not wait. The gate wraps each acceptance suite; the Python unittest runner
++also owns its direct invocations. For a native suite outside the gate, use:
++
++```sh
++python3 test/process_owner.py gleam test
++```
++
++The owner only waits for its own exited children while tests run. It does not
++change kernel detach/reconnect behavior, signal ladders, production liveness,
++assertions, permissions, sandboxing, namespaces, credentials, or host init.
++It cannot reap unrelated processes or zombies previously adopted by PID 1.
++
++The main command's exit code is retained; signal exits map to `128 + signal`.
++SIGINT/SIGTERM are forwarded to the owned command group. After command exit,
++children get a bounded two-second drain. Remaining live children are terminated
++and reaped, and a previously successful command is reported as a failure. A
++failed command remains failed. Interruption cleanup is also bounded. The caller
++must wait for this owner, as the gate and Python runner do.
++
++Non-Linux platforms exec the command directly and retain their normal init
++reaping. Linux subreaper setup failure is fatal; there is no fallback claiming
++these physical-absence assertions passed. A denied operation is an error.
++Success requires all of this owner's children to have been reaped. The owner
++cannot guarantee cleanup if it is itself killed with SIGKILL or if a child
++remains uninterruptible; those are failures, not passing cleanup verdicts.
++
++This fixes a test-environment dependency. Portable production-guaranteed
++physical absence without a functioning orphan reaper remains a separate
++process-lifecycle architecture requirement.
+diff --git a/test/process_owner.py b/test/process_owner.py
+new file mode 100644
+index 0000000..2763e0b
+--- /dev/null
++++ b/test/process_owner.py
+@@ -0,0 +1,145 @@
++"""Run a test command with explicit orphan ownership on Linux.
++
++    python3 test/process_owner.py <command> [args...]
++
++Only exited adopted children are reaped while the command runs. The command
++keeps its own direct-child statuses. A successful return proves that no child
++remains. This is test infrastructure, not a production kernel supervisor.
++"""
++
++import ctypes
++import os
++from pathlib import Path
++import signal
++import subprocess
++import sys
++import time
++
++DRAIN = 2.0  # post-command cleanup, not a test assertion's timeout
++TERM = 0.25
++KILL = 2.0
++POLL = 0.01
++
++
++def children() -> list[int]:
++    """Only our direct children, including newly adopted orphans."""
++    owned = []
++    for entry in Path("/proc").iterdir():
++        if not entry.name.isdigit():
++            continue
++        try:
++            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
++        except FileNotFoundError:
++            continue
++        if int(fields[1]) == os.getpid():
++            owned.append(int(entry.name))
++    return owned
++
++
++def signal_children(sig: int) -> None:
++    # A child's pid cannot be reused until this single-threaded owner reaps it.
++    for pid in children():
++        try:
++            os.kill(pid, sig)
++        except ProcessLookupError:
++            pass
++
++
++def run(command: list[str]) -> int:
++    if sys.platform != "linux":
++        os.execvp(command[0], command)
++    libc = ctypes.CDLL(None, use_errno=True)
++    libc.prctl.argtypes = [
++        ctypes.c_int,
++        ctypes.c_ulong,
++        ctypes.c_ulong,
++        ctypes.c_ulong,
++        ctypes.c_ulong,
++    ]
++    libc.prctl.restype = ctypes.c_int
++    if libc.prctl(36, 1, 0, 0, 0):  # PR_SET_CHILD_SUBREAPER; this owner only
++        error = ctypes.get_errno()
++        raise OSError(error, os.strerror(error))
++
++    pending = 0
++
++    def interrupted(sig, _frame):
++        nonlocal pending
++        pending = sig
++
++    previous = {
++        sig: signal.signal(sig, interrupted) for sig in (signal.SIGINT, signal.SIGTERM)
++    }
++    process = None
++    status = None
++    deadline = None
++    stage = 0
++    cancellation = False
++    cleanup_failed = False
++    try:
++        process = subprocess.Popen(command, start_new_session=True)
++        while True:
++            no_children = False
++            while True:
++                try:
++                    pid, raw = os.waitpid(-1, os.WNOHANG)
++                except ChildProcessError:
++                    no_children = True
++                    break
++                if pid == 0:
++                    break
++                if pid == process.pid:
++                    status = os.waitstatus_to_exitcode(raw)
++                    process.returncode = status
++            if status is not None and no_children:
++                return (status if status >= 0 else 128 - status) or int(cleanup_failed)
++            now = time.monotonic()
++            if pending:
++                cancellation = True
++                if status is None:
++                    try:
++                        os.killpg(process.pid, pending)
++                    except ProcessLookupError:
++                        pass
++                pending = 0
++                deadline = now + TERM
++            if status is not None and deadline is None:
++                deadline = now + DRAIN
++            if deadline is not None and now >= deadline:
++                if stage == 0:
++                    if not cancellation:
++                        cleanup_failed = True
++                        print(
++                            "test owner: live descendants after command exit; cleaning owned children",
++                            file=sys.stderr,
++                        )
++                    signal_children(signal.SIGTERM)
++                    deadline = now + TERM
++                    stage = 1
++                elif stage == 1:
++                    if status is None:
++                        try:
++                            os.killpg(process.pid, signal.SIGKILL)
++                        except ProcessLookupError:
++                            pass
++                    signal_children(signal.SIGKILL)
++                    deadline = now + KILL
++                    stage = 2
++                else:
++                    raise RuntimeError(
++                        f"test owner: cleanup unproved; owned children remain: {children()}"
++                    )
++            if stage == 2:
++                # Killing a parent can adopt another level of descendants.
++                # Keep the same absolute KILL deadline while ending those too.
++                signal_children(signal.SIGKILL)
++            time.sleep(POLL)
++    finally:
++        for sig, handler in previous.items():
++            signal.signal(sig, handler)
++
++
++if __name__ == "__main__":
++    if not sys.argv[1:]:
++        raise SystemExit("usage: process_owner.py <command> [args...]")
++    raise SystemExit(run(sys.argv[1:]))
+diff --git a/test/python_test_runner.py b/test/python_test_runner.py
+index 6c2ba3f..fcd569c 100644
+--- a/test/python_test_runner.py
++++ b/test/python_test_runner.py
+@@ -35,4 +35,18 @@ def main():
+
+
+ if __name__ == "__main__":
+-    sys.exit(main())
++    from process_owner import run
++
++    # Import main in the owned child without recursively entering this launcher.
++    entry = "import sys; sys.path.insert(0, sys.argv.pop(1)); from python_test_runner import main; sys.exit(main())"
++    sys.exit(
++        run(
++            [
++                sys.executable,
++                "-c",
++                entry,
++                str(Path(__file__).resolve().parent),
++                *sys.argv[1:],
++            ]
++        )
++    )

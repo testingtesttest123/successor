@@ -1,0 +1,1365 @@
+diff --git a/robot-docs/cache-warming.md b/robot-docs/cache-warming.md
+--- a/robot-docs/cache-warming.md
++++ b/robot-docs/cache-warming.md
+@@ -72,3 +72,9 @@
+ ```
+ 
+ when unset or malformed, `minCachedTokens` is 1024. the cache table itself (its layers, refresh, local override) is documented in robot-docs/cache-ttl.md.
++
++
++Restart restoration skips compositions with dynamic request contributors when
++the old capture is unavailable. Re-reading current callbacks would fabricate a
++past request. Static-only restoration retains its existing prefix comparison;
++ordinary in-memory warming repeats the exact saved sent request.
+diff --git a/robot-docs/compaction.md b/robot-docs/compaction.md
+--- a/robot-docs/compaction.md
++++ b/robot-docs/compaction.md
+@@ -131,3 +131,23 @@
+ ## inspect
+ 
+ `/context` shows the prepared request: its sections in order, their sources, and compaction status. After a provider completes that request, it shows the provider's measured input tokens (and cached tokens when reported); until then, or when usage is omitted, the strategy's local estimate is shown instead. The JSON retains `estimated_input_tokens` separately from `provider_input_tokens` so neither is mistaken for the other. A manual `/compact` sends no ordinary provider request, so its snapshot has only an estimate. See [the context inspector](context.md).
++
++## Settings captured per preparation
++
++A strategy resolves once to `Resolved(capacity, project, compact)` before request
++context capture. Its closures retain validated settings across project, compact
++and project. Genuine capacity preserves each strategy's precedence: rolling and
++LCM configuration before catalog; visual snapcompact catalog before its setting;
++text-only snapcompact captures rolling settings once. A forced synthetic window
++remains internal to compaction and is unknown to contributors/inspection.
++
++Rendered mandatory dynamic blocks are reserved with static instructions and
++tools; they are not inserted into raw history. Optional blocks cannot force
++history eviction or an indivisible-tail refusal: final admission gives them the
++space remaining after projected history. Initial impossible optionals are
++omitted whole from the end, leaving mandatory history allowance. After pin settlement
++the host prices the actual assembled request with the existing local estimator,
++removes further optional blocks whole, and refuses mandatory overflow before
++foreground provider entry, including a request with no dynamic blocks. A stock
++summary call may already have occurred when overflow is only knowable after
++compaction releases a pin; initially provable overflow makes no summary call.
+diff --git a/robot-docs/context.md b/robot-docs/context.md
+--- a/robot-docs/context.md
++++ b/robot-docs/context.md
+@@ -29,3 +29,25 @@
+ The `context: 1` server capability indicates support. Invalid section or page identifiers return an error without changing session state.
+ 
+ The skills and instructions management catalog at `GET /sessions/{session_id}/catalog` is a fresh discovery view, separate from this prepared request snapshot. A candidate can appear there before a session reload makes it available at runtime; reloads can also update live commands while the cached system prompt remains pinned until compaction.
++
++## Request contribution inspection
++
++Saved request snapshots include typed `request_context` capture facts: opaque
++source IDs and diagnostics, included and omitted whole blocks, genuine capacity
++and provenance, initial static cost, final estimate and fit. Content pages use
++the exact assembled request's instructions/history/tools. Retry and inspection
++reuse the capture; a subsequent request captures the next live revision. The
++final estimator prices assembled content once, rather than adding its dynamic
++subtotal twice. Estimates are local byte-based approximations, not tokenizer
++guarantees. Unknown capacity stays unknown even for forced compaction.
++
++Preparation refusals save an explicitly failed capture inspection before pin
++settlement or compaction notifications. Successful earlier contributors survive
++a later callback/strategy failure. The generic refusal reason is capped at 2048
++Unicode scalars; source diagnostics retain the callback's bounded semantic
++contract. This failed attempt does not represent a sent provider request.
++
++The loop captures the accepted source query before image fitting appends
++request-only notes, carries it through tool continuations, and refreshes it from
++new steering. The preparation API receives that source query explicitly and
++enforces the same UTF-8 byte cap. It does not infer source actors from prose.
+diff --git a/robot-docs/extensions.md b/robot-docs/extensions.md
+--- a/robot-docs/extensions.md
++++ b/robot-docs/extensions.md
+@@ -284,3 +284,19 @@
+ `notes` is a layer over whichever strategy is active, not a strategy: at every compaction the model rewrites its own notes, and they lead every later request. it is enabled by default and needs no strategy of its own. see [compaction](compaction.md).
+ 
+ a `CleanPlugin` is how an extension that keeps rows per session deletes them with the session. every installed extension's runs inside the delete's transaction, enabled or not, before the session row goes, so an extension owns its tables and the daemon's delete lists only its own. the exception is `cells`, which the daemon deletes itself because it feeds the image reference count released in the same transaction.
++
++## Captured request context
++
++`RequestContextPlugin(prepare, required)` contributes bounded read-only native
++context once per actual request preparation. It receives the store/session, fully
++active bundle names, a recent user/steering query capped at 4096 UTF-8 bytes, and
++the genuine remaining window after static instructions and tool schemas. This is
++a trusted native semantic contract, not a security sandbox. The extension owns
++its coherent source revision and returns an opaque snapshot ID, whole mandatory
++or optional instruction/data blocks and diagnostics. Identity and memory policy
++do not belong to the host interface.
++
++The composition collects callbacks only from complete active bundles. A required
++requested bundle that failed loading refuses preparation. Any active callback
++error or exception stops preparation. Admission and capability inspection do not
++invoke callbacks. Dynamic data is never durable history or raw compaction input.
+diff --git a/src/albedo/daemon/context_snapshot.gleam b/src/albedo/daemon/context_snapshot.gleam
+--- a/src/albedo/daemon/context_snapshot.gleam
++++ b/src/albedo/daemon/context_snapshot.gleam
+@@ -4,6 +4,7 @@
+ import albedo/daemon/message_content as events
+ import albedo/daemon/usage
+ import albedo/harness/compaction as context_size
++import albedo/harness/request_context
+ import albedo/openai_api/request as provider_request
+ import albedo/openai_api/types
+ import gleam/int
+@@ -87,6 +88,7 @@
+     compaction: Compaction,
+     sections: List(Section),
+     retained_tool_calls: List(String),
++    request_context: Option(request_context.Inspection),
+   )
+ }
+ 
+@@ -218,6 +220,7 @@
+     compaction,
+     sections,
+     [],
++    None,
+   )
+ }
+ 
+@@ -273,6 +276,93 @@
+   }
+ }
+ 
++/// Captured facts only: neither pages nor inspection invoke contributors.
++pub fn with_request_context(
++  snapshot: Snapshot,
++  final: request_context.Final,
++) -> Snapshot {
++  case snapshot {
++    Pending(_) -> snapshot
++    Ready(..) ->
++      Ready(
++        ..snapshot,
++        context_window_tokens: final.captured.budget.capacity_tokens,
++        compaction: Compaction(
++          ..snapshot.compaction,
++          estimated_input_tokens: Some(final.estimated_tokens),
++          estimate_method: Some(
++            "local byte-based estimate of assembled request; not provider token usage",
++          ),
++        ),
++        request_context: Some(request_context.Inspection(
++          final.captured,
++          final.estimated_tokens,
++          final.fits,
++          final.failure,
++        )),
++      )
++  }
++}
++
++pub fn request_context_json(
++  inspected: request_context.Inspection,
++) -> json.Json {
++  let kind = fn(kind) {
++    case kind {
++      request_context.Instructions -> json.string("instructions")
++      request_context.Data -> json.string("data")
++    }
++  }
++  json.object([
++    #(
++      "capacity_tokens",
++      json.nullable(inspected.captured.budget.capacity_tokens, json.int),
++    ),
++    #(
++      "capacity_source",
++      json.nullable(inspected.captured.budget.capacity_source, json.string),
++    ),
++    #("static_tokens", json.int(inspected.captured.budget.static_tokens)),
++    #("estimated_tokens", json.int(inspected.estimated_tokens)),
++    #("fits", json.bool(inspected.fits)),
++    #("failure", json.nullable(inspected.failure, json.string)),
++    #(
++      "captures",
++      json.array(inspected.captured.contributions, fn(captured) {
++        json.object([
++          #("owner", json.string(captured.owner)),
++          #("snapshot_id", json.string(captured.value.snapshot_id)),
++          #("diagnostics", json.array(captured.value.diagnostics, json.string)),
++        ])
++      }),
++    ),
++    #(
++      "included",
++      json.array(inspected.captured.blocks, fn(selected) {
++        json.object([
++          #("owner", json.string(selected.owner)),
++          #("snapshot_id", json.string(selected.snapshot_id)),
++          #("kind", kind(selected.kind)),
++          #("name", json.string(selected.block.name)),
++          #("mandatory", json.bool(selected.block.mandatory)),
++        ])
++      }),
++    ),
++    #(
++      "omitted",
++      json.array(inspected.captured.omissions, fn(omission) {
++        json.object([
++          #("owner", json.string(omission.owner)),
++          #("snapshot_id", json.string(omission.snapshot_id)),
++          #("kind", kind(omission.kind)),
++          #("name", json.string(omission.name)),
++          #("reason", json.string(omission.reason)),
++        ])
++      }),
++    ),
++  ])
++}
++
+ fn tools_section(
+   protocol: types.Protocol,
+   tools: List(types.Tool),
+@@ -481,6 +571,7 @@
+       compacted,
+       sections,
+       _,
++      captured,
+     ) ->
+       // Optional detail fields lead the wire order; absent ones are omitted.
+       json.object(
+@@ -494,6 +585,7 @@
+             #("snapshot_id", json.string(id)),
+             #("model", json.string(model)),
+             #("compaction", compaction_json(compacted)),
++            #("request_context", json.nullable(captured, request_context_json)),
+             #("sections", json.array(sections, section_json)),
+           ],
+         ]),
+diff --git a/src/albedo/daemon/http_wire.gleam b/src/albedo/daemon/http_wire.gleam
+--- a/src/albedo/daemon/http_wire.gleam
++++ b/src/albedo/daemon/http_wire.gleam
+@@ -428,6 +428,7 @@
+       compacted,
+       sections,
+       _,
++      captured,
+     ) ->
+       json.object([
+         #("state", json.string("ready")),
+@@ -438,6 +439,10 @@
+         #("protocol", json.nullable(protocol, json.string)),
+         #("context_window_tokens", json.nullable(window, json.int)),
+         #("compaction", compaction(compacted)),
++        #(
++          "request_context",
++          json.nullable(captured, context_snapshot.request_context_json),
++        ),
+         #(
+           "sections",
+           json.array(sections, fn(section) {
+diff --git a/src/albedo/daemon/session_run.gleam b/src/albedo/daemon/session_run.gleam
+--- a/src/albedo/daemon/session_run.gleam
++++ b/src/albedo/daemon/session_run.gleam
+@@ -367,7 +367,7 @@
+       tool_progress_finish_fn(owner, run_id, messages),
+       commit_fn(owner, run_id, messages, waiting: 10_000),
+       fits_fn(owner, run_id, messages, waiting: 10_000),
+-      fn(request, observation, compacted) {
++      fn(request, observation, compacted, captured) {
+         let snapshot =
+           context_snapshot.from_request(
+             Some(usage.now()),
+@@ -377,6 +377,7 @@
+             request,
+             observation,
+           )
++          |> context_snapshot.with_request_context(captured)
+         // Inspection and post-compaction cleanup must not kill the turn if
+         // the session actor stalls; leave the message queued after the bound.
+         report(owner, messages.context(run_id, snapshot, compacted, _))
+diff --git a/src/albedo/harness/compaction.gleam b/src/albedo/harness/compaction.gleam
+--- a/src/albedo/harness/compaction.gleam
++++ b/src/albedo/harness/compaction.gleam
+@@ -63,7 +63,11 @@
+ 
+ /// Whether the model reads image input: `None` when no catalog says.
+ pub fn reads_images(context: Context) -> Option(Bool) {
+-  case context.reader {
++  reader_images(context.reader)
++}
++
++pub fn reader_images(reader: Option(Reader)) -> Option(Bool) {
++  case reader {
+     Some(Reader(_, [_, ..] as modalities)) ->
+       Some(list.contains(modalities, "image"))
+     _ -> None
+@@ -321,6 +325,14 @@
+ pub type Strategy {
+   Strategy(
+     name: String,
++    /// Resolve genuine capacity and validated settings once per preparation.
++    resolve: fn(Option(Capacity), Option(Reader)) -> Result(Resolved, String),
++  )
++}
++
++pub type Resolved {
++  Resolved(
++    capacity: Option(Capacity),
+     /// The request under the saved state. It never writes state or calls a
+     /// model, so a request can be inspected or rebuilt without changing it.
+     project: fn(Context, List(types.Input)) -> Result(View, String),
+@@ -334,7 +346,7 @@
+ /// first when forced or due. A request compacts at most once, so the
+ /// projection after a compaction is sent even if it is still due.
+ pub fn prepare(
+-  strategy: Strategy,
++  strategy: Resolved,
+   context: Context,
+   history: List(types.Input),
+ ) -> Result(Prepared, String) {
+@@ -360,7 +372,7 @@
+ /// compacting even when due: building it changes nothing, so it can stand in
+ /// for a request sent earlier.
+ pub fn project(
+-  strategy: Strategy,
++  strategy: Resolved,
+   context: Context,
+   history: List(types.Input),
+ ) -> Result(Prepared, String) {
+diff --git a/src/albedo/harness/extension.gleam b/src/albedo/harness/extension.gleam
+--- a/src/albedo/harness/extension.gleam
++++ b/src/albedo/harness/extension.gleam
+@@ -11,6 +11,7 @@
+ import albedo/harness/oauth
+ import albedo/harness/page
+ import albedo/harness/protect
++import albedo/harness/request_context
+ import albedo/harness/session_lifecycle
+ import albedo/harness/web_search
+ import albedo/openai_api/types
+@@ -277,6 +278,12 @@
+ pub type Plugin {
+   /// Durable creation hooks, independent of per-session enablement.
+   SessionLifecyclePlugin(contribution: session_lifecycle.Contribution)
++  /// Bounded read-only capture, invoked once for each actual preparation.
++  RequestContextPlugin(
++    prepare: fn(request_context.Input) ->
++      Result(request_context.Contribution, String),
++    required: Bool,
++  )
+   ContextPlugin(load: fn(String) -> Result(String, String))
+   ToolPlugin(
+     instructions: String,
+diff --git a/src/albedo/harness/extension/composition.gleam b/src/albedo/harness/extension/composition.gleam
+--- a/src/albedo/harness/extension/composition.gleam
++++ b/src/albedo/harness/extension/composition.gleam
+@@ -7,6 +7,7 @@
+ import albedo/harness/command
+ import albedo/harness/extension
+ import albedo/harness/protect
++import albedo/harness/request_context
+ import gleam/io
+ import gleam/list
+ import gleam/option
+@@ -228,6 +229,60 @@
+   composition.extensions
+ }
+ 
++/// Captures belong only to fully active bundles. A required requested bundle
++/// that failed static/managed loading refuses preparation before any callback.
++pub fn request_contributors(
++  composition: Composition,
++) -> Result(
++  List(
++    #(
++      String,
++      fn(request_context.Input) -> Result(request_context.Contribution, String),
++    ),
++  ),
++  String,
++) {
++  let active = list.map(composition.extensions, fn(item) { item.name })
++  use _ <- result.try(
++    list.try_each(composition.requested, fn(item) {
++      let required =
++        list.any(item.plugins, fn(plugin) {
++          case plugin {
++            extension.RequestContextPlugin(_, True) -> True
++            _ -> False
++          }
++        })
++      case required && !list.contains(active, item.name) {
++        True ->
++          Error("required request context " <> item.name <> " is unavailable")
++        False -> Ok(Nil)
++      }
++    }),
++  )
++  Ok(
++    list.flat_map(composition.extensions, fn(item) {
++      list.filter_map(item.plugins, fn(plugin) {
++        case plugin {
++          extension.RequestContextPlugin(callback, _) ->
++            Ok(#(item.name, callback))
++          _ -> Error(Nil)
++        }
++      })
++    }),
++  )
++}
++
++pub fn has_request_context(composition: Composition) -> Bool {
++  list.any(composition.requested, fn(item) {
++    list.any(item.plugins, fn(plugin) {
++      case plugin {
++        extension.RequestContextPlugin(..) -> True
++        _ -> False
++      }
++    })
++  })
++}
++
+ /// Nonempty context blocks, labelled by the extension that supplied them.
+ pub fn context(composition: Composition) -> List(#(String, String)) {
+   contributions(composition)
+diff --git a/src/albedo/harness/extension/selection.gleam b/src/albedo/harness/extension/selection.gleam
+--- a/src/albedo/harness/extension/selection.gleam
++++ b/src/albedo/harness/extension/selection.gleam
+@@ -529,6 +529,7 @@
+         list.map(ext.plugins, fn(plugin) {
+           case plugin {
+             extension.ContextPlugin(_) -> "context"
++            extension.RequestContextPlugin(..) -> "request_context"
+             extension.SessionLifecyclePlugin(_) -> "session_lifecycle"
+             extension.ToolPlugin(_, _, _, _) -> "tool"
+             extension.ManagedPlugin(_) -> "managed"
+diff --git a/src/albedo/harness/extensions/lcm/extension.gleam b/src/albedo/harness/extensions/lcm/extension.gleam
+--- a/src/albedo/harness/extensions/lcm/extension.gleam
++++ b/src/albedo/harness/extensions/lcm/extension.gleam
+@@ -57,17 +57,14 @@
+     ["lcm-memory"],
+     [
+       harness_extension.CompactionPlugin(
+-        compaction.Strategy(
+-          "lcm",
+-          fn(context, history) {
+-            use config <- result.try(resolve())
+-            project(config, context, history)
+-          },
+-          fn(context, history) {
+-            use config <- result.try(resolve())
+-            compact(config, context, history)
+-          },
+-        ),
++        compaction.Strategy("lcm", fn(catalog, _) {
++          use config <- result.map(resolve())
++          compaction.Resolved(
++            rolling.configured_capacity(config.context_window_tokens, catalog),
++            fn(context, history) { project(config, context, history) },
++            fn(context, history) { compact(config, context, history) },
++          )
++        }),
+       ),
+       harness_extension.CleanPlugin(graph.forget_session),
+     ],
+diff --git a/src/albedo/harness/extensions/rolling/extension.gleam b/src/albedo/harness/extensions/rolling/extension.gleam
+--- a/src/albedo/harness/extensions/rolling/extension.gleam
++++ b/src/albedo/harness/extensions/rolling/extension.gleam
+@@ -113,17 +113,14 @@
+ 
+ /// The strategy under the settings `resolve` answers per request.
+ fn strategy(resolve: fn() -> Result(Config, String)) -> compaction.Strategy {
+-  compaction.Strategy(
+-    "rolling",
+-    fn(context, history) {
+-      use config <- result.try(resolve())
+-      project(config, context, history)
+-    },
+-    fn(context, history) {
+-      use config <- result.try(resolve())
+-      compact(config, context, history)
+-    },
+-  )
++  compaction.Strategy("rolling", fn(catalog, _) {
++    use config <- result.map(resolve())
++    compaction.Resolved(
++      configured_capacity(config.context_window_tokens, catalog),
++      fn(context, history) { project(config, context, history) },
++      fn(context, history) { compact(config, context, history) },
++    )
++  })
+ }
+ 
+ /// The saved summary, recap, and tail this history still matches, or the
+@@ -312,6 +309,17 @@
+ /// The window a strategy compacts against. Configuration overrides a
+ /// catalog; neither one is guessed from the model id. A forced compaction
+ /// without either still compacts, against an estimate of the request.
++pub fn configured_capacity(
++  configured: Option(Int),
++  catalog: Option(compaction.Capacity),
++) -> Option(compaction.Capacity) {
++  case configured {
++    Some(tokens) ->
++      Some(compaction.Capacity(tokens, "configured contextWindowTokens"))
++    None -> catalog
++  }
++}
++
+ pub fn effective_window(
+   context_window_tokens: Option(Int),
+   context: compaction.Context,
+diff --git a/src/albedo/harness/extensions/snapcompact/extension.gleam b/src/albedo/harness/extensions/snapcompact/extension.gleam
+--- a/src/albedo/harness/extensions/snapcompact/extension.gleam
++++ b/src/albedo/harness/extensions/snapcompact/extension.gleam
+@@ -301,23 +301,32 @@
+ fn strategy_with(
+   resolve: fn() -> Result(Config, String),
+ ) -> compaction.Strategy {
+-  compaction.Strategy(
+-    "snapcompact",
+-    fn(context, history) {
+-      use valid <- result.try(result.try(resolve(), validate_config))
+-      case compaction.reads_images(context) {
+-        Some(False) -> text_project(context, history)
+-        _ -> visual_project(valid, context, history)
++  compaction.Strategy("snapcompact", fn(catalog, reader) {
++    use valid <- result.try(result.try(resolve(), validate_config))
++    case compaction.reader_images(reader) {
++      Some(False) -> {
++        use fallback <- result.map(rolling.with_settings().resolve(
++          catalog,
++          reader,
++        ))
++        compaction.Resolved(..fallback, project: fn(context, history) {
++          use view <- result.map(fallback.project(context, history))
++          text_view(view)
++        })
+       }
+-    },
+-    fn(context, history) {
+-      use valid <- result.try(result.try(resolve(), validate_config))
+-      case compaction.reads_images(context) {
+-        Some(False) -> rolling.with_settings().compact(context, history)
+-        _ -> visual_compact(valid, context, history)
+-      }
+-    },
+-  )
++      _ ->
++        Ok(
++          compaction.Resolved(
++            option.or(
++              catalog,
++              rolling.configured_capacity(valid.context_window_tokens, None),
++            ),
++            fn(context, history) { visual_project(valid, context, history) },
++            fn(context, history) { visual_compact(valid, context, history) },
++          ),
++        )
++    }
++  })
+ }
+ 
+ /// The text fallback keeps its summary in rolling's tables.
+@@ -338,23 +347,17 @@
+ 
+ /// A model without image input cannot read frames: rolling's text summary
+ /// stands in, and the frame archive waits for a model that reads images.
+-fn text_project(
+-  context: compaction.Context,
+-  history: List(types.Input),
+-) -> Result(compaction.View, String) {
+-  use view <- result.try(rolling.with_settings().project(context, history))
+-  Ok(
+-    compaction.View(
+-      ..view,
+-      observation: option.map(view.observation, fn(observed) {
+-        compaction.Observation(
+-          ..observed,
+-          strategy: "snapcompact",
+-          source: "model reads no image input; rolling text compaction: "
+-            <> observed.source,
+-        )
+-      }),
+-    ),
++fn text_view(view: compaction.View) -> compaction.View {
++  compaction.View(
++    ..view,
++    observation: option.map(view.observation, fn(observed) {
++      compaction.Observation(
++        ..observed,
++        strategy: "snapcompact",
++        source: "model reads no image input; rolling text compaction: "
++          <> observed.source,
++      )
++    }),
+   )
+ }
+ 
+diff --git a/src/albedo/harness/loop.gleam b/src/albedo/harness/loop.gleam
+--- a/src/albedo/harness/loop.gleam
++++ b/src/albedo/harness/loop.gleam
+@@ -15,6 +15,7 @@
+ import albedo/harness/compaction
+ import albedo/harness/extension
+ import albedo/harness/extensions/python/cells as journal
++import albedo/harness/request_context
+ import albedo/harness/runtime
+ import albedo/openai_api/types
+ import gleam/dynamic/decode
+@@ -49,8 +50,12 @@
+       Result(#(Int, Option(Int)), String),
+     /// Appends image fit rows ahead of the request that needs them.
+     commit_fits: fn(List(transcript.ImageFit)) -> Result(Nil, String),
+-    record_context: fn(types.Request, Option(compaction.Observation), Bool) ->
+-      Nil,
++    record_context: fn(
++      types.Request,
++      Option(compaction.Observation),
++      Bool,
++      request_context.Final,
++    ) -> Nil,
+     record_usage: fn(usage.Metadata) -> Result(Nil, String),
+     drain_steering: fn() -> Result(List(types.Input), String),
+     /// Reports the pin's compaction baseline (`Some`) or that compaction
+@@ -122,10 +127,29 @@
+   inputs: List(types.Input),
+   step: Int,
+ ) -> Result(Nil, String) {
++  run_request(
++    state,
++    id,
++    inputs,
++    step,
++    request_context.query(list.reverse(inputs)),
++  )
++}
++
++/// Keep the accepted query separate from request-only image-fit notes, including
++/// across tool continuations. New steering supplies the next query basis.
++fn run_request(
++  state: Loop,
++  id: String,
++  inputs: List(types.Input),
++  step: Int,
++  source_query: String,
++) -> Result(Nil, String) {
+   use _ <- result.try(checkpoint(state))
+   use inputs <- result.try(fit_history(state, inputs))
+   let original = list.reverse(inputs)
+-  use prepared <- result.try(prepare(state, original, False))
++  use preparation <- result.try(prepare(state, original, False, source_query))
++  let prepared = preparation.history
+   let #(state, history) = settle_pin(state, original, prepared.inputs)
+   case state.pin {
+     Unpinned ->
+@@ -135,8 +159,16 @@
+     Pinned(..) -> Nil
+   }
+   let current_instructions = request_instructions(state)
+-  let request = request(state, current_instructions, history)
+-  state.record_context(request, prepared.observation, prepared.compacted)
++  let final =
++    request_context.reconcile(
++      request(state, current_instructions, history),
++      preparation.captured,
++      runtime.request_estimate,
++      0,
++    )
++  let request = final.request
++  state.record_context(request, prepared.observation, prepared.compacted, final)
++  use _ <- result.try(ready(final))
+   use #(row, turn, sent, attempt) <- result.try(
+     call(
+       call_context(state),
+@@ -205,7 +237,14 @@
+           use steering <- result.try(state.drain_steering())
+           case steering {
+             [] -> Ok(Nil)
+-            _ -> run(state, id, unshift(inputs, [replay, steering]), step + 1)
++            _ ->
++              run_request(
++                state,
++                id,
++                unshift(inputs, [replay, steering]),
++                step + 1,
++                continued_query(source_query, steering),
++              )
+           }
+         }
+         _ -> Error(stopped_message(turn.finish, turn.output))
+@@ -224,7 +263,13 @@
+       )
+       use steering <- result.try(state.drain_steering())
+       use _ <- result.try(state.commit([], conversation.Model, None))
+-      run(state, id, unshift(inputs, [replay, results, steering]), step + 1)
++      run_request(
++        state,
++        id,
++        unshift(inputs, [replay, results, steering]),
++        step + 1,
++        continued_query(source_query, steering),
++      )
+     }
+   }
+ }
+@@ -258,7 +303,13 @@
+   use _ <- result.try(checkpoint(state))
+   // `inputs` accumulates newest-first; strategies read chronological history.
+   let original = list.reverse(inputs)
+-  use prepared <- result.try(prepare(state, original, True))
++  use preparation <- result.try(prepare(
++    state,
++    original,
++    True,
++    request_context.query(original),
++  ))
++  let prepared = preparation.history
+   let history = prepared.inputs
+   // The projection keeps a verbatim tail, so everything before the shared
+   // suffix is what the strategy's replacement stands in for.
+@@ -292,15 +343,23 @@
+     False -> request_instructions(state)
+   }
+   // A forced compaction keeps the default options; an ordinary turn sets effort.
++  let final =
++    request_context.reconcile(
++      types.Request(
++        ..request(state, instructions, history),
++        options: types.defaults,
++      ),
++      preparation.captured,
++      runtime.request_estimate,
++      0,
++    )
+   state.record_context(
+-    types.Request(
+-      ..request(state, instructions, history),
+-      options: types.defaults,
+-    ),
++    final.request,
+     prepared.observation,
+     prepared.compacted,
+-  )
+-  Ok(Nil)
++    final,
++  )
++  ready(final)
+ }
+ 
+ /// One background call: `request` sent exactly as given — never rebuilt
+@@ -415,8 +474,9 @@
+   state: Loop,
+   original: List(types.Input),
+   force: Bool,
+-) -> Result(compaction.Prepared, String) {
+-  runtime.prepare_view_scoped(
++  source_query: String,
++) -> Result(runtime.PreparedRequest, String) {
++  runtime.prepare_request_scoped(
+     state.host,
+     state.kernel,
+     state.model,
+@@ -427,6 +487,44 @@
+     original,
+     force,
+     state.upstream.images,
++    source_query: source_query,
++  )
++  |> result.map_error(fn(failure) {
++    let final =
++      request_context.reconcile(
++        request(state, request_instructions(state), original),
++        failure.captured,
++        runtime.request_estimate,
++        0,
++      )
++    let final =
++      request_context.Final(..final, fits: False, failure: Some(failure.reason))
++    state.record_context(final.request, None, False, final)
++    failure.reason
++  })
++}
++
++fn continued_query(current: String, steering: List(types.Input)) -> String {
++  case
++    list.any(steering, fn(input) {
++      case input {
++        types.User(_) | types.UserImage(..) -> True
++        _ -> False
++      }
++    })
++  {
++    True -> request_context.query(steering)
++    False -> current
++  }
++}
++
++fn ready(final: request_context.Final) -> Result(Nil, String) {
++  compaction.require(
++    final.fits,
++    option.unwrap(
++      final.failure,
++      "mandatory request content exceeds known context window",
++    ),
+   )
+ }
+ 
+@@ -784,6 +882,10 @@
+   upstream: extension.Upstream,
+   original: List(types.Input),
+ ) -> Result(#(types.Request, requests.Prefix), String) {
++  use _ <- result.try(compaction.require(
++    !runtime.has_request_context(kernel),
++    "past dynamic request capture is unavailable; skip restart restoration",
++  ))
+   use prepared <- result.map(runtime.project_view_scoped(
+     host,
+     kernel,
+diff --git a/src/albedo/harness/request_context.gleam b/src/albedo/harness/request_context.gleam
+new file mode 100644
+--- /dev/null
++++ b/src/albedo/harness/request_context.gleam
+@@ -0,0 +1,272 @@
++//// Captured native request contributions. Callbacks promise bounded read-only
++//// work; this interface is a semantic contract, not a closure sandbox.
++
++import albedo/daemon/store
++import albedo/harness/protect
++import albedo/openai_api/types
++import albedo/text_scalars
++import gleam/bit_array
++import gleam/list
++import gleam/option.{type Option, None, Some}
++import gleam/result
++import gleam/string
++
++pub type Budget {
++  Budget(
++    capacity_tokens: Option(Int),
++    capacity_source: Option(String),
++    static_tokens: Int,
++    remaining_tokens: Option(Int),
++  )
++}
++
++pub type Input {
++  Input(
++    store: store.Store,
++    session: String,
++    loaded: List(String),
++    query: String,
++    budget: Budget,
++  )
++}
++
++pub type Block {
++  Block(name: String, content: String, mandatory: Bool)
++}
++
++pub type Contribution {
++  Contribution(
++    snapshot_id: String,
++    instructions: List(Block),
++    data: List(Block),
++    diagnostics: List(String),
++  )
++}
++
++pub type Captured {
++  Captured(owner: String, value: Contribution)
++}
++
++pub type Kind {
++  Instructions
++  Data
++}
++
++pub type Selected {
++  Selected(owner: String, snapshot_id: String, kind: Kind, block: Block)
++}
++
++pub type Omission {
++  Omission(
++    owner: String,
++    snapshot_id: String,
++    kind: Kind,
++    name: String,
++    reason: String,
++  )
++}
++
++pub type Prepared {
++  Prepared(
++    contributions: List(Captured),
++    blocks: List(Selected),
++    omissions: List(Omission),
++    budget: Budget,
++  )
++}
++
++pub type Failure {
++  Failure(reason: String, captured: Prepared)
++}
++
++pub fn failure(reason: String, captured: Prepared) -> Failure {
++  Failure(text_scalars.take(reason, 2048), captured)
++}
++
++pub type Inspection {
++  Inspection(
++    captured: Prepared,
++    estimated_tokens: Int,
++    fits: Bool,
++    failure: Option(String),
++  )
++}
++
++pub type Final {
++  Final(
++    request: types.Request,
++    captured: Prepared,
++    estimated_tokens: Int,
++    fits: Bool,
++    failure: Option(String),
++  )
++}
++
++pub fn prepare(
++  callbacks: List(#(String, fn(Input) -> Result(Contribution, String))),
++  input: Input,
++) -> Result(Prepared, Failure) {
++  capture(callbacks, input, Prepared([], [], [], input.budget))
++}
++
++fn capture(
++  callbacks: List(#(String, fn(Input) -> Result(Contribution, String))),
++  input: Input,
++  prepared: Prepared,
++) -> Result(Prepared, Failure) {
++  case callbacks {
++    [] -> Ok(prepared)
++    [callback, ..rest] -> {
++      use value <- result.try(
++        protect.guarded(fn() { callback.1(input) })
++        |> result.map_error(fn(error) {
++          failure("request context " <> callback.0 <> ": " <> error, prepared)
++        }),
++      )
++      let selected = fn(kind, block) {
++        Selected(callback.0, value.snapshot_id, kind, block)
++      }
++      let blocks =
++        list.append(
++          list.map(value.instructions, selected(Instructions, _)),
++          list.map(value.data, selected(Data, _)),
++        )
++      capture(
++        rest,
++        input,
++        Prepared(
++          ..prepared,
++          contributions: list.append(prepared.contributions, [
++            Captured(callback.0, value),
++          ]),
++          blocks: list.append(prepared.blocks, blocks),
++        ),
++      )
++    }
++  }
++}
++
++/// Mandatory context reserves compaction space; optional context is admitted
++/// against the final projected history, so it cannot force avoidable eviction.
++pub fn mandatory(prepared: Prepared) -> Prepared {
++  Prepared(
++    ..prepared,
++    blocks: list.filter(prepared.blocks, fn(selected) {
++      selected.block.mandatory
++    }),
++  )
++}
++
++/// Recent user/steering text, never a complete transcript; UTF-8 scalars stay
++/// whole even when one crosses the byte boundary.
++pub fn query(history: List(types.Input)) -> String {
++  let text =
++    history
++    |> list.reverse
++    |> list.find_map(fn(input) {
++      case input {
++        types.User(text) | types.UserImage(text, _) -> Ok(text)
++        _ -> Error(Nil)
++      }
++    })
++    |> result.unwrap("")
++  let size = bounded_size(<<text:utf8>>, 4096, 0)
++  let assert <<prefix:bytes-size(size), _:bytes>> = <<text:utf8>>
++  bit_array.to_string(prefix) |> result.unwrap("")
++}
++
++fn bounded_size(bytes: BitArray, allowance: Int, used: Int) -> Int {
++  case bytes {
++    <<point:utf8_codepoint, rest:bytes>> -> {
++      let size = bit_array.byte_size(<<point:utf8_codepoint>>)
++      case size <= allowance {
++        True -> bounded_size(rest, allowance - size, used + size)
++        False -> used
++      }
++    }
++    _ -> used
++  }
++}
++
++pub fn render(selected: Selected) -> String {
++  "[request context: "
++  <> selected.block.name
++  <> "; snapshot "
++  <> selected.snapshot_id
++  <> "]\n"
++  <> selected.block.content
++}
++
++/// Pure assembly. Dynamic data precedes projected history and never becomes
++/// raw compaction input or a durable transcript row.
++pub fn assemble(base: types.Request, prepared: Prepared) -> types.Request {
++  let suffix =
++    prepared.blocks
++    |> list.filter(fn(block) { block.kind == Instructions })
++    |> list.map(fn(block) { "\n\n" <> render(block) })
++    |> string.concat
++  let data =
++    prepared.blocks
++    |> list.filter(fn(block) { block.kind == Data })
++    |> list.map(fn(block) { types.User(render(block)) })
++  types.Request(
++    ..base,
++    instructions: case suffix {
++      "" -> base.instructions
++      _ -> Some(option.unwrap(base.instructions, "") <> suffix)
++    },
++    input: list.append(data, base.input),
++  )
++}
++
++/// Price the actual assembled request once. Drop the last optional block
++/// whole until it fits. Earlier omissions stay omitted after pin settlement.
++/// `reserve` leaves room for history in the initial static reservation only.
++pub fn reconcile(
++  base: types.Request,
++  prepared: Prepared,
++  estimate: fn(types.Request) -> Int,
++  reserve: Int,
++) -> Final {
++  let request = assemble(base, prepared)
++  let estimated = estimate(request)
++  let fits = case prepared.budget.capacity_tokens {
++    None -> True
++    Some(capacity) -> estimated + reserve <= capacity
++  }
++  case fits {
++    True -> Final(request, prepared, estimated, True, None)
++    False -> {
++      let reversed = list.reverse(prepared.blocks)
++      let #(after, rest) =
++        list.split_while(reversed, fn(selected) { selected.block.mandatory })
++      case rest {
++        [] ->
++          Final(
++            request,
++            prepared,
++            estimated,
++            False,
++            Some("mandatory request content exceeds known context window"),
++          )
++        [omitted, ..before] -> {
++          let selected =
++            Prepared(
++              ..prepared,
++              blocks: list.reverse(list.append(after, before)),
++              omissions: list.append(prepared.omissions, [
++                Omission(
++                  omitted.owner,
++                  omitted.snapshot_id,
++                  omitted.kind,
++                  omitted.block.name,
++                  "whole optional block exceeds known request allowance",
++                ),
++              ]),
++            )
++          reconcile(base, selected, estimate, reserve)
++        }
++      }
++    }
++  }
++}
+diff --git a/src/albedo/harness/runtime.gleam b/src/albedo/harness/runtime.gleam
+--- a/src/albedo/harness/runtime.gleam
++++ b/src/albedo/harness/runtime.gleam
+@@ -14,6 +14,7 @@
+ import albedo/harness/extensions/python/link
+ import albedo/harness/oauth
+ import albedo/harness/protect
++import albedo/harness/request_context
+ import albedo/harness/runtime/boot
+ import albedo/harness/runtime/catalog as session_catalog
+ import albedo/harness/runtime/kernels
+@@ -1290,6 +1291,57 @@
+   |> result.map(fn(prepared) { prepared.inputs })
+ }
+ 
++pub type PreparedRequest {
++  PreparedRequest(
++    history: compaction.Prepared,
++    captured: request_context.Prepared,
++  )
++}
++
++pub fn request_estimate(request: types.Request) -> Int {
++  compaction.estimate_pinned(
++    option.unwrap(request.instructions, ""),
++    request.tools,
++  )
++  + compaction.estimate_inputs(request.input)
++}
++
++pub fn has_request_context(session: Session) -> Bool {
++  composition.has_request_context(session.composition)
++}
++
++/// Capture request contributors once, using the same resolved strategy settings
++/// for its budget and every projection/compaction in this preparation.
++pub fn prepare_request_scoped(
++  runtime: Runtime,
++  session: Session,
++  model: String,
++  source: String,
++  endpoint: Option(String),
++  instructions: String,
++  summarize: fn(compaction.SummaryRequest) -> Result(String, String),
++  history: List(types.Input),
++  force: Bool,
++  images: types.ImageLimits,
++  source_query source_query: String,
++) -> Result(PreparedRequest, request_context.Failure) {
++  view_scoped(
++    runtime,
++    session,
++    model,
++    source,
++    endpoint,
++    instructions,
++    summarize,
++    history,
++    force,
++    images,
++    compaction.prepare,
++    True,
++    Some(source_query),
++  )
++}
++
+ /// Prepare one provider request and its strategy-neutral inspection facts.
+ pub fn prepare_view_scoped(
+   runtime: Runtime,
+@@ -1315,7 +1367,11 @@
+     force,
+     images,
+     compaction.prepare,
+-  )
++    False,
++    None,
++  )
++  |> result.map(fn(prepared) { prepared.history })
++  |> result.map_error(fn(failure) { failure.reason })
+ }
+ 
+ /// The request the active strategy's saved state makes of `history`, the
+@@ -1343,7 +1399,11 @@
+     False,
+     images,
+     compaction.project,
+-  )
++    False,
++    None,
++  )
++  |> result.map(fn(prepared) { prepared.history })
++  |> result.map_error(fn(failure) { failure.reason })
+ }
+ 
+ fn view_scoped(
+@@ -1357,52 +1417,140 @@
+   history: List(types.Input),
+   force: Bool,
+   images: types.ImageLimits,
+-  view: fn(compaction.Strategy, compaction.Context, List(types.Input)) ->
++  view: fn(compaction.Resolved, compaction.Context, List(types.Input)) ->
+     Result(compaction.Prepared, String),
+-) -> Result(compaction.Prepared, String) {
+-  use _ <- result.try(owned_by(runtime, session))
+-  let pinned_tokens = compaction.estimate_pinned(instructions, tools(session))
++  capture: Bool,
++  source_query: Option(String),
++) -> Result(PreparedRequest, request_context.Failure) {
++  let static = compaction.estimate_pinned(instructions, tools(session))
++  let absent =
++    request_context.Prepared(
++      [],
++      [],
++      [],
++      request_context.Budget(None, None, static, None),
++    )
++  let failed = fn(reason) { request_context.failure(reason, absent) }
++  use _ <- result.try(owned_by(runtime, session) |> result.map_error(failed))
+   let enabled = composition.extensions(session.composition)
++  use callbacks <- result.try(
++    case capture {
++      True -> composition.request_contributors(session.composition)
++      False -> Ok([])
++    }
++    |> result.map_error(failed),
++  )
+   let info = model_info(session, model, endpoint)
+-  case extension.compaction(enabled) {
+-    None if force -> Error("no compaction strategy is enabled")
+-    None -> Ok(compaction.Prepared(history, None, False))
+-    Some(strategy) -> {
+-      let context =
+-        compaction.Context(
+-          runtime.ledger,
+-          session.id,
+-          session.kernel,
+-          model,
+-          source,
+-          pinned_tokens,
+-          capacity(info),
+-          force,
+-          summarize,
+-          compaction.compose_prior(
+-            list.filter(extension.folds(enabled), fn(folds) {
+-              folds.owner != strategy.name
+-            }),
+-            runtime.ledger,
+-            session.id,
+-          ),
+-          reader(info),
+-          images,
+-        )
+-      // A strategy that raises fails the turn the way one returning an error
+-      // does, naming itself, rather than killing the turn's process.
+-      protect.guarded(fn() {
+-        use prepared <- result.try(view(strategy, context, history))
+-        list.try_fold(extension.notes(enabled), prepared, fn(prepared, layer) {
+-          case prepared.compacted {
+-            True -> layer.compact(context, history, prepared)
+-            False -> layer.project(context, history, prepared)
++  let strategy = extension.compaction(enabled)
++  use resolved <- result.try(
++    case strategy {
++      None if force -> Error("no compaction strategy is enabled")
++      None -> Ok(None)
++      Some(strategy) ->
++        protect.guarded(fn() { strategy.resolve(capacity(info), reader(info)) })
++        |> result.map(Some)
++        |> result.map_error(fn(error) {
++          "compaction " <> strategy.name <> ": " <> error
++        })
++    }
++    |> result.map_error(failed),
++  )
++  let window = case resolved {
++    Some(strategy) -> strategy.capacity
++    None -> capacity(info)
++  }
++  let budget =
++    request_context.Budget(
++      option.map(window, fn(capacity) { capacity.tokens }),
++      option.map(window, fn(capacity) { capacity.source }),
++      static,
++      option.map(window, fn(capacity) { int.max(0, capacity.tokens - static) }),
++    )
++  use captured <- result.try(request_context.prepare(
++    callbacks,
++    request_context.Input(
++      runtime.ledger,
++      session.id,
++      list.map(enabled, fn(item) { item.name }),
++      case source_query {
++        Some(query) -> request_context.query([types.User(query)])
++        None -> request_context.query(history)
++      },
++      budget,
++    ),
++  ))
++  let empty =
++    types.Request(
++      model,
++      Some(instructions),
++      [],
++      tools(session),
++      None,
++      types.defaults,
++    )
++  let initial =
++    request_context.reconcile(empty, captured, request_estimate, case resolved {
++      Some(_) -> 1
++      None -> 0
++    })
++  case initial.fits {
++    False ->
++      Error(request_context.failure(
++        "mandatory request content leaves no history allowance in known context window",
++        initial.captured,
++      ))
++    True -> {
++      use prepared <- result.map(
++        case strategy, resolved {
++          Some(strategy), Some(resolved) -> {
++            let context =
++              compaction.Context(
++                runtime.ledger,
++                session.id,
++                session.kernel,
++                model,
++                source,
++                request_estimate(request_context.assemble(
++                  empty,
++                  request_context.mandatory(initial.captured),
++                )),
++                window,
++                force,
++                summarize,
++                compaction.compose_prior(
++                  list.filter(extension.folds(enabled), fn(folds) {
++                    folds.owner != strategy.name
++                  }),
++                  runtime.ledger,
++                  session.id,
++                ),
++                reader(info),
++                images,
++              )
++            protect.guarded(fn() {
++              use prepared <- result.try(view(resolved, context, history))
++              list.try_fold(
++                extension.notes(enabled),
++                prepared,
++                fn(prepared, layer) {
++                  case prepared.compacted {
++                    True -> layer.compact(context, history, prepared)
++                    False -> layer.project(context, history, prepared)
++                  }
++                },
++              )
++            })
++            |> result.map_error(fn(error) {
++              "compaction " <> strategy.name <> ": " <> error
++            })
+           }
+-        })
+-      })
+-      |> result.map_error(fn(error) {
+-        "compaction " <> strategy.name <> ": " <> error
+-      })
++          _, _ -> Ok(compaction.Prepared(history, None, False))
++        }
++        |> result.map_error(fn(reason) {
++          request_context.failure(reason, initial.captured)
++        }),
++      )
++      PreparedRequest(prepared, initial.captured)
+     }
+   }
+ }

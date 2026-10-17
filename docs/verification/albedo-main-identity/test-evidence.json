@@ -1,0 +1,128 @@
+{
+  "tests": {
+    "host-native": {
+      "passed": 456,
+      "failed": 0,
+      "original_log_sha256": "a3141f4f65fdcf12cc21d3d8f2abd9aeff9c7ca819308c6a666c9bc2ccf98d3b",
+      "summary_lines": [
+        "456 passed, no failures"
+      ]
+    },
+    "http-both-protocols": {
+      "passed": 32,
+      "failed": 0,
+      "original_log_sha256": "d2d4b10be71d21cbdc7a95ccf199c0765805dd1ab91daf96d25d3724d9d9fad4",
+      "summary_lines": [
+        "ok     live_identity_test.ChatIdentityTest.test_busy_binding_and_unbind_selection (2.0s)",
+        "ok     live_identity_test.ChatIdentityTest.test_setup_retry_edit_receipts_and_restart (3.0s)",
+        "ok     live_identity_test.ResponsesIdentityTest.test_setup_retry_edit_receipts_and_restart (3.0s)",
+        "ok     live_identity_test.ResponsesIdentityTest.test_explicit_session_selection_survives_global_default_disable (2.7s)",
+        "ok     live_identity_test.ResponsesIdentityTest.test_entire_extension_removed_refuses_after_restart (3.8s)",
+        "ok     live_identity_test.ChatIdentityTest.test_entire_extension_removed_refuses_after_restart (3.8s)",
+        "ok     live_identity_test.ChatIdentityTest.test_explicit_session_selection_survives_global_default_disable (3.4s)",
+        "ok     live_identity_test.ChatIdentityTest.test_quarantined_identity_refuses_after_restart (2.8s)",
+        "ok     live_identity_test.ResponsesIdentityTest.test_quarantined_identity_refuses_after_restart (2.3s)",
+        "ok     live_identity_test.ChatIdentityTest.test_unbound_selected_refuses_stock_unselected_works (2.1s)",
+        "ok     live_identity_test.ChatIdentityTest.test_retry_uses_one_capture_next_request_refreshes (2.1s)",
+        "ok     live_identity_test.ResponsesIdentityTest.test_unbound_selected_refuses_stock_unselected_works (2.1s)",
+        "ok     live_identity_test.ResponsesIdentityTest.test_busy_binding_and_unbind_selection (2.0s)",
+        "ok     live_identity_test.ResponsesIdentityTest.test_compaction_provider_has_identity_or_explicitly_refuses (1.7s)",
+        "ok     live_identity_test.ChatIdentityTest.test_missing_identity_table_refuses (1.7s)",
+        "ok     live_identity_test.ResponsesIdentityTest.test_retry_uses_one_capture_next_request_refreshes (2.0s)",
+        "ok     live_identity_test.ResponsesIdentityTest.test_cached_stock_binding_refuses_until_explicit_reload (1.9s)",
+        "ok     live_identity_test.ResponsesIdentityTest.test_bound_child_fork_rewind_and_summary_refuse_without_side_effects (1.7s)",
+        "ok     live_identity_test.ChatIdentityTest.test_compaction_provider_has_identity_or_explicitly_refuses (1.6s)",
+        "ok     live_identity_test.ResponsesIdentityTest.test_missing_identity_table_refuses (1.6s)",
+        "ok     live_identity_test.ResponsesIdentityTest.test_deselected_identity_refuses (1.8s)",
+        "ok     live_identity_test.ChatIdentityTest.test_bound_child_fork_rewind_and_summary_refuse_without_side_effects (1.8s)",
+        "ok     live_identity_test.ResponsesIdentityTest.test_global_enable_on_cached_stock_requires_setup (1.7s)",
+        "ok     live_identity_test.ResponsesIdentityTest.test_missing_requirement_marker_refuses (1.5s)",
+        "ok     live_identity_test.ChatIdentityTest.test_missing_requirement_marker_refuses (1.6s)",
+        "ok     live_identity_test.ChatIdentityTest.test_deselected_identity_refuses (1.6s)",
+        "ok     live_identity_test.ChatIdentityTest.test_required_compare_and_swap_fields_and_removed_routes (1.1s)",
+        "ok     live_identity_test.ChatIdentityTest.test_service_requires_daemon_token_before_setup_binding_or_edit (1.2s)",
+        "ok     live_identity_test.ResponsesIdentityTest.test_required_compare_and_swap_fields_and_removed_routes (1.0s)",
+        "ok     live_identity_test.ResponsesIdentityTest.test_service_requires_daemon_token_before_setup_binding_or_edit (1.2s)",
+        "ok     live_identity_test.ChatIdentityTest.test_cached_stock_binding_refuses_until_explicit_reload (1.9s)",
+        "ok     live_identity_test.ChatIdentityTest.test_global_enable_on_cached_stock_requires_setup (1.7s)",
+        "Ran 32 tests; 0 failing",
+        "daemon boots: 40; restart time: 9.8s; wall time: 33.1s"
+      ]
+    },
+    "request-context-frozen": {
+      "passed": 37,
+      "failed": 0,
+      "original_log_sha256": "19e54a4f82a8394a153ab47fc43d9e22c0a7b4ee9e625c180a5451ca425d855f",
+      "summary_lines": [
+        "37 passed, no failures"
+      ]
+    },
+    "identity-package": {
+      "passed": 45,
+      "failed": 0,
+      "original_log_sha256": "b0c90d3ec3c050dbf5c43c00d9b796924c534f040668d198ff9535457f768a16",
+      "summary_lines": [
+        "45 passed, no failures"
+      ]
+    },
+    "lifecycle": {
+      "passed": 21,
+      "failed": 0,
+      "original_log_sha256": "a998dc7520fa7ed8b159c547a81b985d8e2126f8f2c3d8b89b4fef8d7f6b2569",
+      "summary_lines": [
+        "21 passed, no failures"
+      ]
+    },
+    "startup": {
+      "passed": 12,
+      "failed": 0,
+      "original_log_sha256": "a156afde7e31635756cbb5b3b7d96901b15b399ab180828bf4104a32f1090d3c",
+      "summary_lines": [
+        "test_custom_home_ownership_prevents_effects_and_can_be_reclaimed (test_composition.Composition.test_custom_home_ownership_prevents_effects_and_can_be_reclaimed) ... ok",
+        "test_disabled_fixture_installs_but_has_no_global_service (test_composition.Composition.test_disabled_fixture_installs_but_has_no_global_service) ... ok",
+        "test_external_enabled_fixture_initializes_and_serves_authenticated_http (test_composition.Composition.test_external_enabled_fixture_initializes_and_serves_authenticated_http) ... ok",
+        "test_failed_fixture_is_quarantined_without_stopping_stock_startup (test_composition.Composition.test_failed_fixture_is_quarantined_without_stopping_stock_startup) ... ok",
+        "test_launcher_resolves_dependency_assets_and_vm_defaults (test_composition.Composition.test_launcher_resolves_dependency_assets_and_vm_defaults) ... ok",
+        "test_listener_restart_keeps_the_published_port_and_process (test_composition.Composition.test_listener_restart_keeps_the_published_port_and_process) ... ok",
+        "test_parent_death_stops_the_actual_fixture_entrypoint (test_composition.Composition.test_parent_death_stops_the_actual_fixture_entrypoint) ... ok",
+        "test_registry_restart_keeps_runtime_store_and_fixture_initialization (test_composition.Composition.test_registry_restart_keeps_runtime_store_and_fixture_initialization) ... ok",
+        "test_stock_and_configured_defaults_have_identical_catalog_and_selection (test_composition.Composition.test_stock_and_configured_defaults_have_identical_catalog_and_selection) ... ok",
+        "test_storage_failure_does_not_publish_readiness (test_composition.Composition.test_storage_failure_does_not_publish_readiness) ... ok",
+        "test_storage_inspect_dispatches_before_composition_with_json_stdout (test_composition.Composition.test_storage_inspect_dispatches_before_composition_with_json_stdout) ... ok",
+        "test_storage_maintenance_eof_preserves_candidates_and_releases_home (test_composition.Composition.test_storage_maintenance_eof_preserves_candidates_and_releases_home) ... ok",
+        "Ran 12 tests in 21.632s",
+        "OK"
+      ]
+    },
+    "product-composition": {
+      "passed": 1,
+      "failed": 0,
+      "original_log_sha256": "cfa85921dd3df54d56cceaea5c2d834d168da79c63b765ac21b35bd0d9e1f07e",
+      "summary_lines": [
+        "1 passed, no failures"
+      ]
+    }
+  },
+  "static_checks": {
+    "host-check": {
+      "result": "pass",
+      "original_log_sha256": "992159ee5f3ecdf0f7d439cd719bbc4e277eb21f368da24831bd80f21412735b"
+    },
+    "host-format": {
+      "result": "pass",
+      "original_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "http-python-quality": {
+      "result": "pass",
+      "original_log_sha256": "923849cb2a01caabedb377d3eccf4fd45140438d44af07b4ecf13d86f8adca0a"
+    }
+  },
+  "regressions": {
+    "receipt-recovery": "44 pass/1 fail before actor/origin/call recovery guard;45 pass after",
+    "cached-admission": "33 pass/2 fail before selection-vs-retained admission checks;35 pass after",
+    "http-unbind": "26/28 before fix: both protocols reached provider after unbind;32/32 final expanded suite",
+    "global-enable": "cached stock global enable reached provider before fix; final both-protocol tests refuse",
+    "stale-warming": "35 pass/1 fail before revision guard (reached provider lookup); targeted2 green then frozen37 green"
+  },
+  "limits": "Local scripted providers only; complete Nix/treefmt/glinter/browser gate remains open. No raw daemon logs, databases, request bodies or test homes are included."
+}

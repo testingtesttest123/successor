@@ -1,0 +1,9 @@
+{
+  "repo": "https://tangled.org/okami.mom/albedo",
+  "commit": "e9df547f67f6819ebcd217649be326e53111027c",
+  "tree": "542057beeeb5eb67edbc3dca260060c12c493679",
+  "archive_sha256": "131e95379caf8501ff8c0e04f42ddb7837d4df5d5f83faa830b3a0c49e61c69b",
+  "source_entries": 1013,
+  "compatibility_patches": [],
+  "qualification": "source pin only; FAILED/OPEN"
+}
