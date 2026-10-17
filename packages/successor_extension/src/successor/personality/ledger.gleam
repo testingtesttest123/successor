@@ -442,6 +442,8 @@ pub fn inspect(
   session: String,
 ) -> Result(p.Inspection, p.DomainError) {
   store.query(ledger, fn(db) {
+    use <- transaction(db)
+    use generation <- result.try(generation_in(db, session))
     use boundary <- result.try(boundary_in(db, session))
     use binding <- result.try(binding_in(db, session))
     use persona <- result.try(case binding {
@@ -475,6 +477,7 @@ pub fn inspect(
     )
     p.Inspection(
       binding,
+      generation,
       persona,
       boundary.0,
       boundary.1,

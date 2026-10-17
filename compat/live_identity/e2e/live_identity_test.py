@@ -264,6 +264,72 @@ class IdentityCases(unittest.TestCase):
             self.assertEqual(latest["document"], "CAPTURE-TWO")
             self.assertNotEqual(latest["snapshot_id"], captured["snapshot_id"])
 
+    def test_fresh_client_rebinds_after_unbind_and_restart(self):
+        provider, fixture = self.fixture()
+        with fixture as instance:
+            session = instance.session()
+            setup(instance, session, "STATELESS-REBIND-IDENTITY")
+            value(
+                instance,
+                f"/sessions/{session}/unbind",
+                {
+                    "expected_generation": inspect(instance, session)["binding"][
+                        "generation"
+                    ]
+                },
+            )
+            instance.restart()
+
+            # No generation from setup/unbind survives in this client. The helper
+            # must discover the retained CAS value through a fresh HTTP GET.
+            unbound = inspect(instance, session)
+            self.assertIsNone(unbound["binding"])
+            rebound = bind(instance, session)["binding"]
+            self.assertEqual(rebound["generation"], unbound["binding_generation"] + 1)
+            current = inspect(instance, session)
+            self.assertEqual(current["binding_generation"], rebound["generation"])
+            self.assertEqual(current["binding"], rebound)
+
+            # A stale client cannot mutate the new binding or its requirement.
+            before = rows(
+                instance,
+                "SELECT config_revision FROM sessions WHERE id=?",
+                (session,),
+            )
+            for route, body in (
+                (
+                    "binding",
+                    {
+                        "expected_generation": unbound["binding_generation"],
+                        "acknowledge_history_through": unbound["pre_binding_history"][
+                            "through"
+                        ],
+                    },
+                ),
+                ("unbind", {"expected_generation": unbound["binding_generation"]}),
+            ):
+                with self.assertRaises(urllib.error.HTTPError) as refused:
+                    value(instance, f"/sessions/{session}/{route}", body)
+                self.assertEqual(refused.exception.code, 409)
+                self.assertIn("binding_changed", refused.exception.read().decode())
+                self.assertEqual(inspect(instance, session), current)
+                self.assertEqual(
+                    rows(
+                        instance,
+                        "SELECT config_revision FROM sessions WHERE id=?",
+                        (session,),
+                    ),
+                    before,
+                )
+
+            instance.prompt(session, "use rebound identity").close()
+            instance.idle(session)
+            self.assertEqual(len(provider.requests), 1)
+            self.assertEqual(
+                identity(provider.requests[0]["request"])[1]["document"],
+                "STATELESS-REBIND-IDENTITY",
+            )
+
     def test_cached_stock_binding_refuses_until_explicit_reload(self):
         provider, fixture = self.fixture()
         with fixture as instance:

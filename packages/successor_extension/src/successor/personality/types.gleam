@@ -61,6 +61,8 @@ pub type DocumentPage {
 pub type Inspection {
   Inspection(
     binding: Option(Binding),
+    /// Latest binding revision, retained after unbind; zero before first bind.
+    binding_generation: Int,
     persona: Option(Persona),
     history_through: Int,
     history_count: Int,

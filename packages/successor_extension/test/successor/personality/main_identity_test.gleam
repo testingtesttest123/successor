@@ -3,7 +3,7 @@ import albedo/daemon/store
 import gleam/bit_array
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
-import gleam/option.{Some}
+import gleam/option.{None, Some}
 import gleam/string
 import gleeunit/should
 import successor/personality/ledger
@@ -149,7 +149,11 @@ pub fn mutations_require_expected_revision_and_owner_binding_test() {
 
 pub fn unbind_releases_requirement_atomically_and_preserves_identity_test() {
   let db = start()
-  let _ = setup(db)
+  let assert Ok(fresh) = ledger.inspect(db, "owner")
+  fresh.binding_generation |> should.equal(0)
+  let initial = setup(db)
+  let assert Ok(bound) = ledger.inspect(db, "owner")
+  bound.binding_generation |> should.equal(initial.binding.generation)
   ledger.unbind(db, "owner", 0) |> should.be_error
   ledger.unbind(db, "owner", 1) |> should.be_ok
   ledger.capture(db, "owner") |> should.equal(Error(p.SetupRequired))
@@ -157,7 +161,16 @@ pub fn unbind_releases_requirement_atomically_and_preserves_identity_test() {
   |> should.equal(Ok([]))
   count(db, "personality_persona") |> should.equal(1)
   ledger.bind(db, "owner", "", 0, 0, []) |> should.be_error
-  ledger.bind(db, "owner", "", 1, 0, []) |> should.be_ok
+  let assert Ok(unbound) = ledger.inspect(db, "owner")
+  unbound.binding |> should.equal(None)
+  unbound.binding_generation |> should.equal(1)
+  let assert Ok(rebound) =
+    ledger.bind(db, "owner", "", unbound.binding_generation, 0, [])
+  rebound.generation |> should.equal(2)
+  let assert Ok(current) = ledger.inspect(db, "owner")
+  current.binding_generation |> should.equal(rebound.generation)
+  ledger.bind(db, "owner", "", unbound.binding_generation, 0, [])
+  |> should.equal(Error(p.Conflict("binding_changed")))
   store.close(db)
 }
 

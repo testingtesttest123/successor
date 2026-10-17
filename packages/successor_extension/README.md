@@ -61,7 +61,11 @@ User-only `/binding` accepts the main identity ID (or the configured default),
 `expected_generation`. Both run through the native idle session bridge. Unbind
 retains documents and history, atomically releases the host requirement, and
 leaves personality selected in setup-required state until the user explicitly
-changes selection. Binding generations survive unbinding, preventing stale rebinds.
+changes selection. Binding generations survive unbinding, preventing stale rebinds. GET inspection
+returns `binding_generation` independently of nullable `binding`: zero before the
+first binding and the latest retained binding revision after unbind. Fresh clients
+use this field as `expected_generation` when binding again. Inspection reads the
+binding, generation and history boundary in one database transaction.
 Saved choices and a retained kernel's composition may differ until the user
 explicitly reloads the session. If binding enables personality on an already
 running stock composition, requests refuse with `reload required`; the native

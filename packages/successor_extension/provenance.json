@@ -4,7 +4,7 @@
     "types.gleam": {
       "path": "albedo-personality/src/albedo/harness/extensions/personality/types.gleam",
       "sha256": "114fd3bd75bebe0a55939c326a990dd24e04453c89986d578b2aa53aeb880c7a",
-      "extraction": "full source unchanged"
+      "extraction": "reference source; main-identity adaptation adds independently retained Inspection.binding_generation"
     },
     "domain.gleam": {
       "path": "albedo-personality/src/albedo/harness/extensions/personality/domain.gleam",
@@ -52,7 +52,7 @@
       "test/successor/personality/ledger_test.gleam": "6e3291412b733630ca34627daa8adc921eb19af050ba71e05e91c0ebfc3a7c6b"
     },
     "changes": [
-      "Retain fresh v2 schema and frozen extracted types/domain validation",
+      "Retain fresh v2 schema and extracted domain validation; extend inspection types with retained binding generation",
       "Remove automatic default binding, additional identities, mutable default selection and delegate inheritance",
       "Require atomic host personality requirement for owner binding; refuse legacy missing requirement without backfill",
       "Require expected revision for write and edit; native actor and operation identity only",

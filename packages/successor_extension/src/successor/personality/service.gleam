@@ -297,6 +297,7 @@ fn changed(session: String) -> Nil {
 fn inspection_json(session: String, inspection: p.Inspection) -> json.Json {
   json.object([
     #("binding", json.nullable(inspection.binding, ledger.binding_json)),
+    #("binding_generation", json.int(inspection.binding_generation)),
     #("persona", json.nullable(inspection.persona, ledger.persona_json)),
     #(
       "default_persona_id",

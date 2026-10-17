@@ -54,7 +54,7 @@ def inspect(instance, session):
 def bind(instance, session, persona=None):
     current = inspect(instance, session)
     body = {
-        "expected_generation": (current["binding"] or {}).get("generation", 0),
+        "expected_generation": current["binding_generation"],
         "acknowledge_history_through": current["pre_binding_history"]["through"],
     }
     if persona is not None:
