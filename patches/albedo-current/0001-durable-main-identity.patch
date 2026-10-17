@@ -4272,7 +4272,7 @@ index 8e5a52c07a8f30cbaad152d0958f75ebd45e1df2..e0b5458fd8d298248d72b06f100206cb
        family.link_in(connection, "child", "parent", "child")
 diff --git a/test/daemon/session_requirements_test.gleam b/test/daemon/session_requirements_test.gleam
 new file mode 100644
-index 0000000000000000000000000000000000000000..3274f0ca11f69091a286b68e73f3bf6e52963006
+index 0000000000000000000000000000000000000000..73ffb6e62c5ee9e2b0ac9d66b381752fa4539814
 --- /dev/null
 +++ b/test/daemon/session_requirements_test.gleam
 @@ -0,0 +1,188 @@
@@ -4291,13 +4291,13 @@ index 0000000000000000000000000000000000000000..3274f0ca11f69091a286b68e73f3bf6e
 +import gleam/result
 +import gleeunit/should
 +
-+pub fn missing_storage_fails_closed_test() {
++pub fn missing_storage_fails_closed_test() -> Nil {
 +  let assert Ok(ledger) = store.start(":memory:", "")
 +  requirements.check(ledger, "session", []) |> should.be_error
 +  store.close(ledger)
 +}
 +
-+pub fn requirements_and_binding_rollback_together_test() {
++pub fn requirements_and_binding_rollback_together_test() -> Nil {
 +  let assert Ok(ledger) =
 +    store.start(
 +      ":memory:",
@@ -4345,7 +4345,7 @@ index 0000000000000000000000000000000000000000..3274f0ca11f69091a286b68e73f3bf6e
 +  store.close(ledger)
 +}
 +
-+pub fn required_identity_blocks_native_descendants_without_extension_test() {
++pub fn required_identity_blocks_native_descendants_without_extension_test() -> Nil {
 +  let assert Ok(ledger) = store.start(":memory:", "")
 +  let assert Ok(_) = conversation.initialise(ledger)
 +  let assert Ok(_) = family.initialise(ledger)
@@ -4404,7 +4404,7 @@ index 0000000000000000000000000000000000000000..3274f0ca11f69091a286b68e73f3bf6e
 +@external(erlang, "albedo_runtime_test_support", "cleanup")
 +fn cleanup(path: String) -> Nil
 +
-+pub fn requirements_survive_reopen_and_delete_with_session_test() {
++pub fn requirements_survive_reopen_and_delete_with_session_test() -> Nil {
 +  let path = temporary_database()
 +  let assert Ok(ledger) =
 +    store.start(
@@ -4433,7 +4433,7 @@ index 0000000000000000000000000000000000000000..3274f0ca11f69091a286b68e73f3bf6e
 +  cleanup(path)
 +}
 +
-+pub fn restart_does_not_recreate_lost_requirement_storage_test() {
++pub fn restart_does_not_recreate_lost_requirement_storage_test() -> Nil {
 +  let path = temporary_database()
 +  let assert Ok(ledger) =
 +    store.start(
@@ -4455,7 +4455,7 @@ index 0000000000000000000000000000000000000000..3274f0ca11f69091a286b68e73f3bf6e
 +  cleanup(path)
 +}
 +
-+pub fn incompatible_requirement_storage_refuses_initialisation_test() {
++pub fn incompatible_requirement_storage_refuses_initialisation_test() -> Nil {
 +  let assert Ok(ledger) =
 +    store.start(
 +      ":memory:",
@@ -4524,7 +4524,7 @@ index 7c6bc2d50e9ab0e6d80869b0ad9a973ec752512a..ac5c587b23a260856d8d87d598e259e5
      runtime.open_session(host, "broken-extension-test", "/tmp")
 diff --git a/test/harness/idle_service_test.gleam b/test/harness/idle_service_test.gleam
 new file mode 100644
-index 0000000000000000000000000000000000000000..9dab4e01a4ecab761c33bd7cffd2c1e7edf9f643
+index 0000000000000000000000000000000000000000..c0a1e6d3f480cce831540c00e50363c65ce8cba6
 --- /dev/null
 +++ b/test/harness/idle_service_test.gleam
 @@ -0,0 +1,153 @@
@@ -4596,7 +4596,7 @@ index 0000000000000000000000000000000000000000..9dab4e01a4ecab761c33bd7cffd2c1e7
 +  )
 +}
 +
-+pub fn idle_callback_gets_native_store_and_session_and_propagates_error_test() {
++pub fn idle_callback_gets_native_store_and_session_and_propagates_error_test() -> Nil {
 +  let assert Ok(host) =
 +    runtime.start_with_config(":memory:", extensions.Config([], []))
 +  let state = fixture(host)
@@ -4616,7 +4616,7 @@ index 0000000000000000000000000000000000000000..9dab4e01a4ecab761c33bd7cffd2c1e7
 +  failed |> should.equal(Error("transaction refused"))
 +}
 +
-+pub fn booting_or_running_refuses_before_callback_test() {
++pub fn booting_or_running_refuses_before_callback_test() -> Nil {
 +  let assert Ok(host) =
 +    runtime.start_with_config(":memory:", extensions.Config([], []))
 +  let state = fixture(host)
@@ -4652,7 +4652,7 @@ index 0000000000000000000000000000000000000000..9dab4e01a4ecab761c33bd7cffd2c1e7
 +  process.receive(called, 0) |> should.be_error
 +}
 +
-+pub fn callback_crash_is_caught_test() {
++pub fn callback_crash_is_caught_test() -> String {
 +  let assert Ok(host) =
 +    runtime.start_with_config(":memory:", extensions.Config([], []))
 +  let outcome =
@@ -4663,7 +4663,7 @@ index 0000000000000000000000000000000000000000..9dab4e01a4ecab761c33bd7cffd2c1e7
 +  outcome |> should.be_error
 +}
 +
-+pub fn input_preparation_cannot_forward_idle_mutation_test() {
++pub fn input_preparation_cannot_forward_idle_mutation_test() -> Nil {
 +  let called = process.new_subject()
 +  let context =
 +    command.Context(fn(_) {

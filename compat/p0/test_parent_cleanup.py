@@ -3,6 +3,7 @@
 The daemon cannot exercise its caller's failed-start cleanup, so inject that
 failure while retaining a real subprocess and the production fixture method.
 """
+
 import os
 import signal
 import subprocess
@@ -27,7 +28,9 @@ class ParentCleanup(unittest.TestCase):
         )
         try:
             with mock.patch.object(test_composition.subprocess, "Popen", start_parent):
-                with mock.patch.object(case, "app", side_effect=RuntimeError("fixture boot failed")):
+                with mock.patch.object(
+                    case, "app", side_effect=RuntimeError("fixture boot failed")
+                ):
                     with self.assertRaisesRegex(RuntimeError, "fixture boot failed"):
                         case.test_parent_death_stops_the_actual_fixture_entrypoint()
             self.assertTrue(case.doCleanups())

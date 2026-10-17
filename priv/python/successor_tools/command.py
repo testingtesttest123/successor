@@ -5,6 +5,7 @@ Successor adapter written for the guardian ABI. The gate-before-exec pattern is
 adapted from Albedo process supervision at commit
 8920b8a8f4b295be0fde3d20aedf2a3cf5bcd450 (WTFPL v2); no Albedo source copied.
 """
+
 from __future__ import annotations
 
 import argparse

@@ -3,6 +3,7 @@
 Exercises the adapter around Albedo's copied process cleanup primitives. No home,
 network, project checkout, or provider credential is touched.
 """
+
 from __future__ import annotations
 
 import fcntl
@@ -35,8 +36,15 @@ def wait_until(predicate, timeout=5.0):
 
 
 class Running:
-    def __init__(self, root: Path, argv: list[str], seconds=30.0, status=None,
-                 env=None, lifetime_closed=False):
+    def __init__(
+        self,
+        root: Path,
+        argv: list[str],
+        seconds=30.0,
+        status=None,
+        env=None,
+        lifetime_closed=False,
+    ):
         self.root = root
         self.status = status or root / "status.json"
         self.lock_path = root / "jobs.lock"
@@ -51,11 +59,30 @@ class Running:
             os.close(self.lifetime_w)
             self.lifetime_w = -1
         self.process = subprocess.Popen(
-            [sys.executable, "-I", "-u", str(GUARDIAN), "--lifetime-fd", str(lifetime_r),
-             "--lease-fd", str(lease), "--status", str(self.status),
-             "--active-record", str(self.active_record), "--deadline", str(time.monotonic() + seconds), "--", *argv],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            close_fds=True, pass_fds=(lifetime_r, lease), start_new_session=True,
+            [
+                sys.executable,
+                "-I",
+                "-u",
+                str(GUARDIAN),
+                "--lifetime-fd",
+                str(lifetime_r),
+                "--lease-fd",
+                str(lease),
+                "--status",
+                str(self.status),
+                "--active-record",
+                str(self.active_record),
+                "--deadline",
+                str(time.monotonic() + seconds),
+                "--",
+                *argv,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            close_fds=True,
+            pass_fds=(lifetime_r, lease),
+            start_new_session=True,
             env=env,
         )
         os.close(lifetime_r)
@@ -67,14 +94,20 @@ class Running:
                 return json.loads(self.status.read_text())
             except (OSError, json.JSONDecodeError):
                 return None
+
         return wait_until(read)
 
     def terminal(self, timeout=8.0):
         self.process.wait(timeout=timeout)
         value = json.loads(self.status.read_text())
         self.close_writer()
-        if value.get("state") == "terminated" and value.get("termination", {}).get("gone") is True:
-            assert not self.active_record.exists(), "terminal checked-gone must clear active record"
+        if (
+            value.get("state") == "terminated"
+            and value.get("termination", {}).get("gone") is True
+        ):
+            assert not self.active_record.exists(), (
+                "terminal checked-gone must clear active record"
+            )
         self.output = b"" if self.process.stdout is None else self.process.stdout.read()
         if self.process.stdout is not None:
             self.process.stdout.close()
@@ -119,10 +152,13 @@ class GuardianTests(unittest.TestCase):
         item = self.launch(
             "import os,time; p=os.fork(); "
             f"open({str(pidfile)!r},'w').write(str(p)); "
-            "(time.sleep(30) if p==0 else None)")
+            "(time.sleep(30) if p==0 else None)"
+        )
         initial = item.record()
         result = item.terminal()
-        child = int(wait_until(lambda: pidfile.read_text() if pidfile.exists() else None))
+        child = int(
+            wait_until(lambda: pidfile.read_text() if pidfile.exists() else None)
+        )
         self.assertEqual(initial["state"], "running")
         self.assertEqual(result["state"], "terminated")
         self.assertTrue(result["termination"]["gone"])
@@ -199,8 +235,11 @@ class GuardianTests(unittest.TestCase):
         for index, options in enumerate(({"lifetime_closed": True}, {"seconds": -1.0})):
             effect = self.root / f"pre-gate-effect-{index}"
             item = Running(
-                self.root, [sys.executable, "-c", f"open({str(effect)!r},'w').write('bad')"],
-                status=self.root / f"pre-gate-{index}.json", **options)
+                self.root,
+                [sys.executable, "-c", f"open({str(effect)!r},'w').write('bad')"],
+                status=self.root / f"pre-gate-{index}.json",
+                **options,
+            )
             self.running.append(item)
             item.process.wait(timeout=5)
             item.close_writer()
@@ -214,8 +253,10 @@ class GuardianTests(unittest.TestCase):
     def test_immediate_cancel_always_gets_checked_terminal_status(self):
         for index in range(8):
             item = Running(
-                self.root, [sys.executable, "-c", "import time; time.sleep(30)"],
-                status=self.root / f"immediate-{index}.json")
+                self.root,
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                status=self.root / f"immediate-{index}.json",
+            )
             self.running.append(item)
             item.close_writer(b"S")
             result = item.terminal()
@@ -227,8 +268,14 @@ class GuardianTests(unittest.TestCase):
     def test_isolated_helpers_ignore_python_environment(self):
         hostile = self.root / "hostile"
         hostile.mkdir()
-        (hostile / "proc.py").write_text("raise RuntimeError('PYTHONPATH controlled helper')\n")
-        env = dict(os.environ, PYTHONPATH=str(hostile), PYTHONHOME=str(self.root / "missing-home"))
+        (hostile / "proc.py").write_text(
+            "raise RuntimeError('PYTHONPATH controlled helper')\n"
+        )
+        env = dict(
+            os.environ,
+            PYTHONPATH=str(hostile),
+            PYTHONHOME=str(self.root / "missing-home"),
+        )
         item = Running(self.root, ["/usr/bin/env"], env=env)
         self.running.append(item)
         item.record()
@@ -240,12 +287,25 @@ class GuardianTests(unittest.TestCase):
     def test_uncertain_retention_ignores_status_exception_and_returns_fresh_proof(self):
         first = proc.Termination(123, ("SIGKILL",), False)
         final = proc.Termination(123, (), True)
-        with mock.patch.object(guardian, "write_status", side_effect=ValueError("large")), \
-             mock.patch.object(guardian, "cleanup", side_effect=[RuntimeError("probe"), final]), \
-             mock.patch.object(guardian.time, "sleep"):
+        with (
+            mock.patch.object(
+                guardian, "write_status", side_effect=ValueError("large")
+            ),
+            mock.patch.object(
+                guardian, "cleanup", side_effect=[RuntimeError("probe"), final]
+            ),
+            mock.patch.object(guardian.time, "sleep"),
+        ):
             result = guardian.retain_until_gone(
-                proc.Group(123, "token"), self.root / "status", 123, "token",
-                None, False, "test", first)
+                proc.Group(123, "token"),
+                self.root / "status",
+                123,
+                "token",
+                None,
+                False,
+                "test",
+                first,
+            )
         self.assertIs(result, final)
 
     def test_active_record_requires_fresh_gone_proof(self):

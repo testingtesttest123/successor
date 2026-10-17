@@ -43,3 +43,9 @@ Qualification is bounded: focused external fixtures, the native host suite and
 scripted local-provider identity acceptance. The unchanged full `./test.sh` gate
 requires the remaining Nix/glinter/browser infrastructure. No upstream push,
 provider account, deployment or production-state migration is part of this work.
+
+The active reproducible source contract is `../../upstream/albedo-current.pin.json`.
+The static gate verifies the sibling host against that pin and this cumulative
+patch, including the maintained host-test return annotations. See
+`../../scripts/STATIC_CHECKS.md` for setup and exact static coverage. Earlier
+verification inventories describe their original tested revisions.

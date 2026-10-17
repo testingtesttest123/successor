@@ -21,7 +21,7 @@ SNAPSHOT = Path(os.environ["P0_SNAPSHOT"])
 EVIDENCE = Path(os.environ["P0_TEST_EVIDENCE"])
 EVIDENCE.mkdir(parents=True, exist_ok=False)
 sys.path.insert(0, str(SOURCE.parent / "albedo/test/e2e"))
-from inspect_support import Inspection
+from inspect_support import Inspection  # noqa: E402 -- standalone fixture import path
 
 LAUNCH = json.loads((SNAPSHOT / "launch.json").read_text())
 APPS = []
@@ -99,6 +99,7 @@ class App:
         return self
 
     def wait_ready(self):
+        assert self.process is not None
         deadline = time.monotonic() + 25
         while time.monotonic() < deadline:
             check_denial(self.log())
@@ -132,6 +133,7 @@ class App:
         )
 
     def request(self, path, *, authenticated=True, body=None):
+        assert self.ready is not None
         connection = http.client.HTTPConnection(
             "127.0.0.1", self.ready["port"], timeout=5
         )

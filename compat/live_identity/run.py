@@ -45,7 +45,7 @@ if not owned:
 
 sys.path.insert(0, str(host / "test/e2e"))
 sys.path.insert(0, str(suite.parent))
-import harness
+import harness  # noqa: E402 -- standalone fixture import path is installed above
 
 # Keep complete daemon diagnostics before the unchanged harness removes each
 # disposable home. This observes cleanup; it does not change process lifetimes,

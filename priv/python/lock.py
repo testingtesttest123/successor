@@ -1,4 +1,5 @@
 """Hold one stable workspace runtime lock until the owning Erlang port closes."""
+
 from __future__ import annotations
 
 import fcntl
@@ -37,8 +38,11 @@ def main() -> int:
             return 3
         # Job guardians inherit a shared lease before their kernel can die.
         # A replacement must not race still-running commands from the old heap.
-        jobs = os.open(os.path.join(os.path.dirname(sys.argv[1]), "jobs.lock"),
-                       os.O_RDWR | os.O_CREAT, 0o600)
+        jobs = os.open(
+            os.path.join(os.path.dirname(sys.argv[1]), "jobs.lock"),
+            os.O_RDWR | os.O_CREAT,
+            0o600,
+        )
         os.set_inheritable(jobs, False)
         try:
             try:
