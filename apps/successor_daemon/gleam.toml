@@ -1,0 +1,11 @@
+name = "successor_daemon"
+version = "0.1.0"
+gleam = ">= 1.19.0"
+
+[dependencies]
+albedo = { path = "../../../albedo" }
+successor_extension = { path = "../../packages/successor_extension" }
+gleam_stdlib = ">= 1.0.0 and < 2.0.0"
+
+[dev_dependencies]
+gleeunit = ">= 1.0.0 and < 2.0.0"

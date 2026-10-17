@@ -1,55 +1,93 @@
-# Successor extension: slice 1
+# Successor bounded main identity extension
 
-This package extracts pure personality types, bounded document operations and
-read-only v2 schema validation from Successor's frozen reference commit
-`fb1f4dc4099d915ee926139fc49a5c55bb63eac4`. It depends on unpatched Albedo
-`e9df547f67f6819ebcd217649be326e53111027c`; the Gleam-generated manifest locks
-the resolved consumer dependencies.
+This package implements one durable, explicitly initialized main identity on the
+adapted Albedo host based on commit `e086179bbaa8beda2b2a20e688dfa86bfe39b190`.
+Its `gleam.toml` currently uses the sibling development host at `../../../albedo`;
+the Gleam-generated manifest records that local dependency. Qualification runners
+freeze both sources together; this package does not work against unpatched
+historical Albedo.
 
-The production surface is three modules:
+The external extension owns fresh v2 identity storage, immutable document
+revisions, explicit bindings, document tools, projection and an authenticated
+service. Albedo owns idle ordering, persistent admission requirements, request
+capture, capacity enforcement and descendant refusal. The separate
+`apps/successor_daemon` composition installs this declaration explicitly.
 
-- `successor/personality/types`: data types only.
-- `successor/personality/domain`: existing UTF-8 byte limits, substring editing,
-  hash identity, copied prefixes and byte-offset paging.
-- `successor/personality/schema_validation`: existing v2 marker, real-table and
-  required-column validation through Albedo's public store helpers.
+## Verification
 
-Validation runs SELECT statements only. It does not initialize, migrate, repair
-or bind a store. The test SQL fixture explicitly constructs disposable SQLite
-databases; no `apply()` implementation is copied into production or tests.
-
-From this directory, run:
+Activate the isolated toolchain, then run from this directory:
 
 ```sh
-gleam deps download
-gleam test
 gleam check
+gleam test
 gleam format --check src test
-python3 ../../scripts/verify_extension_slice1.py
+python3 ../../compat/main_identity/run.py
 ```
 
-The boundary verifier checks the full downloaded host checkout against its
-pinned Git tree and checks extraction identity against the immutable reference.
-The package tests exercise the real public functions and SQLite connections.
-They are isolated library tests because this slice has no installed daemon
-surface. The allocation observer traces only the calling test process and is
-test-only. Missing tables, compatible views and every required column are tested
-with complete schema/data snapshots before and after validation.
+The fixture runner uses a fresh temporary home and strips provider credentials.
+Package tests cover real SQLite transactions, restart, schema refusal, document
+limits, receipt replay, native tool authority and complete projection. HTTP and
+scripted-provider integration lives in `compat/live_identity`; host lifecycle and
+captured-request contracts are exercised in `compat/p3a` and `compat/p1`.
+Package success alone is not whole-host qualification. Current evidence and
+remaining baseline failures are recorded by the integration run.
 
-This is a library checkpoint. It does not install personality behavior, context
-selection, bindings, agents, kernel/background-memory integration or host hooks.
-Historical Successor qualification remains **FAILED/OPEN**; package tests do not
-establish parity or runtime readiness. No broader host/full aggregate gate is
-claimed here.
+## Setup and operation
 
-Later gates remain deferred: P2 final-request receipt acceptance needs separate
-justification and review while the carried selector is unwired. Before P1
-approval, forced compaction, tool/steering continuations, static prompt pins and
-selected-but-quarantined admission require capture/retry/budget coverage. Any
-additional source-index or invalidation hook is a separately reviewed boundary;
-triggers and catch-up are not authorized by this slice.
+The opt-in `successor/personality/extension.extension()` declaration supplies the
+`personality` required request contributor. It is never added to stock defaults.
+The user must explicitly POST a setup request through the daemon-token service,
+`/extensions/personality/sessions/{session}/setup`, with `name`, `content`,
+`writable` (optional, default true), and a required `retry_key`.
 
-Source provenance is recorded in `provenance.json`. Albedo's pinned upstream
-license and attribution are preserved in `UPSTREAM-LICENSE.txt`. This extraction
-is copied/adapted source, not a clean-room implementation, and does not introduce
-a repository-wide license grant.
+Only one main identity can be initialized. Setup creates its explicit default,
+owner binding, immutable first revision, replay receipt and host requirement in
+one transaction. Existing identity tables are validated without migration;
+existing bindings missing their host requirement refuse capture, without backfill.
+
+Authenticated session routes also provide GET inspection and paginated
+`/document`, POST `/document` (`content`, `expected_revision`, `retry_key`), and
+POST `/edit` (`old_string`, `new_string`, `replace_all`, `expected_revision`,
+`retry_key`). Model tools derive session, actor and call ID from host context;
+write/edit require an expected revision and expose no identity creation or binding.
+Model recovery accepts only stored owner-agent receipts for the exact native
+session and call; user receipts cannot report success for a model call with a
+colliding ID. Provider call IDs remain opaque, including `human:` prefixes.
+Documents are limited to 1 MiB UTF-8; read pages to 32 KiB. Request projection
+includes the complete mandatory identity document, and the host refuses overflow.
+
+User-only `/binding` accepts the main identity ID (or the configured default),
+`expected_generation`, and `acknowledge_history_through`. `/unbind` accepts
+`expected_generation`. Both run through the native idle session bridge. Unbind
+retains documents and history, atomically releases the host requirement, and
+leaves personality selected in setup-required state until the user explicitly
+changes selection. Binding generations survive unbinding, preventing stale rebinds.
+Saved choices and a retained kernel's composition may differ until the user
+explicitly reloads the session. If binding enables personality on an already
+running stock composition, requests refuse with `reload required`; the native
+session reload then installs the required contributor. Deselection likewise
+cannot dispatch a stale captured identity. Unbinding keeps personality selected:
+requests refuse on the stale composition and, after reload, require setup rather
+than silently becoming stock requests.
+
+There are no additional-persona, default-switching, delegate, migration or memory
+APIs. Bound child/fork/rewind rejection belongs to the host requirement layer.
+
+Recovered candidate modules are adapted with original attribution preserved in
+`UPSTREAM-LICENSE.txt` and per-source hashes recorded in `provenance.json`.
+The native SQLite test fixture is run by `compat/main_identity/run.py`.
+
+## Historical extraction and attribution
+
+The original slice extracted `types`, `domain`, and read-only schema validation
+from reference commit `fb1f4dc4099d915ee926139fc49a5c55bb63eac4` against historical
+Albedo `e9df547f67f6819ebcd217649be326e53111027c`. Its historical
+`verify_extension_slice1.py` checks that old extraction and host pin; it is not a
+verification gate for this implemented adaptation. Historical Successor aggregate
+qualification remains FAILED/OPEN, distinct from the bounded slice's evidence.
+
+This is attributed copied/adapted source, not a clean-room implementation.
+`provenance.json` retains historical source hashes and recovered candidate hashes;
+`UPSTREAM-LICENSE.txt` preserves upstream attribution. No repository-wide license
+grant, general persona management, migration, or background-memory support is
+introduced.

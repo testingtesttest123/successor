@@ -3,10 +3,15 @@
 
 import albedo/daemon/context_snapshot
 import albedo/daemon/conversation
+import albedo/daemon/requests
+import albedo/daemon/session_configuration
+import albedo/daemon/session_requirements
 import albedo/daemon/store
 import albedo/harness/compaction
 import albedo/harness/extension
 import albedo/harness/extension/composition
+import albedo/harness/extension/selection
+import albedo/harness/extensions
 import albedo/harness/extensions/rolling/extension as rolling
 import albedo/harness/loop
 import albedo/harness/request_context as context
@@ -327,10 +332,13 @@ pub fn settings_resolve_once_across_project_compact_project_test() -> Nil {
       "source",
       None,
       runtime.instructions(kernel),
-      fn(_) { Error("unexpected summarizer") },
+      fn(_, _) { Error("unexpected summarizer") },
       [types.User("history")],
       force,
       types.any_images,
+      None,
+      fn() { Nil },
+      compaction.unprojected,
       source_query: "fixture source query",
     )
   }
@@ -533,13 +541,16 @@ pub fn forced_unknown_capacity_keeps_inspection_unknown_test() -> Nil {
       "source",
       None,
       runtime.instructions(kernel),
-      fn(_) {
+      fn(_, _) {
         let _ = fixture.next(summaries)
         Ok("saved facts")
       },
       original,
       True,
       types.any_images,
+      None,
+      fn() { Nil },
+      compaction.unprojected,
       source_query: "fixture source query",
     )
   fixture.receive(inputs).budget.capacity_tokens |> should.equal(None)
@@ -604,10 +615,13 @@ pub fn callback_error_and_exception_refuse_preparation_test() -> Nil {
       "source",
       None,
       runtime.instructions(kernel),
-      fn(_) { panic as "must not summarize" },
+      fn(_, _) { panic as "must not summarize" },
       [types.User("query")],
       False,
       types.any_images,
+      None,
+      fn() { Nil },
+      compaction.unprojected,
       source_query: "fixture source query",
     )
     |> should.be_error
@@ -802,13 +816,16 @@ pub fn optional_context_never_forces_indivisible_tail_compaction_test() -> Nil {
       "source",
       None,
       runtime.instructions(kernel),
-      fn(_) {
+      fn(_, _) {
         let _ = fixture.next(summaries)
         Ok("summary")
       },
       [types.User(string.repeat("history", 100))],
       False,
       types.any_images,
+      None,
+      fn() { Nil },
+      compaction.unprojected,
       source_query: "fixture source query",
     )
   let final =
@@ -829,5 +846,294 @@ pub fn optional_context_never_forces_indivisible_tail_compaction_test() -> Nil {
   list.length(final.captured.omissions) |> should.equal(1)
   fixture.read(summaries) |> should.equal(0)
   fixture.read(captures) |> should.equal(1)
+  runtime.stop(host)
+}
+
+// Current host session overrides must reach capture even without a strategy.
+pub fn session_capacity_precedes_catalog_and_strategy_test() -> Nil {
+  list.each(
+    [[], [rolling.configured_extension(rolling.Config(Some(30_000), 80, 25))]],
+    fn(strategies) {
+      let inputs = process.new_subject()
+      let #(host, kernel) =
+        fixture.start(list.append(
+          [
+            fixture.declaration(fixture.counter(), inputs, []),
+            fixture.catalog(Some(50_000)),
+          ],
+          strategies,
+        ))
+      let assert Ok(_) =
+        store.query(runtime.ledger(host), fn(db) {
+          session_configuration.save_context_window_in(db, "s", Some(40_000))
+        })
+      let assert Ok(prepared) =
+        runtime.prepare_request_scoped(
+          host,
+          kernel,
+          "model",
+          "source",
+          None,
+          runtime.instructions(kernel),
+          fn(_, _) { Error("must not summarize") },
+          [types.User("hello")],
+          False,
+          types.any_images,
+          None,
+          fn() { Nil },
+          compaction.unprojected,
+          source_query: "hello",
+        )
+      prepared.captured.budget.capacity_tokens |> should.equal(Some(40_000))
+      fixture.receive(inputs).budget.capacity_tokens
+      |> should.equal(Some(40_000))
+      runtime.stop(host)
+    },
+  )
+}
+
+pub fn forced_summary_uses_same_captured_revision_test() -> Nil {
+  let captures = fixture.counter()
+  let inputs = process.new_subject()
+  let sent = process.new_subject()
+  let saved = process.new_subject()
+  let #(host, kernel) =
+    fixture.start([
+      fixture.declaration(captures, inputs, []),
+      rolling.configured_extension(rolling.Config(None, 80, 25)),
+    ])
+  let provider =
+    fixture.upstream(types.Responses, fn(request, _) {
+      process.send(sent, request)
+      fixture.change(runtime.ledger(host))
+      Ok(fixture.complete())
+    })
+  let worker =
+    fixture.worker(
+      host,
+      kernel,
+      provider,
+      saved,
+      fn() { Ok([]) },
+      loop.Unpinned,
+    )
+  loop.compact(worker, [
+    types.User("new"),
+    types.Assistant("answer"),
+    types.User(string.repeat("older facts", 200)),
+  ])
+  |> should.be_ok
+  let summary = fixture.receive(sent)
+  option.unwrap(summary.instructions, "")
+  |> string.contains("revision-1")
+  |> should.be_true
+  option.unwrap(summary.instructions, "")
+  |> string.contains("revision-2")
+  |> should.be_false
+  let assert context_snapshot.Ready(request_context: Some(facts), ..) =
+    fixture.receive(saved)
+  list.first(facts.captured.contributions)
+  |> should.equal(
+    Ok(context.Captured(
+      "fixture",
+      context.Contribution(
+        "revision-1",
+        [context.Block("source", "revision-1", True)],
+        [],
+        ["coherent fixture read"],
+      ),
+    )),
+  )
+  fixture.read(captures) |> should.equal(1)
+  runtime.stop(host)
+}
+
+pub fn summary_final_assembly_overflow_refuses_provider_test() -> Nil {
+  let captures = fixture.counter()
+  let calls = fixture.counter()
+  let inputs = process.new_subject()
+  let saved = process.new_subject()
+  let strategy =
+    extension.Extension(
+      "summary-budget",
+      "scripted final summary request",
+      [],
+      [
+        extension.CompactionPlugin(
+          compaction.Strategy("summary-budget", fn(catalog, _) {
+            Ok(
+              compaction.Resolved(
+                catalog,
+                fn(_, history) { Ok(compaction.View(history, None, False)) },
+                fn(context, _) {
+                  case
+                    context.summarize(compaction.SummaryRequest(
+                      "model",
+                      None,
+                      [types.User(string.repeat("oversized", 100_000))],
+                      100,
+                      compaction.summary_instructions,
+                    ))
+                  {
+                    Ok(_) -> Ok(True)
+                    Error(reason) -> Error(reason)
+                  }
+                },
+              ),
+            )
+          }),
+        ),
+      ],
+      extension.no_initialise,
+    )
+  let #(host, kernel) =
+    fixture.start([
+      fixture.declaration(captures, inputs, []),
+      fixture.catalog(Some(50_000)),
+      strategy,
+    ])
+  let provider =
+    fixture.upstream(types.Responses, fn(_, _) {
+      let _ = fixture.next(calls)
+      Ok(fixture.complete())
+    })
+  let worker =
+    fixture.worker(
+      host,
+      kernel,
+      provider,
+      saved,
+      fn() { Ok([]) },
+      loop.Unpinned,
+    )
+  let assert Error(reason) = loop.compact(worker, [types.User("hello")])
+  string.contains(reason, "mandatory request content") |> should.be_true
+  fixture.read(calls) |> should.equal(0)
+  fixture.read(captures) |> should.equal(1)
+  let assert context_snapshot.Ready(request_context: Some(facts), ..) =
+    fixture.receive(saved)
+  facts.fits |> should.be_false
+  runtime.stop(host)
+}
+
+pub fn quarantined_required_owner_refuses_retained_composition_test() -> Nil {
+  let required =
+    extension.Extension(
+      "missing",
+      "unavailable required callback",
+      [],
+      [
+        extension.RequestContextPlugin(
+          fn(_) { panic as "must not capture" },
+          True,
+        ),
+      ],
+      fn(_) { Error("unavailable") },
+    )
+  let host = fixture.start_host(extensions.Config([required], []))
+  let assert Ok(kernel) = runtime.open_session(host, "s", "/tmp")
+  let assert Ok(_) =
+    selection.record(
+      runtime.ledger(host),
+      "s",
+      selection.SetSession("missing", True),
+    )
+  let outcome =
+    runtime.prepare_request_scoped(
+      host,
+      kernel,
+      "model",
+      "source",
+      None,
+      "static",
+      fn(_, _) { panic as "must not summarize" },
+      [types.User("hi")],
+      False,
+      types.any_images,
+      None,
+      fn() { Nil },
+      compaction.unprojected,
+      source_query: "hi",
+    )
+  let assert Error(failure) = outcome
+  string.contains(failure.reason, "required request context missing")
+  |> should.be_true
+  runtime.stop(host)
+}
+
+pub fn absent_persistent_owner_refuses_foreground_and_background_test() -> Nil {
+  let calls = fixture.counter()
+  let #(host, kernel) = fixture.start([])
+  let ledger = runtime.ledger(host)
+  let assert Ok(_) =
+    store.query(ledger, fn(db) {
+      session_requirements.require_in(db, "s", "removed-owner")
+    })
+  let provider =
+    fixture.upstream(types.Responses, fn(_, _) {
+      let _ = fixture.next(calls)
+      Ok(fixture.complete())
+    })
+  let worker =
+    fixture.worker(
+      host,
+      kernel,
+      provider,
+      process.new_subject(),
+      fn() { Ok([]) },
+      loop.Unpinned,
+    )
+  loop.run(worker, "s", [types.User("hello")], 0) |> should.be_error
+  loop.compact(worker, [types.User("hello")]) |> should.be_error
+  let request =
+    types.Request(
+      "model",
+      Some("saved"),
+      [types.User("hello")],
+      [],
+      None,
+      types.defaults,
+    )
+  loop.background(
+    loop.CallContext(ledger, provider, "s", "fixture", "warm", None, fn() {
+      runtime.admit(host, kernel)
+    }),
+    request,
+    requests.direct_prefix("saved", [], request.input),
+  )
+  |> should.be_error
+  fixture.read(calls) |> should.equal(0)
+  runtime.stop(host)
+}
+
+pub fn retry_rechecks_deselected_persistent_owner_without_recapture_test() -> Nil {
+  let captures = fixture.counter()
+  let providers = fixture.counter()
+  let #(host, kernel) =
+    fixture.start([fixture.declaration(captures, process.new_subject(), [])])
+  let ledger = runtime.ledger(host)
+  let assert Ok(_) =
+    store.query(ledger, fn(db) {
+      session_requirements.require_in(db, "s", "fixture")
+    })
+  let provider =
+    fixture.upstream(types.Responses, fn(_, _) {
+      let _ = fixture.next(providers)
+      let assert Ok(_) =
+        selection.record(ledger, "s", selection.SetSession("fixture", False))
+      Error(types.UnexpectedEnd)
+    })
+  let worker =
+    fixture.worker(
+      host,
+      kernel,
+      provider,
+      process.new_subject(),
+      fn() { Ok([]) },
+      loop.Unpinned,
+    )
+  loop.run(worker, "s", [types.User("hello")], 0) |> should.be_error
+  fixture.read(captures) |> should.equal(1)
+  fixture.read(providers) |> should.equal(1)
   runtime.stop(host)
 }

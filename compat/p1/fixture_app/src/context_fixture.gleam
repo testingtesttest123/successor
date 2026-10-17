@@ -6,6 +6,7 @@ import albedo/daemon/family
 import albedo/daemon/requests
 import albedo/daemon/store
 import albedo/harness/extension
+import albedo/harness/extensions
 import albedo/harness/extensions/python/link
 import albedo/harness/loop
 import albedo/harness/request_context as context
@@ -14,6 +15,7 @@ import albedo/openai_api/types
 import gleam/dynamic/decode
 import gleam/erlang/process
 import gleam/json
+import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
@@ -155,7 +157,17 @@ pub fn catalog(tokens: Option(Int)) -> extension.Extension {
 pub fn start(
   declarations: List(extension.Extension),
 ) -> #(runtime.Runtime, runtime.Session) {
-  let assert Ok(host) = runtime.start_with_extensions(":memory:", declarations)
+  let host =
+    start_host(extensions.Config(
+      declarations,
+      list.map(declarations, fn(item) { item.name }),
+    ))
+  let assert Ok(kernel) = runtime.open_session(host, "s", "/tmp")
+  #(host, kernel)
+}
+
+pub fn start_host(config: extensions.Config) -> runtime.Runtime {
+  let assert Ok(host) = runtime.start_with_config(":memory:", config)
   let ledger = runtime.ledger(host)
   let assert Ok(_) = conversation.initialise(ledger)
   let assert Ok(_) = family.initialise(ledger)
@@ -177,8 +189,7 @@ pub fn start(
       ),
       [],
     )
-  let assert Ok(kernel) = runtime.open_session(host, "s", "/tmp")
-  #(host, kernel)
+  host
 }
 
 pub fn upstream(
@@ -198,7 +209,12 @@ pub fn upstream(
 }
 
 pub fn complete() -> types.Turn {
-  types.Turn(None, [], [], None, types.Complete, None, [])
+  let assert Ok(text) =
+    json.parse(
+      "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"saved facts\"}]}",
+      types.replay_decoder(types.Responses),
+    )
+  types.Turn(None, [text], [], None, types.Complete, None, [])
 }
 
 pub fn worker(
@@ -246,6 +262,10 @@ pub fn worker(
     "s",
     "fixture",
     "run",
+    None,
+    fn() { Nil },
+    False,
+    0,
   )
 }
 

@@ -8,6 +8,7 @@ import albedo/daemon/family
 import albedo/daemon/history
 import albedo/daemon/mail
 import albedo/daemon/operations
+import albedo/daemon/session_configuration
 import albedo/daemon/store
 import albedo/harness/extension
 import albedo/harness/extensions
@@ -385,8 +386,8 @@ pub fn identified_create_existing_and_deleted_never_repeat_callbacks_test() -> N
   let owners = runtime.lifecycle_owners(host)
   let request = creation("fresh", "same")
   let assert Ok(_) =
-    conversation.create_identified(ledger, info("fresh"), request, owners)
-  conversation.create_identified(ledger, info("fresh"), request, owners)
+    conversation.create_identified(ledger, info("fresh"), request, None, owners)
+  conversation.create_identified(ledger, info("fresh"), request, None, owners)
   |> should.equal(Error("session_exists"))
   let assert Ok(_) =
     store.query(ledger, fn(db) {
@@ -395,7 +396,7 @@ pub fn identified_create_existing_and_deleted_never_repeat_callbacks_test() -> N
         "DELETE FROM sessions WHERE id='fresh'; UPDATE session_creation SET deleted_at=1 WHERE session_id='fresh';",
       )
     })
-  conversation.create_identified(ledger, info("fresh"), request, owners)
+  conversation.create_identified(ledger, info("fresh"), request, None, owners)
   |> should.equal(Error("session_deleted"))
   count(ledger, "fixture_events") |> should.equal(1)
   runtime.stop(host)
@@ -416,6 +417,7 @@ pub fn rejected_receipt_replay_skips_callback_test() -> Nil {
       ledger,
       info("fresh"),
       request,
+      None,
       failing(True),
     )
   receipt.status |> should.equal("rejected")
@@ -428,6 +430,7 @@ pub fn rejected_receipt_replay_skips_callback_test() -> Nil {
       ..request,
       request: operations.Request(..request.request, fingerprint: "changed"),
     ),
+    None,
     runtime.lifecycle_owners(host),
   )
   |> should.be_error
@@ -747,5 +750,22 @@ pub fn creation_is_silent_until_caller_announces_committed_task_test() -> Nil {
   let assert Ok(kind) =
     json.parse(event, decode.field("type", decode.string, decode.success))
   kind |> should.equal("mail")
+  runtime.stop(host)
+}
+
+pub fn identified_creation_preserves_context_window_test() -> Nil {
+  let host = host()
+  let ledger = runtime.ledger(host)
+  let assert Ok(_) =
+    conversation.create_identified(
+      ledger,
+      info("window"),
+      creation("window", "window"),
+      Some(65_536),
+      runtime.lifecycle_owners(host),
+    )
+  let assert Ok(saved) =
+    store.query(ledger, session_configuration.read_in(_, "window"))
+  saved.context_window |> should.equal(Some(65_536))
   runtime.stop(host)
 }

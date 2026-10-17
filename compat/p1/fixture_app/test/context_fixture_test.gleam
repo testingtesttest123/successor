@@ -163,7 +163,7 @@ pub fn stock_configured_capacity_matrix_test() -> Nil {
       list.each(
         [
           rolling.configured_extension(rolling.Config(configured, 80, 25)),
-          lcm.configured_extension(lcm.Config(configured, 80, 25)),
+          lcm.configured_extension(lcm.Config(configured, Some(80), 25)),
         ],
         fn(declared) {
           let assert Some(strategy) = extension.compaction([declared])
