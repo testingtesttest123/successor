@@ -1051,7 +1051,7 @@ index e773e9dcd78fb724d3f1eeba455848edd8365f7c..07cb1ddbc9ab0662faaeb7f047ece99b
        setting("ALBEDO_PORT", 0, 0, 65_535),
        setting("ALBEDO_WEBHOOK_PORT", 8088, 0, 65_535),
 diff --git a/src/albedo/daemon/session.gleam b/src/albedo/daemon/session.gleam
-index 900e5f999f4b3b6c62a12754c8e93d2c80a5647c..448e32807f297c0eae40225fea73b0a1af7f364a 100644
+index 900e5f999f4b3b6c62a12754c8e93d2c80a5647c..c0fa90bbf2afabb4485ee0d4ffb078aacc0fb7f8 100644
 --- a/src/albedo/daemon/session.gleam
 +++ b/src/albedo/daemon/session.gleam
 @@ -25,6 +25,7 @@ import albedo/daemon/session_last_call
@@ -1073,15 +1073,24 @@ index 900e5f999f4b3b6c62a12754c8e93d2c80a5647c..448e32807f297c0eae40225fea73b0a1
    Resume
    /// An idle session started after a daemon restart because it waits on
    /// work that will wake it: its extensions hear its last turn call again.
-@@ -257,6 +262,7 @@ pub type Message {
+@@ -257,6 +262,8 @@ pub type Message {
    ReportCompacting(String, Subject(Nil))
    /// An extension asks for a background call; see `extension.Session`.
    CallInBackground(
 +    Int,
++    Int,
      types.Request,
      requests.Prefix,
      Subject(Result(Option(types.Usage), String)),
-@@ -1121,7 +1127,8 @@ fn handle(
+@@ -397,6 +404,7 @@ pub fn start(
+         booting: None,
+         blocked_until: 0,
+         generation: generation,
++        composition_generation: 0,
+         tool_progress: tool_progress_state.new(),
+         progress_timer_token: 0,
+         progress_timer: None,
+@@ -1121,7 +1129,8 @@ fn handle(
    // Anything a client sends counts as attention; a detached session goes quiet.
    // Listing sessions reads their summaries and is not attention.
    let state = case message {
@@ -1091,7 +1100,7 @@ index 900e5f999f4b3b6c62a12754c8e93d2c80a5647c..448e32807f297c0eae40225fea73b0a1
      | ReadCapture(..)
      | ChangeConfiguration(..)
      | InterruptCaptured(..)
-@@ -1142,6 +1149,8 @@ fn handle(
+@@ -1142,6 +1151,8 @@ fn handle(
    // catches a turn that never started, such as one whose kernel failed to boot.
    let state = settle(state)
    case message {
@@ -1100,18 +1109,25 @@ index 900e5f999f4b3b6c62a12754c8e93d2c80a5647c..448e32807f297c0eae40225fea73b0a1
      ReadCapture(reply) -> answer(state, reply, capture_state(state))
      ReadSummary(reply) -> answer(state, reply, summary_state(state))
      ReadAwaited(reply) -> answer(state, reply, awaited(state))
-@@ -1745,8 +1754,8 @@ fn handle(
+@@ -1745,8 +1756,15 @@ fn handle(
          |> session_state.announce,
        )
      }
 -    CallInBackground(request, prefix, reply) ->
 -      actor.continue(start_background(state, request, prefix, reply))
-+    CallInBackground(revision, request, prefix, reply) ->
-+      actor.continue(start_background(state, revision, request, prefix, reply))
++    CallInBackground(revision, composition_generation, request, prefix, reply) ->
++      actor.continue(start_background(
++        state,
++        revision,
++        composition_generation,
++        request,
++        prefix,
++        reply,
++      ))
      BackgroundFinished(id, started, outcome) ->
        case turn.owner(state.activity, id) {
          Some(turn.Run(work: turn.Background(reply), ..) as run) -> {
-@@ -1969,9 +1978,16 @@ fn handle(
+@@ -1969,9 +1987,16 @@ fn handle(
          }
        }
      StartSummary(checkpoint, instructions, out, ack) ->
@@ -1131,7 +1147,7 @@ index 900e5f999f4b3b6c62a12754c8e93d2c80a5647c..448e32807f297c0eae40225fea73b0a1
            case
              kernel_or_park(
                state,
-@@ -1995,6 +2011,7 @@ fn handle(
+@@ -1995,6 +2020,7 @@ fn handle(
                checkpoint,
                summary,
                expected_last,
@@ -1139,7 +1155,7 @@ index 900e5f999f4b3b6c62a12754c8e93d2c80a5647c..448e32807f297c0eae40225fea73b0a1
              )
            {
              Error(error) -> answer(state, reply, Error(error))
-@@ -2061,6 +2078,23 @@ fn forget(state: State) -> Nil {
+@@ -2061,6 +2087,23 @@ fn forget(state: State) -> Nil {
    cleanup_registrations(state.info.id)
  }
  
@@ -1163,7 +1179,7 @@ index 900e5f999f4b3b6c62a12754c8e93d2c80a5647c..448e32807f297c0eae40225fea73b0a1
  /// The registered command state seam: one operation in, session state out.
  ///
  /// Runs on whichever process invoked the command (the kernel's host-call
-@@ -2074,6 +2108,8 @@ fn command_op(
+@@ -2074,6 +2117,8 @@ fn command_op(
    op: command.StateOp,
  ) -> Result(json.Json, String) {
    case op {
@@ -1172,7 +1188,7 @@ index 900e5f999f4b3b6c62a12754c8e93d2c80a5647c..448e32807f297c0eae40225fea73b0a1
      command.ModelGet ->
        Ok(selection_json(actor.call(session, 5000, ReadSelection)))
      command.ModelSelect(model, provider, effort) ->
-@@ -2316,6 +2352,10 @@ fn discard(path: String) -> Nil
+@@ -2316,6 +2361,10 @@ fn discard(path: String) -> Nil
  fn prepare_submission(
    state: State,
  ) -> Result(#(State, runtime.Session, extension.Upstream), SubmissionError) {
@@ -1183,7 +1199,7 @@ index 900e5f999f4b3b6c62a12754c8e93d2c80a5647c..448e32807f297c0eae40225fea73b0a1
    use _ <- result.try(workspace_ready(state))
    use state <- result.try(
      session_history.ensure_history(state) |> result.map_error(Rejected),
-@@ -2641,19 +2681,26 @@ fn admit(
+@@ -2641,19 +2690,26 @@ fn admit(
    reply: Subject(Result(Bool, SubmissionError)),
  ) -> actor.Next(State, Message) {
    // Anything a client submits counts as attention.
@@ -1215,15 +1231,16 @@ index 900e5f999f4b3b6c62a12754c8e93d2c80a5647c..448e32807f297c0eae40225fea73b0a1
    }
  }
  
-@@ -3137,6 +3184,7 @@ fn finish_turn(
+@@ -3137,6 +3193,8 @@ fn finish_turn(
  /// needs no kernel: a released one does not stop it.
  fn start_background(
    state: State,
 +  revision: Int,
++  composition_generation: Int,
    request: types.Request,
    prefix: requests.Prefix,
    reply: Subject(Result(Option(types.Usage), String)),
-@@ -3148,7 +3196,19 @@ fn start_background(
+@@ -3148,7 +3206,24 @@ fn start_background(
    case turn.running(state.activity) {
      Some(_) -> refused(state, "the session is busy")
      None ->
@@ -1234,26 +1251,36 @@ index 900e5f999f4b3b6c62a12754c8e93d2c80a5647c..448e32807f297c0eae40225fea73b0a1
 +            runtime.ledger(state.host),
 +            state.info.id,
 +          ))
-+          use _ <- result.try(case current == revision {
-+            True -> Ok(Nil)
-+            False -> Error("configuration_changed")
-+          })
++          use _ <- result.try(
++            case
++              current == revision
++              && state.composition_generation == composition_generation
++            {
++              True -> Ok(Nil)
++              False -> Error("configuration_changed")
++            },
++          )
 +          session_provider.configured_client(state)
 +        }
 +      {
          Ok(#(primed, client)) ->
            session_run.start_background(
              primed,
-@@ -3338,7 +3398,7 @@ fn observe(state: State, event: extension.SessionEvent) -> Nil {
+@@ -3338,7 +3413,12 @@ fn observe(state: State, event: extension.SessionEvent) -> Nil {
      Some(kernel) ->
        runtime.observe(
          kernel,
 -        background_handle(state.info.id, state.self),
-+        background_handle(runtime.ledger(state.host), state.info.id, state.self),
++        background_handle(
++          runtime.ledger(state.host),
++          state.info.id,
++          state.self,
++          state.composition_generation,
++        ),
          event,
        )
      None -> Nil
-@@ -3347,12 +3407,25 @@ fn observe(state: State, event: extension.SessionEvent) -> Nil {
+@@ -3347,12 +3427,27 @@ fn observe(state: State, event: extension.SessionEvent) -> Nil {
  
  /// What an observer may ask of this session. It travels to the observer, so
  /// it captures the actor's subject, never the state and its transcript.
@@ -1262,6 +1289,7 @@ index 900e5f999f4b3b6c62a12754c8e93d2c80a5647c..448e32807f297c0eae40225fea73b0a1
 +  ledger: store.Store,
 +  id: String,
 +  self: Session,
++  composition_generation: Int,
 +) -> extension.Session {
 +  // Capture when the observer hears the sent/restored call, not when a later
 +  // warming timer fires. The actor rechecks it before taking ownership.
@@ -1274,6 +1302,7 @@ index 900e5f999f4b3b6c62a12754c8e93d2c80a5647c..448e32807f297c0eae40225fea73b0a1
 -        actor_call.try_call(self, 600_000, CallInBackground(request, prefix, _))
 +        actor_call.try_call(self, 600_000, CallInBackground(
 +          revision,
++          composition_generation,
 +          request,
 +          prefix,
 +          _,
@@ -1281,7 +1310,7 @@ index 900e5f999f4b3b6c62a12754c8e93d2c80a5647c..448e32807f297c0eae40225fea73b0a1
        {
          Ok(outcome) -> outcome
          Error(actor_call.TimedOut) ->
-@@ -3682,14 +3755,21 @@ fn admit_operation(
+@@ -3682,14 +3777,21 @@ fn admit_operation(
      Error(error) -> answer(state, reply, Error(error))
      Ok(Some(receipt)) -> answer(state, reply, Ok(receipt))
      Ok(None) -> {
@@ -1306,7 +1335,7 @@ index 900e5f999f4b3b6c62a12754c8e93d2c80a5647c..448e32807f297c0eae40225fea73b0a1
            case
              turn.admit(turn.Resting, submission, list.length(state.steering))
            {
-@@ -3707,13 +3787,13 @@ fn admit_operation(
+@@ -3707,13 +3809,13 @@ fn admit_operation(
                ))
            }
          }
@@ -1392,6 +1421,24 @@ index f5fec7b5310ac578b7ae48b5b84b134262f8a655..76173baad7bb110fb083c7cb2d9279d0
 +      protect.guarded(fn() { run(runtime.ledger(state.host), state.info.id) })
 +  }
 +}
+diff --git a/src/albedo/daemon/session_extensions.gleam b/src/albedo/daemon/session_extensions.gleam
+index f3d5a265b18b59e374e56b6a8062c50c37b4516f..c6816f20afe51107e83a089b3196b2b4dffe502b 100644
+--- a/src/albedo/daemon/session_extensions.gleam
++++ b/src/albedo/daemon/session_extensions.gleam
+@@ -50,6 +50,13 @@ fn apply(
+   case turn.running(state.activity) != None || state.booting != None {
+     True -> #(state, Error("session must be idle to reload"))
+     False -> {
++      // A killed observer may already have queued a saved request behind this
++      // reload. Invalidate its handle even if replacement subsequently fails.
++      let state =
++        session_state.State(
++          ..state,
++          composition_generation: state.composition_generation + 1,
++        )
+       let previous = runtime.peek_prompt(state.host, state.info.id)
+       let previous_tools = option.map(state.kernel, runtime.tools)
+       case run() {
 diff --git a/src/albedo/daemon/session_requirements.gleam b/src/albedo/daemon/session_requirements.gleam
 new file mode 100644
 index 0000000000000000000000000000000000000000..8c87bc5f37b4135d4301c6e4e71e336aef10ce5c
@@ -1586,6 +1633,19 @@ index 544558acfc702374e673b80cda9cb2ba3a113581..f9f4876189b9d750cca58263112301b9
      )
    let pid =
      process.spawn_unlinked(fn() {
+diff --git a/src/albedo/daemon/session_state.gleam b/src/albedo/daemon/session_state.gleam
+index 8932af9b48acbb0b6daba48c629c43f29c8daa50..87a32f31dfb16a6cc870781e74634893661feb86 100644
+--- a/src/albedo/daemon/session_state.gleam
++++ b/src/albedo/daemon/session_state.gleam
+@@ -60,6 +60,8 @@ pub type State(message) {
+     booting: Option(#(Int, List(message))),
+     blocked_until: Int,
+     generation: String,
++    /// Invalidates saved background handles when composition reload is attempted.
++    composition_generation: Int,
+     tool_progress: tool_progress.Projection,
+     progress_timer_token: Int,
+     progress_timer: Option(process.Timer),
 diff --git a/src/albedo/harness/command.gleam b/src/albedo/harness/command.gleam
 index 945d92cbf20c8cb3f0f6c39adcde48f9d437c51f..6b7f55bca8a51fce91071c5c73af7d28dfd5e4dd 100644
 --- a/src/albedo/harness/command.gleam
@@ -4524,10 +4584,10 @@ index 7c6bc2d50e9ab0e6d80869b0ad9a973ec752512a..ac5c587b23a260856d8d87d598e259e5
      runtime.open_session(host, "broken-extension-test", "/tmp")
 diff --git a/test/harness/idle_service_test.gleam b/test/harness/idle_service_test.gleam
 new file mode 100644
-index 0000000000000000000000000000000000000000..c0a1e6d3f480cce831540c00e50363c65ce8cba6
+index 0000000000000000000000000000000000000000..b2646e6238c9720228b05401bfd7cd8152c12bf1
 --- /dev/null
 +++ b/test/harness/idle_service_test.gleam
-@@ -0,0 +1,153 @@
+@@ -0,0 +1,154 @@
 +import albedo/daemon/active_output
 +import albedo/daemon/conversation
 +import albedo/daemon/event_buffer
@@ -4584,6 +4644,7 @@ index 0000000000000000000000000000000000000000..c0a1e6d3f480cce831540c00e50363c6
 +    booting: None,
 +    blocked_until: 0,
 +    generation: "generation",
++    composition_generation: 0,
 +    tool_progress: tool_progress.new(),
 +    progress_timer_token: 0,
 +    progress_timer: None,
